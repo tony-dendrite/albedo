@@ -1,0 +1,1431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, must-revalidate">
+<meta name="build" content="__BUILD_ID__">
+<title>ALBEDO</title>
+<link rel="icon" type="image/svg+xml" href="./favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --color-bg: #1c1c1c;
+  --color-bg-deep: #181818;
+  --color-surface: #1f1f1f;
+  --color-border: rgba(255, 255, 255, 0.06);
+  --color-border-subtle: rgba(255, 255, 255, 0.04);
+  --color-border-hover: rgba(255, 255, 255, 0.10);
+  --color-fg: #e5e5e5;
+  --color-fg-2: #a1a1a1;
+  --color-fg-3: rgba(229, 229, 229, 0.45);
+  --color-fg-4: rgba(229, 229, 229, 0.25);
+  --color-ok: #44ff9a;
+  --color-bad: #ff4747;
+  --color-activity: #ff9b4e;
+  --color-warn: #f5e663;
+  --color-accent: #5ac8fa;
+  --color-gold: #f3c449;
+  --evo-cream: #c6bda8;
+  --evo-label: #c3cfd7;
+  --evo-grid: #5d666b;
+  --evo-bar-h: 232px;
+
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { background: var(--color-bg); color: var(--color-fg); }
+body {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  min-height: 100vh;
+}
+a, a:visited { color: var(--color-fg); text-decoration: none; }
+a:hover { color: var(--color-fg); }
+button { background: transparent; color: inherit; border: 0; font: inherit; cursor: pointer; }
+.mono { font-family: var(--font-mono); }
+
+/* ---------- top header ---------- */
+.top-header {
+  position: sticky; top: 0; z-index: 30;
+  background: var(--color-bg);
+  border-bottom: 1px solid var(--color-border);
+}
+.top-header .row {
+  max-width: 1680px; margin: 0 auto; height: 48px; padding: 0 20px;
+  display: flex; align-items: center; gap: 24px;
+}
+.top-header .brand {
+  display: flex; align-items: center; gap: 8px;
+  font-weight: 600; font-size: 13px; letter-spacing: -0.01em;
+}
+.top-header .brand .sub {
+  font-family: var(--font-mono); font-size: 13px; color: var(--color-fg-3);
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+.top-header .links { margin-left: auto; display: flex; align-items: center; gap: 4px; }
+.top-header .links a {
+  width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 4px; color: var(--color-fg-3);
+  transition: color 0.15s, background 0.15s;
+}
+.top-header .links a:hover { color: var(--color-fg); background: rgba(255,255,255,0.04); }
+
+/* ---------- main layout ---------- */
+main {
+  max-width: 1680px; margin: 0 auto; padding: 32px 20px 80px;
+  display: flex; flex-direction: column; gap: 56px;
+}
+
+/* ---------- hero ---------- */
+.hero {
+  margin: 0 -20px; padding: 48px 20px 56px;
+  border-bottom: 1px solid var(--color-border);
+  text-align: center;
+}
+.hero-king {
+  font-size: 15px; font-weight: 700; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--color-gold);
+  margin-bottom: 16px;
+}
+.hero-llms {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--color-fg-2);
+  transition: color 0.15s;
+}
+.hero-llms:hover { color: var(--color-fg); }
+.hero-llms:disabled { opacity: 0.5; cursor: wait; }
+.hero-llms svg { flex-shrink: 0; opacity: 0.85; }
+.hero-llms.copied { color: var(--color-ok); }
+
+/* ---------- section ---------- */
+.section { scroll-margin-top: 64px; }
+.section .head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 16px; margin-bottom: 20px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--color-fg);
+}
+.section .head .label {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 12px; font-weight: 500;
+  text-transform: uppercase; letter-spacing: 0.2em;
+  color: var(--color-fg);
+}
+.section .head .label svg { color: var(--color-fg-2); transform: rotate(90deg); }
+.section .head .meta {
+  font-family: var(--font-mono); font-size: 10px;
+  color: var(--color-fg-3); letter-spacing: 0.12em; text-transform: uppercase;
+}
+
+/* ---------- evolution (affine.io SVG bar style via CSS layers) ---------- */
+.evo-panel { display: flex; flex-direction: column; gap: 16px; }
+.evo-swipe-hint {
+  display: none;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--color-fg-4);
+  margin-bottom: 8px;
+  padding: 0 4px;
+}
+.evo-scroll {
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  padding-bottom: 6px;
+}
+.evo-scroll::-webkit-scrollbar { height: 4px; }
+.evo-scroll::-webkit-scrollbar-thumb { background: var(--color-border-hover); }
+
+.evo-chart {
+  display: flex;
+  align-items: flex-end;
+  min-width: min-content;
+  padding: 8px 12px 4px;
+}
+
+.evo-king {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0 40px 12px;
+  min-width: 172px;
+}
+.evo-king.dim { opacity: 0.38; }
+
+.evo-towers {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 20px;
+  margin-bottom: 12px;
+}
+
+.evo-tower {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 44px;
+  flex-shrink: 0;
+  padding-top: 40px;
+}
+.evo-tower.hidden { display: none; }
+
+.evo-tower-metrics {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  width: max-content;
+  min-width: 44px;
+  text-align: center;
+  white-space: nowrap;
+  z-index: 1;
+}
+.evo-tower-val {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--evo-label);
+  letter-spacing: 0.02em;
+  line-height: 1.3;
+}
+.evo-tower-delta {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--evo-cream);
+  line-height: 1.3;
+}
+.evo-tower-delta.na { color: var(--evo-cream); }
+.evo-king.is-current .evo-tower-val { color: var(--color-gold); }
+.evo-king.is-current .evo-tower-delta.beat { color: var(--color-gold); }
+
+/* bar stack: striped baseline (prev king) + hollow outline (total) + solid gain (beat delta) */
+.evo-bar {
+  position: relative;
+  width: 30px;
+  height: var(--evo-bar-h);
+}
+.evo-bar-baseline {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 30px;
+  height: var(--prev-h, 0px);
+  box-sizing: border-box;
+  border: 0.8px solid var(--evo-cream);
+  background: url(#evo-baseline-stripes);
+  background-color: rgba(198, 189, 168, 0.14);
+}
+.evo-bar.is-seed .evo-bar-baseline {
+  height: var(--curr-h, 0px);
+}
+.evo-bar-outline {
+  position: absolute;
+  left: 0.75px;
+  bottom: 0;
+  width: 28.5px;
+  height: var(--curr-h, 0px);
+  box-sizing: border-box;
+  border: 1px solid var(--evo-cream);
+  background: transparent;
+  pointer-events: none;
+}
+.evo-bar-gain {
+  position: absolute;
+  left: 0;
+  bottom: var(--prev-h, 0px);
+  width: 30px;
+  height: var(--gain-h, 0px);
+  background: var(--evo-cream);
+  opacity: 0.94;
+  transition: height 0.35s ease, bottom 0.35s ease;
+}
+.evo-bar-cap {
+  position: absolute;
+  left: 0;
+  bottom: calc(var(--curr-h, 0px) - 6px);
+  width: 30px;
+  height: 6px;
+  background: var(--evo-cream);
+  opacity: 0.94;
+}
+.evo-bar.no-gain .evo-bar-gain,
+.evo-bar.no-gain .evo-bar-cap { display: none; }
+.evo-bar.missing .evo-bar-baseline {
+  height: 100%;
+  border-style: dashed;
+  border-color: rgba(198, 189, 168, 0.28);
+  opacity: 0.35;
+}
+.evo-bar.missing .evo-bar-outline,
+.evo-bar.missing .evo-bar-gain,
+.evo-bar.missing .evo-bar-cap { display: none; }
+
+.evo-king.is-current .evo-bar-baseline { border-color: var(--color-gold); }
+.evo-king.is-current .evo-bar-outline { border-color: var(--color-gold); }
+.evo-king.is-current .evo-bar-gain,
+.evo-king.is-current .evo-bar-cap {
+  background: var(--color-gold);
+  filter: drop-shadow(0 0 6px rgba(243, 196, 73, 0.45));
+}
+.evo-tower.live .evo-bar-gain,
+.evo-tower.live .evo-bar-cap {
+  background: var(--color-gold);
+  filter: drop-shadow(0 0 6px rgba(243, 196, 73, 0.45));
+}
+
+.evo-tower-letter {
+  margin-top: 10px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 500;
+  color: var(--evo-label);
+  letter-spacing: 0.06em;
+}
+.evo-king.is-current .evo-tower-letter { color: rgba(243, 196, 73, 0.75); }
+
+.evo-king-name {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--evo-label);
+  white-space: nowrap;
+}
+.evo-king.is-current .evo-king-name {
+  color: var(--color-gold);
+  filter: drop-shadow(0 0 8px rgba(243, 196, 73, 0.35));
+}
+.evo-king-date {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--evo-grid);
+  margin-top: 3px;
+  letter-spacing: 0.04em;
+}
+.evo-king.is-current .evo-king-date { color: var(--evo-grid); }
+
+.evo-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding-top: 2px;
+}
+.evo-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-fg-3);
+  border: 1px solid var(--color-border);
+  border-radius: 2px;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.evo-filter:hover {
+  color: var(--color-fg-2);
+  background: rgba(255, 255, 255, 0.03);
+}
+.evo-filter.active {
+  color: var(--color-fg);
+  border-color: var(--color-fg-3);
+  background: rgba(255, 255, 255, 0.06);
+}
+.evo-filter-key {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--evo-cream);
+}
+.evo-filter.active .evo-filter-key { color: var(--color-fg); }
+
+/* ---------- pill ---------- */
+.pill {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 6px 14px; min-width: 64px;
+  font-family: var(--font-mono); font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.12em;
+  border: 1px solid var(--color-border-hover);
+  border-radius: 2px;
+  color: var(--color-fg-3);
+}
+.pill.win, .pill.accepted   { color: var(--color-ok);  border-color: var(--color-ok); }
+.pill.lose, .pill.rejected  { color: var(--color-bad); border-color: var(--color-bad); }
+.pill.tie                    { color: var(--color-fg-2); }
+.pill.live                   { color: var(--color-activity); border-color: var(--color-activity); }
+.pill.error                  { color: var(--color-warn);  border-color: var(--color-warn); }
+
+/* ---------- queue / history tables (affine.io) ---------- */
+.data-table-wrap {
+  max-height: 420px;
+  overflow: auto;
+  scrollbar-width: thin;
+}
+.data-table-wrap::-webkit-scrollbar { width: 4px; height: 4px; }
+.data-table-wrap::-webkit-scrollbar-thumb { background: var(--color-border-hover); }
+
+table.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+table.data-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--color-bg);
+}
+table.data-table th {
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-fg-3);
+  text-align: left;
+  padding: 8px 12px 8px 4px;
+  border-bottom: 1px solid var(--color-border);
+  white-space: nowrap;
+}
+table.data-table th.r, table.data-table td.r { text-align: right; }
+table.data-table th.center, table.data-table td.center { text-align: center; }
+table.data-table tbody tr {
+  border-bottom: 1px solid var(--color-border-subtle);
+  transition: background 0.15s;
+}
+table.data-table tbody tr:hover { background: rgba(90, 200, 250, 0.1); }
+table.data-table td {
+  padding: 8px 12px;
+  vertical-align: middle;
+  color: var(--color-fg-2);
+}
+table.data-table td.pl { padding-left: 4px; }
+table.data-table td.uid a {
+  color: var(--color-fg-2);
+  transition: color 0.15s;
+}
+table.data-table td.uid a:hover { color: var(--color-fg); }
+table.data-table td.model a {
+  display: block;
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-fg);
+  transition: color 0.15s;
+}
+table.data-table td.model a:hover { color: var(--color-accent); }
+table.data-table td.when { color: var(--color-fg-3); white-space: nowrap; }
+table.data-table td.when .rel { color: var(--color-fg-2); }
+table.data-table td.when .sep { color: var(--color-fg-4); }
+
+.queue-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 88px;
+  height: 18px;
+  border-radius: 2px;
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  line-height: 1;
+}
+.queue-status.queued {
+  border: 1px solid var(--color-border);
+  color: var(--color-fg-2);
+}
+.queue-status.challenging {
+  border: 1px dashed rgba(90, 200, 250, 0.45);
+  color: rgba(90, 200, 250, 0.7);
+}
+
+table.data-table.queue-table {
+  table-layout: fixed;
+}
+table.data-table.queue-table th.status,
+table.data-table.queue-table td.status {
+  width: 110px;
+  padding: 8px 12px 8px 4px;
+  vertical-align: middle;
+}
+table.data-table.queue-table th.uid,
+table.data-table.queue-table td.uid {
+  width: 56px;
+  padding: 8px 12px;
+  vertical-align: middle;
+}
+table.data-table.queue-table th.model,
+table.data-table.queue-table td.model {
+  width: auto;
+  padding: 8px 12px;
+  vertical-align: middle;
+}
+table.data-table.queue-table th.when,
+table.data-table.queue-table td.when {
+  width: 168px;
+  padding: 8px 4px 8px 12px;
+  vertical-align: middle;
+  text-align: right;
+}
+table.data-table.queue-table col.col-status { width: 110px; }
+table.data-table.queue-table col.col-uid { width: 56px; }
+table.data-table.queue-table col.col-when { width: 168px; }
+
+.verdict-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 88px;
+  height: 18px;
+  border-radius: 2px;
+  border: 1px solid;
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  line-height: 1;
+}
+.verdict-badge.won {
+  background: rgba(68, 255, 154, 0.07);
+  border-color: rgba(68, 255, 154, 0.3);
+  color: rgba(68, 255, 154, 0.85);
+}
+.verdict-badge.crowned {
+  background: rgba(243, 196, 73, 0.08);
+  border-color: rgba(243, 196, 73, 0.35);
+  color: rgba(243, 196, 73, 0.9);
+}
+.verdict-badge.lost {
+  background: rgba(255, 71, 71, 0.07);
+  border-color: rgba(255, 71, 71, 0.3);
+  color: rgba(255, 71, 71, 0.85);
+}
+.verdict-badge.error {
+  background: rgba(245, 230, 99, 0.07);
+  border-color: rgba(245, 230, 99, 0.3);
+  color: rgba(245, 230, 99, 0.85);
+}
+
+.champion-link {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 500;
+  color: var(--color-gold);
+  transition: filter 0.15s;
+}
+.champion-link:hover { filter: brightness(1.15); }
+
+.judge-scores { color: var(--color-fg); white-space: nowrap; }
+.judge-scores .sep { color: var(--color-fg-4); }
+.judge-scores .king-score { color: var(--color-gold); }
+.muted-dash { color: var(--color-fg-4); }
+
+table.data-table td.dl { text-align: right; padding-right: 4px; }
+.data-dl {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 2px;
+  color: var(--color-fg-3);
+  transition: color 0.15s, background 0.15s;
+}
+.data-dl:hover:not(:disabled) {
+  color: var(--color-gold);
+  background: rgba(243, 196, 73, 0.08);
+}
+.data-dl:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ---------- releases (affine.io champion chain table) ---------- */
+.releases-wrap {
+  max-height: 360px;
+  overflow: auto;
+  scrollbar-width: thin;
+}
+.releases-wrap::-webkit-scrollbar { width: 4px; height: 4px; }
+.releases-wrap::-webkit-scrollbar-thumb { background: var(--color-border-hover); }
+
+table.releases {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+table.releases thead {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--color-bg);
+}
+table.releases th {
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-fg-3);
+  text-align: left;
+  padding: 8px 12px 8px 4px;
+  border-bottom: 1px solid var(--color-border);
+  white-space: nowrap;
+}
+table.releases th.r { text-align: right; }
+table.releases th.col-dl { width: 32px; padding-right: 4px; }
+table.releases tbody tr {
+  border-bottom: 1px solid var(--color-border-subtle);
+  transition: background 0.15s;
+}
+table.releases tbody tr:hover { background: rgba(255, 255, 255, 0.02); }
+table.releases tbody tr.dim { opacity: 0.45; }
+table.releases td {
+  padding: 8px 12px;
+  vertical-align: middle;
+  color: var(--color-fg-2);
+}
+table.releases td.era { padding-left: 4px; white-space: nowrap; }
+table.releases td.era .current { color: var(--color-gold); font-weight: 600; }
+table.releases td.era .past { color: var(--color-fg-2); }
+table.releases td.uid a {
+  color: var(--color-fg-2);
+  transition: color 0.15s;
+}
+table.releases td.uid a:hover { color: var(--color-fg); }
+table.releases td.model { max-width: 0; width: 42%; }
+table.releases td.model .model-cell {
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+table.releases td.model a {
+  color: var(--color-fg);
+  transition: color 0.15s;
+}
+table.releases td.model a:hover { color: var(--color-gold); }
+table.releases td.date { text-align: right; color: var(--color-fg-3); }
+table.releases td.alpha { text-align: right; }
+table.releases td.alpha.earning { color: var(--color-gold); }
+table.releases td.dl { text-align: right; padding-right: 4px; }
+.releases-dl {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 2px;
+  color: var(--color-fg-3);
+  transition: color 0.15s, background 0.15s;
+}
+.releases-dl:hover:not(:disabled) {
+  color: var(--color-gold);
+  background: rgba(243, 196, 73, 0.08);
+}
+.releases-dl:disabled {
+  opacity: 0.25;
+  cursor: default;
+}
+
+.empty { font-size: 12px; color: var(--color-fg-3); padding: 20px 0; text-align: center; }
+
+@media (max-width: 760px) {
+  main { padding: 16px 12px 60px; gap: 32px; }
+  .hero { padding: 16px 12px 22px; }
+  .evo-swipe-hint { display: block; }
+  .evo-king { min-width: 140px; padding: 0 20px; }
+  .evo-towers { gap: 12px; }
+  .evo-tower { width: 40px; padding-top: 36px; }
+  table.data-table td.model a { max-width: 200px; }
+  table.releases td.model .model-cell { max-width: 200px; }
+}
+</style>
+</head>
+<body>
+
+<header class="top-header">
+  <div class="row">
+    <a class="brand" href="/">
+      <img class="brand-logo" src="./favicon.svg" width="18" height="18" alt="" aria-hidden="true">
+      <span>Albedo</span>
+    </a>
+    <div class="links">
+      <a href="https://github.com/albedo/albedo" target="_blank" rel="noopener" aria-label="GitHub" title="GitHub">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.4 7.86 10.93.58.1.79-.25.79-.55v-1.96c-3.2.7-3.88-1.54-3.88-1.54-.52-1.32-1.27-1.68-1.27-1.68-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.03 1.76 2.7 1.25 3.36.96.1-.74.4-1.25.73-1.54-2.55-.29-5.24-1.27-5.24-5.66 0-1.25.45-2.28 1.18-3.08-.12-.29-.51-1.46.11-3.04 0 0 .97-.31 3.18 1.18.92-.26 1.91-.39 2.89-.4.98.01 1.97.14 2.89.4 2.2-1.49 3.17-1.18 3.17-1.18.63 1.58.24 2.75.12 3.04.74.8 1.18 1.83 1.18 3.08 0 4.4-2.7 5.36-5.27 5.65.41.36.78 1.06.78 2.13v3.16c0 .31.21.66.79.55C20.21 21.4 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z"/></svg>
+      </a>
+    </div>
+  </div>
+</header>
+
+<main>
+
+<section class="hero">
+  <h1 class="hero-king" id="hero-king">ALBEDO</h1>
+  <button type="button" class="hero-llms" id="hero-llms-btn" aria-label="Copy llms.txt to clipboard">
+    <span class="hero-llms-label">llms.txt</span>
+    <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+      <rect x="3" y="3" width="7" height="7" rx="1" stroke="currentColor" stroke-width="1.3"/>
+      <path d="M3 8H2.5C2.224 8 2 7.776 2 7.5V2.5C2 2.224 2.224 2 2.5 2H7.5C7.776 2 8 2.224 8 2.5V3" stroke="currentColor" stroke-width="1.3"/>
+    </svg>
+  </button>
+</section>
+
+<section class="section" id="evolution">
+  <div class="head">
+    <span class="label">
+      <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M4.5 2.5L9 7L4.5 11.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      evolution
+    </span>
+  </div>
+  <div class="evo-panel">
+    <div class="evo-swipe-hint">← swipe to see older eras</div>
+    <svg aria-hidden="true" width="0" height="0" style="position:absolute">
+      <defs>
+        <pattern id="evo-baseline-stripes" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+          <rect width="6" height="6" fill="#C6BDA8" opacity="0.14"/>
+          <line x1="0" y1="0" x2="0" y2="6" stroke="#C6BDA8" stroke-width="2.2" opacity="0.85"/>
+        </pattern>
+      </defs>
+    </svg>
+    <div class="evo-scroll" id="evolution-scroll">
+      <div class="empty">no kings yet.</div>
+    </div>
+    <div class="evo-filters" id="evolution-filters" hidden></div>
+  </div>
+</section>
+
+<section class="section" id="releases">
+  <div class="head">
+    <span class="label">
+      <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M4.5 2.5L9 7L4.5 11.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      releases
+    </span>
+  </div>
+  <div class="releases-wrap" id="releases-wrap">
+    <div class="empty">no releases yet.</div>
+  </div>
+</section>
+
+<section class="section" id="queue">
+  <div class="head">
+    <span class="label">
+      <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M4.5 2.5L9 7L4.5 11.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      queue
+    </span>
+    <span class="meta" id="queue-meta">0 pending</span>
+  </div>
+  <div class="data-table-wrap" id="queue-wrap">
+    <div class="empty">empty.</div>
+  </div>
+</section>
+
+<section class="section" id="history">
+  <div class="head">
+    <span class="label">
+      <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M4.5 2.5L9 7L4.5 11.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      history
+    </span>
+    <span class="meta" id="history-meta"></span>
+  </div>
+  <div class="data-table-wrap" id="history-wrap">
+    <div class="empty">no completed duels yet.</div>
+  </div>
+</section>
+
+</main>
+
+<script>
+const POLL_MS = 4000;
+const BUILD_ID = document.querySelector('meta[name="build"]').content;
+
+const DATA_ENDPOINTS = [
+  "dashboard.json",
+  "https://us-east-1.hippius.com/albedo/dashboard.json",
+  "https://eu-central-1.hippius.com/albedo/dashboard.json",
+  "https://s3.hippius.com/albedo/dashboard.json",
+];
+const HTML_ENDPOINTS = [
+  "https://us-east-1.hippius.com/albedo/index.html",
+  "https://eu-central-1.hippius.com/albedo/index.html",
+  "https://s3.hippius.com/albedo/index.html",
+];
+
+const ENDPOINT_CACHE_KEY = "albedo.endpoint.v1";
+let DATA_URL = null;
+
+function loadCachedEndpoint() {
+  try {
+    const raw = localStorage.getItem(ENDPOINT_CACHE_KEY);
+    if (!raw) return null;
+    const o = JSON.parse(raw);
+    if (Date.now() - o.ts > 3600 * 1000) return null;
+    return o.url;
+  } catch { return null; }
+}
+function saveCachedEndpoint(url) {
+  try { localStorage.setItem(ENDPOINT_CACHE_KEY, JSON.stringify({ url, ts: Date.now() })); } catch {}
+}
+
+async function raceEndpoints(buster) {
+  const ctrls = DATA_ENDPOINTS.map(() => new AbortController());
+  let failures = 0;
+  return new Promise((resolve, reject) => {
+    DATA_ENDPOINTS.forEach((url, i) => {
+      fetch(url + "?t=" + buster, { signal: ctrls[i].signal })
+        .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json().then(d => ({ url, data: d, idx: i })); })
+        .then(win => { for (let j = 0; j < ctrls.length; j++) if (j !== win.idx) ctrls[j].abort(); resolve(win); })
+        .catch(() => { failures++; if (failures === DATA_ENDPOINTS.length) reject(); });
+    });
+  });
+}
+
+const fmt = (n, d = 3) => n == null ? "—" : Number(n).toFixed(d);
+const fmtSigned = (n, d = 3) => n == null ? "—" : (n >= 0 ? "+" : "") + Number(n).toFixed(d);
+const shortHotkey = hk => !hk ? "—" : hk.slice(0, 6) + "…" + hk.slice(-4);
+const shortDigest = d => {
+  if (!d) return "—";
+  if (d.startsWith("sha256:")) return "sha256:" + d.slice(7, 19) + "…";
+  if (d.startsWith("hf:"))     return "hf:"     + d.slice(3, 15) + "…";
+  return d.slice(0, 19) + "…";
+};
+const fmtTime = iso => {
+  if (!iso) return "—";
+  try { return new Date(iso).toISOString().slice(0, 16).replace("T", " ") + "Z"; }
+  catch { return iso; }
+};
+function setText(id, text) { const el = document.getElementById(id); if (el) el.textContent = text; }
+
+function toRoman(n) {
+  const vals = [1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1];
+  const syms = ["M", "CM", "D", "CD", "C", "XC", "L", "XL", "X", "IX", "V", "IV", "I"];
+  let out = "";
+  for (let i = 0; i < vals.length; i++) {
+    while (n >= vals[i]) { out += syms[i]; n -= vals[i]; }
+  }
+  return out;
+}
+
+function kingRoman(reignNumber) {
+  if (reignNumber == null) return null;
+  return toRoman(Number(reignNumber) + 1);
+}
+
+function kingTitleName(reignNumber) {
+  const roman = kingRoman(reignNumber);
+  return roman ? `ALBEDO-${roman}` : "ALBEDO";
+}
+
+function challengerModelName(hotkey) {
+  if (!hotkey) return "—";
+  return `ALBEDO-${hotkey.slice(0, 5).toUpperCase()}`;
+}
+
+function judgeShortName(model) {
+  if (!model) return "—";
+  const parts = model.split("/");
+  let name = parts[parts.length - 1];
+  if (name.length > 18) name = name.slice(0, 16) + "…";
+  return name;
+}
+
+const JUDGE_META = {
+  "deepseek-ai/DeepSeek-V3.2-TEE": { letter: "D", label: "DEEPSEEK" },
+  "Qwen/Qwen3-235B-A22B-Thinking-2507": { letter: "Q", label: "QWEN" },
+  "moonshotai/Kimi-K2.6-TEE": { letter: "K", label: "KIMI" },
+};
+
+function judgeMeta(model) {
+  if (JUDGE_META[model]) return JUDGE_META[model];
+  const short = judgeShortName(model);
+  return { letter: short.charAt(0).toUpperCase(), label: short.toUpperCase().slice(0, 12) };
+}
+
+let evoJudgeFilter = "all";
+let evoRenderCtx = null;
+
+function kingBarScores(entry, index, chain, currentEval) {
+  if (index === 0 && currentEval?.judges?.length) {
+    return currentEval.judges.map(j => ({
+      model: j.model,
+      score: j.king_mean,
+      n: j.n,
+      live: true,
+    }));
+  }
+  if (entry.judges?.length) {
+    return entry.judges.map(j => ({
+      model: j.model,
+      score: j.king_mean,
+      n: j.n,
+      live: false,
+    }));
+  }
+  const models = chain?.judge_models || [];
+  return models.map(m => ({ model: m, score: null, n: 0, live: false }));
+}
+
+function renderHero(d) {
+  const king = d.king || {};
+  setText("hero-king", kingTitleName(king.reign_number));
+}
+
+function fmtScore3(score) {
+  if (score == null) return "—";
+  return Number(score).toFixed(3);
+}
+
+const EVO_SCALE_MAX = 0.7;
+
+function evoBarPx(score) {
+  if (score == null) return 0;
+  const root = getComputedStyle(document.documentElement);
+  const barH = parseFloat(root.getPropertyValue("--evo-bar-h")) || 232;
+  return Math.min(barH, Math.max(0, (Number(score) / EVO_SCALE_MAX) * barH));
+}
+
+function fmtBeatDelta(score, prev) {
+  if (score == null || prev == null || prev <= 0) return null;
+  const gain = Number(score) - Number(prev);
+  if (gain <= 0) return null;
+  return `+${((gain / Number(prev)) * 100).toFixed(1)}%`;
+}
+
+function kingDateShort(iso) {
+  if (!iso) return "—";
+  try {
+    const d = new Date(iso);
+    const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+    const dd = String(d.getUTCDate()).padStart(2, "0");
+    return `${mm}/${dd}`;
+  } catch { return "—"; }
+}
+
+function fmtRelative(iso) {
+  if (!iso) return "—";
+  try {
+    const ms = Date.now() - new Date(iso).getTime();
+    if (ms < 0) return "just now";
+    const s = Math.floor(ms / 1000);
+    if (s < 60) return `${s}s ago`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m ago`;
+    const h = Math.floor(m / 60);
+    if (h < 48) return `${h}h ago`;
+    const d = Math.floor(h / 24);
+    return `${d}d ago`;
+  } catch { return "—"; }
+}
+
+function fmtWhenCell(iso) {
+  if (!iso) return "—";
+  try {
+    const d = new Date(iso);
+    const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+    const dd = String(d.getUTCDate()).padStart(2, "0");
+    const hh = String(d.getUTCHours()).padStart(2, "0");
+    const mi = String(d.getUTCMinutes()).padStart(2, "0");
+    return `<span class="rel">${fmtRelative(iso)}</span><span class="sep"> · </span><span class="dt">${mm}/${dd} ${hh}:${mi}</span>`;
+  } catch { return fmtRelative(iso); }
+}
+
+const DL_ICON = `<svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+  <path d="M6 1.5v8M2.5 6L6 9.5 9.5 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M2 11h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+</svg>`;
+
+function dlButton(url) {
+  if (!url) {
+    return `<button type="button" class="data-dl" disabled aria-label="download rollouts">${DL_ICON}</button>`;
+  }
+  return `<a class="data-dl" href="${url}" target="_blank" rel="noopener" aria-label="download rollouts">${DL_ICON}</a>`;
+}
+
+function verdictBadge(h) {
+  if (h.error_code) {
+    return `<span class="verdict-badge error">error</span>`;
+  }
+  if (h.accepted) {
+    return `<span class="verdict-badge crowned">crowned</span>`;
+  }
+  return `<span class="verdict-badge lost">lost</span>`;
+}
+
+function judgeScoreCell(j) {
+  if (!j || j.chal_mean == null || j.king_mean == null) {
+    return `<span class="muted-dash">—</span>`;
+  }
+  const chal = (Number(j.chal_mean) * 100).toFixed(2);
+  const king = (Number(j.king_mean) * 100).toFixed(2);
+  return `<span class="judge-scores">${chal}<span class="sep"> / </span><span class="king-score">${king}</span></span>`;
+}
+
+function judgeByLetter(judges) {
+  const map = {};
+  (judges || []).forEach(j => {
+    const letter = judgeMeta(j.model).letter;
+    map[letter] = j;
+  });
+  return map;
+}
+
+function evoBarLayers(score, prevScore) {
+  const currPx = evoBarPx(score);
+  const prevPx = prevScore == null ? 0 : evoBarPx(prevScore);
+  const gainPx = prevScore == null ? 0 : Math.max(0, currPx - prevPx);
+  const beat = gainPx > 0.5;
+  const seed = prevScore == null;
+  return { currPx, prevPx, gainPx, beat, seed };
+}
+
+function judgeColumns(kc, chain, currentEval) {
+  const models = [];
+  const seen = new Set();
+  const add = m => {
+    if (m && !seen.has(m)) { seen.add(m); models.push(m); }
+  };
+  (chain?.judge_models || []).forEach(add);
+  if (currentEval?.judges) currentEval.judges.forEach(j => add(j.model));
+  kc.forEach((e, i) => kingBarScores(e, i, chain, currentEval).forEach(s => add(s.model)));
+  return models;
+}
+
+function renderEvolutionTower(s, prevScore, filter) {
+  const meta = judgeMeta(s.model);
+  const hidden = filter !== "all" && filter !== s.model ? " hidden" : "";
+  const liveCls = s.live ? " live" : "";
+  if (s.score == null) {
+    return `<div class="evo-tower${hidden}" data-judge="${s.model}" title="${s.model}">
+      <div class="evo-tower-metrics"><span class="evo-tower-val">—</span></div>
+      <div class="evo-bar missing"><div class="evo-bar-baseline"></div></div>
+      <span class="evo-tower-letter">${meta.letter}</span>
+    </div>`;
+  }
+  const { currPx, prevPx, gainPx, beat, seed } = evoBarLayers(s.score, prevScore);
+  const delta = seed ? null : fmtBeatDelta(s.score, prevScore);
+  const deltaHtml = seed
+    ? `<span class="evo-tower-delta na">—</span>`
+    : (beat ? `<span class="evo-tower-delta beat">${delta}</span>` : "");
+  const barCls = [
+    "evo-bar",
+    seed ? "is-seed" : "",
+    beat ? "" : "no-gain",
+  ].filter(Boolean).join(" ");
+  const tip = s.model + (s.n ? ` · n=${s.n}` : "") +
+    (beat && delta ? ` · beat prev by ${delta}` : "");
+  const style = `--curr-h:${currPx}px;--prev-h:${prevPx}px;--gain-h:${gainPx}px`;
+  return `<div class="evo-tower${hidden}${liveCls}" data-judge="${s.model}" title="${tip}">
+    <div class="evo-tower-metrics">
+      <span class="evo-tower-val">${fmtScore3(s.score)}</span>
+      ${deltaHtml}
+    </div>
+    <div class="${barCls}" style="${style}">
+      <div class="evo-bar-baseline"></div>
+      <div class="evo-bar-outline"></div>
+      <div class="evo-bar-gain"></div>
+      <div class="evo-bar-cap"></div>
+    </div>
+    <span class="evo-tower-letter">${meta.letter}</span>
+  </div>`;
+}
+
+function renderEvolutionFilters(judges) {
+  const filters = document.getElementById("evolution-filters");
+  if (!judges.length) { filters.hidden = true; return; }
+  filters.hidden = false;
+  const allActive = evoJudgeFilter === "all" ? " active" : "";
+  const btns = [`<button type="button" class="evo-filter${allActive}" data-filter="all">all</button>`];
+  judges.forEach(m => {
+    const meta = judgeMeta(m);
+    const active = evoJudgeFilter === m ? " active" : "";
+    btns.push(`<button type="button" class="evo-filter${active}" data-filter="${m}" title="${m}">
+      <span class="evo-filter-key">${meta.letter}</span>${meta.label}
+    </button>`);
+  });
+  filters.innerHTML = btns.join("");
+  filters.querySelectorAll(".evo-filter").forEach(btn => {
+    btn.onclick = () => {
+      evoJudgeFilter = btn.dataset.filter;
+      if (evoRenderCtx) renderEvolution(evoRenderCtx.kc, evoRenderCtx.chain, evoRenderCtx.currentEval);
+    };
+  });
+}
+
+function renderEvolution(kc, chain, currentEval) {
+  evoRenderCtx = { kc, chain, currentEval };
+  const scroll = document.getElementById("evolution-scroll");
+  if (!kc || kc.length === 0) {
+    scroll.innerHTML = '<div class="empty">no kings yet.</div>';
+    document.getElementById("evolution-filters").hidden = true;
+    return;
+  }
+  const judges = judgeColumns(kc, chain, currentEval);
+
+  const ordered = kc.slice().reverse();
+
+  const groups = ordered.map((e, displayIdx) => {
+    const dataIdx = kc.length - 1 - displayIdx;
+    const scores = kingBarScores(kc[dataIdx], dataIdx, chain, currentEval);
+    const byModel = Object.fromEntries(scores.map(s => [s.model, s]));
+    let prevScores = {};
+    if (displayIdx > 0) {
+      const prevIdx = kc.length - 1 - (displayIdx - 1);
+      const prevKingScores = kingBarScores(kc[prevIdx], prevIdx, chain, currentEval);
+      prevScores = Object.fromEntries(prevKingScores.map(s => [s.model, s.score]));
+    }
+
+    const towers = judges.map(m => {
+      const s = byModel[m] || { model: m, score: null, n: 0, live: false };
+      return renderEvolutionTower(s, prevScores[m], evoJudgeFilter);
+    }).join("");
+
+    const dim = e.registered ? "" : " dim";
+    const current = dataIdx === 0 ? " is-current" : "";
+    const name = kingTitleName(e.reign_number);
+    return `<div class="evo-king${dim}${current}">
+      <div class="evo-towers">${towers}</div>
+      <div class="evo-king-name">${name}</div>
+      <div class="evo-king-date">${kingDateShort(e.crowned_at)}</div>
+    </div>`;
+  }).join("");
+
+  scroll.innerHTML = `<div class="evo-chart">${groups}</div>`;
+  renderEvolutionFilters(judges);
+  requestAnimationFrame(() => {
+    scroll.scrollLeft = scroll.scrollWidth;
+  });
+}
+
+const EVALS_BASE = "https://us-east-1.hippius.com/albedo/evals/";
+const SUBNET_ALPHA_DAY = 2960;
+
+function releaseModelLabel(repo) {
+  if (!repo) return "—";
+  const parts = repo.split("/");
+  const org = (parts[0] || "").replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+  const name = (parts[1] || "").replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+  const label = `ALBEDO-${org}-${name}`.replace(/--+/g, "-");
+  return label.length > 24 ? label.slice(0, 24) : label;
+}
+
+function hfRepoUrl(repo) {
+  if (!repo) return null;
+  return `https://huggingface.co/${repo}`;
+}
+
+function taoMinerUrl(netuid, hotkey) {
+  if (netuid == null || !hotkey) return null;
+  return `https://taomarketcap.com/subnets/${netuid}/miners?query=${encodeURIComponent(hotkey)}`;
+}
+
+function evalsUrlForEntry(entry, history) {
+  const cid = entry.challenge_id;
+  if (cid && cid !== "seed") {
+    const h = (history || []).find(x => x.challenge_id === cid);
+    if (h?.evals_url) return h.evals_url;
+  }
+  return EVALS_BASE;
+}
+
+function fmtAlphaDay(weight) {
+  if (weight == null || weight <= 0) return "—";
+  return (weight * SUBNET_ALPHA_DAY).toFixed(1);
+}
+
+function renderReleases(kc, chain, history) {
+  const wrap = document.getElementById("releases-wrap");
+  const netuid = chain?.netuid;
+  if (!kc || kc.length === 0) {
+    wrap.innerHTML = '<div class="empty">no releases yet.</div>';
+    return;
+  }
+  const rows = kc.map((e, i) => {
+    const era = kingTitleName(e.reign_number);
+    const current = i === 0 ? " current" : "";
+    const dim = e.registered ? "" : " dim";
+    const uid = e.uid != null ? e.uid : "—";
+    const hk = e.hotkey || "";
+    const taoUrl = taoMinerUrl(netuid, hk);
+    const uidCell = taoUrl
+      ? `<a href="${taoUrl}" target="_blank" rel="noopener" title="${hk}">${uid}</a>`
+      : uid;
+    const repo = e.model_repo || "";
+    const hfUrl = hfRepoUrl(repo);
+    const modelLabel = releaseModelLabel(repo);
+    const modelCell = hfUrl
+      ? `<a href="${hfUrl}" target="_blank" rel="noopener" title="${repo}">${modelLabel}</a>`
+      : modelLabel;
+    const date = kingDateShort(e.crowned_at);
+    const alpha = fmtAlphaDay(e.weight);
+    const alphaCls = i === 0 && e.registered ? " earning" : (e.registered ? "" : "");
+    const dlUrl = evalsUrlForEntry(e, history);
+    const dlDisabled = !dlUrl ? " disabled" : "";
+    const dlBtn = dlUrl
+      ? `<a class="releases-dl" href="${dlUrl}" target="_blank" rel="noopener" aria-label="download rollouts" title="rollouts">`
+      : `<button type="button" class="releases-dl" disabled aria-label="download rollouts">`;
+    const dlEnd = dlUrl ? `</a>` : `</button>`;
+    const dlIcon = `<svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+      <path d="M6 1.5v8M2.5 6L6 9.5 9.5 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M2 11h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+    </svg>`;
+    return `<tr class="${dim}">
+      <td class="era"><span class="${current.trim() || "past"}">${era}</span></td>
+      <td class="uid">${uidCell}</td>
+      <td class="model"><div class="model-cell">${modelCell}</div></td>
+      <td class="date">${date}</td>
+      <td class="alpha${alphaCls}" title="${e.weight != null ? (e.weight * SUBNET_ALPHA_DAY).toFixed(4) + " α/day" : ""}">${alpha}</td>
+      <td class="dl">${dlBtn}${dlIcon}${dlEnd}</td>
+    </tr>`;
+  }).join("");
+  wrap.innerHTML = `<table class="releases">
+    <thead><tr>
+      <th>era</th>
+      <th>uid</th>
+      <th>model</th>
+      <th class="r">date</th>
+      <th class="r">ⴷ / day</th>
+      <th class="col-dl" aria-label="download"></th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+function renderQueue(queue, chain, currentEval) {
+  const wrap = document.getElementById("queue-wrap");
+  const netuid = chain?.netuid;
+  setText("queue-meta", `${(queue || []).length} pending`);
+  if (!queue || queue.length === 0) {
+    wrap.innerHTML = '<div class="empty">empty.</div>';
+    return;
+  }
+  const rows = queue.slice(0, 100).map((q, i) => {
+    const isLive = currentEval?.hotkey && q.hotkey === currentEval.hotkey;
+    const queueNum = currentEval ? (isLive ? 0 : i) : (i + 1);
+    const status = isLive
+      ? `<span class="queue-status challenging">challenging</span>`
+      : `<span class="queue-status queued">queue #${queueNum || 1}</span>`;
+    const uid = q.uid != null ? q.uid : "—";
+    const taoUrl = taoMinerUrl(netuid, q.hotkey);
+    const uidCell = taoUrl
+      ? `<a href="${taoUrl}" target="_blank" rel="noopener" title="${q.hotkey}">${uid}</a>`
+      : uid;
+    const repo = q.model_repo || "";
+    const hfUrl = hfRepoUrl(repo);
+    const label = challengerModelName(q.hotkey);
+    const modelCell = hfUrl
+      ? `<a href="${hfUrl}" target="_blank" rel="noopener" title="${repo}">${label}</a>`
+      : label;
+    const when = fmtWhenCell(q.queued_at);
+    return `<tr>
+      <td class="status">${status}</td>
+      <td class="uid">${uidCell}</td>
+      <td class="model">${modelCell}</td>
+      <td class="when">${when}</td>
+    </tr>`;
+  }).join("");
+  wrap.innerHTML = `<table class="data-table queue-table">
+    <colgroup>
+      <col class="col-status">
+      <col class="col-uid">
+      <col class="col-model">
+      <col class="col-when">
+    </colgroup>
+    <thead><tr>
+      <th class="status">status</th>
+      <th class="uid">uid</th>
+      <th class="model">model</th>
+      <th class="when">when</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+function renderHistory(history, chain, king) {
+  const wrap = document.getElementById("history-wrap");
+  const netuid = chain?.netuid;
+  const judges = (chain?.judge_models || []).map(m => judgeMeta(m));
+  setText("history-meta", `${(history || []).length} entries`);
+  if (!history || history.length === 0) {
+    wrap.innerHTML = '<div class="empty">no completed duels yet.</div>';
+    return;
+  }
+  const championName = king ? kingTitleName(king.reign_number) : "ALBEDO";
+  const championRepo = king?.model_repo || "";
+  const championHf = hfRepoUrl(championRepo);
+  const championCell = championHf
+    ? `<a href="${championHf}" target="_blank" rel="noopener" title="${championRepo}" class="champion-link">${championName}</a>`
+    : `<span class="champion-link">${championName}</span>`;
+  const judgeHead = judges.map(j =>
+    `<th class="r">${j.label}</th>`
+  ).join("");
+  const ordered = history.slice().reverse().slice(0, 50);
+  const rows = ordered.map(h => {
+    const byLetter = judgeByLetter(h.judges);
+    const uid = h.uid != null ? h.uid : "—";
+    const taoUrl = taoMinerUrl(netuid, h.hotkey);
+    const uidCell = taoUrl
+      ? `<a href="${taoUrl}" target="_blank" rel="noopener" title="${h.hotkey}">${uid}</a>`
+      : uid;
+    const repo = h.model_repo || "";
+    const hfUrl = hfRepoUrl(repo);
+    const label = challengerModelName(h.hotkey);
+    const modelCell = hfUrl
+      ? `<a href="${hfUrl}" target="_blank" rel="noopener" title="${repo}">${label}</a>`
+      : label;
+    const judgeCells = judges.map(j =>
+      `<td class="r">${judgeScoreCell(byLetter[j.letter])}</td>`
+    ).join("");
+    return `<tr>
+      <td class="when pl">${fmtWhenCell(h.completed_at)}</td>
+      <td class="uid">${uidCell}</td>
+      <td class="model">${modelCell}</td>
+      <td>${championCell}</td>
+      <td class="center">${verdictBadge(h)}</td>
+      ${judgeCells}
+      <td class="dl">${dlButton(h.evals_url)}</td>
+    </tr>`;
+  }).join("");
+  wrap.innerHTML = `<table class="data-table">
+    <thead><tr>
+      <th class="pl">when</th>
+      <th>uid</th>
+      <th>model</th>
+      <th>vs. champion</th>
+      <th class="center">verdict</th>
+      ${judgeHead}
+      <th class="r" aria-label="download"></th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+function render(d) {
+  if (!d) return;
+  renderHero(d);
+  renderEvolution(d.king_chain, d.chain, d.current_eval);
+  renderReleases(d.king_chain, d.chain, d.history);
+  renderQueue(d.queue, d.chain, d.current_eval);
+  renderHistory(d.history, d.chain, d.king);
+}
+
+async function fetchDashboard(buster) {
+  const urls = [];
+  if (DATA_URL) urls.push(DATA_URL);
+  for (const u of DATA_ENDPOINTS) if (!urls.includes(u)) urls.push(u);
+  for (const url of urls) {
+    try {
+      const r = await fetch(url + "?t=" + buster, { cache: "no-store" });
+      if (!r.ok) continue;
+      const data = await r.json();
+      if (url !== "dashboard.json") {
+        DATA_URL = url;
+        saveCachedEndpoint(url);
+      }
+      return data;
+    } catch {}
+  }
+  return null;
+}
+
+async function poll() {
+  const data = await fetchDashboard(Date.now());
+  if (data) render(data);
+}
+
+const LLMS_URLS = [
+  "./llms.txt",
+  "https://us-east-1.hippius.com/albedo/llms.txt",
+  "https://eu-central-1.hippius.com/albedo/llms.txt",
+  "https://s3.hippius.com/albedo/llms.txt",
+];
+let llmsTextCache = null;
+
+async function fetchLlmsText() {
+  if (llmsTextCache) return llmsTextCache;
+  for (const url of LLMS_URLS) {
+    try {
+      const r = await fetch(url + "?t=" + Date.now(), { cache: "no-store" });
+      if (!r.ok) continue;
+      llmsTextCache = await r.text();
+      return llmsTextCache;
+    } catch {}
+  }
+  return null;
+}
+
+async function copyLlmsTxt(e) {
+  e.preventDefault();
+  const btn = document.getElementById("hero-llms-btn");
+  const label = btn?.querySelector(".hero-llms-label");
+  if (!btn || !label) return;
+  const orig = label.textContent;
+  btn.disabled = true;
+  try {
+    const text = await fetchLlmsText();
+    if (!text) throw new Error("could not load llms.txt");
+    await navigator.clipboard.writeText(text);
+    label.textContent = "copied";
+    btn.classList.add("copied");
+  } catch {
+    label.textContent = "copy failed";
+  }
+  setTimeout(() => {
+    label.textContent = orig;
+    btn.classList.remove("copied");
+    btn.disabled = false;
+  }, 1600);
+}
+
+document.getElementById("hero-llms-btn")?.addEventListener("click", copyLlmsTxt);
+
+DATA_URL = loadCachedEndpoint();
+poll();
+setInterval(poll, POLL_MS);
+
+async function checkVersion() {
+  if (!BUILD_ID || BUILD_ID.indexOf("__") === 0) return;
+  for (const url of HTML_ENDPOINTS) {
+    try {
+      const r = await fetch(url + "?t=" + Date.now(), { cache: "no-store" });
+      if (!r.ok) continue;
+      const html = await r.text();
+      const m = html.match(/<meta name="build" content="([^"]+)"/);
+      if (m && m[1] && m[1].indexOf("__") !== 0 && m[1] !== BUILD_ID) {
+        if (document.visibilityState === "visible") location.reload();
+      }
+      return;
+    } catch {}
+  }
+}
+setInterval(checkVersion, 60_000);
+</script>
+</body>
+</html>

@@ -1,0 +1,32 @@
+{
+  "updated_at": null,
+  "chain": {
+    "name": "Albedo-Mini-1.7B",
+    "seed_repo": "ricdomolm/mini-coder-1.7b",
+    "seed_digest": "hf:ea686024d9522260933aeed436e9939b1912ca15",
+    "judge_models": [],
+    "judge_model": null,
+    "judge_tie_band": 0.01,
+    "dataset_repo": "AlienKevin/SWE-ZERO-12M-trajectories",
+    "dataset_shard": "data/train-00000.parquet",
+    "king_chain_depth": 5,
+    "netuid": null
+  },
+  "king": {},
+  "king_chain": [],
+  "stats": {
+    "queued": 0,
+    "accepted": 0,
+    "rejected": 0,
+    "failed": 0
+  },
+  "current_eval": null,
+  "queue": [],
+  "history": [],
+  "watchdog": {
+    "started_at": null,
+    "phase": "startup",
+    "phase_since": null,
+    "consecutive_tick_errors": 0
+  }
+}

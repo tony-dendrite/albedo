@@ -1,0 +1,269 @@
+# Albedo
+
+> Trajectory-distillation king-of-the-hill subnet on Bittensor. Miners submit challengers; the reigning king and challenger duel on SWE-ZERO rollouts judged by an ensemble of LLMs. Full duel traces are published for downstream distillation.
+
+## Codebase
+
+- **GitHub:** https://github.com/unarbos/albedo
+- **Layout (repo root = `albedo/`):**
+  - `chain.toml` — active chain, judges, dataset pin, duel knobs (single source of truth)
+  - `chain_config.py` — loads `chain.toml` into constants
+  - `validator.py` — on-chain reveal scanner, config gate, duel dispatch, weights, dashboard
+  - `eval.py` — GPU eval server (vLLM king + challenger, judges, eval-trace sink)
+  - `miner.py` — download king, build challenger, upload to Hippius Hub, `set_reveal_commitment`
+  - `model_store.py` — Hippius/HF `repo@digest` download, upload, v4 reveal helpers
+  - `judge.py`, `trajectory_sampler.py` — Chutes LLM-as-judge + SWE-ZERO parquet sampling
+  - `scripts/prefetch_dataset.py` — download pinned eval shard
+  - `scripts/start_eval.sh` — eval-box env + `uvicorn eval:app`
+  - `scripts/seed_genesis.py` — one-shot genesis king upload
+  - `website/` — static dashboard UI (`index.html`, `dashboard.example.json`, this file)
+- **Setup:**
+  ```bash
+  cd albedo
+  uv venv && source .venv/bin/activate
+  uv pip install -e .
+  ```
+- **Override chain for experiments:** `ALBEDO_CHAIN_OVERRIDE=/path/to/alt.toml`
+
+## Website
+
+- **Live UI:** https://us-east-1.hippius.com/albedo/index.html
+  - Mirrors: https://eu-central-1.hippius.com/albedo/index.html , https://s3.hippius.com/albedo/index.html
+- **Machine-readable state:** https://us-east-1.hippius.com/albedo/dashboard.json
+  - `king` — current `model_repo`, `king_digest`, hotkey, per-judge bars
+  - `king_chain` — rolling payout set (up to 5 kings)
+  - `queue`, `history`, `current_eval`
+- **This file:** https://us-east-1.hippius.com/albedo/llms.txt
+
+## Eval dataset
+
+The duel fixture set is a **single pinned parquet shard** from the SWE-ZERO trajectory corpus (not the full 12M rows).
+
+- **HF dataset:** https://huggingface.co/datasets/AlienKevin/SWE-ZERO-12M-trajectories
+- **Pinned shard** (in `chain.toml [dataset]`): `data/train-00000.parquet`
+- **Contents:** multi-turn SWE-bench-style agent trajectories (generated at T=1.0, 32k context cap)
+
+**Download (validators / eval operators):**
+
+```bash
+cd albedo && source .venv/bin/activate
+python scripts/prefetch_dataset.py [--out /var/albedo/dataset]
+```
+
+The script prints `shard_sha256` — paste into `chain.toml [dataset].shard_sha256`. On the GPU eval box:
+
+```bash
+export ALBEDO_DATASET_SHARD_PATH=/var/albedo/dataset/train-00000.parquet
+```
+
+`eval.py` refuses to start if the on-disk file hash does not match `shard_sha256`.
+
+## Models (king & challengers)
+
+Weights are immutable **`namespace/ModelName@digest`** refs. Digests:
+
+- `sha256:<64hex>` — Hippius Hub OCI manifest (challenger uploads, genesis king)
+- `hf:<40hex>` — HuggingFace commit SHA (vanilla HF repos without a Hippius mirror)
+
+**Where to discover refs**
+
+- Current king: `dashboard.json` → `king.model_repo`, `king.king_digest` (or `model_digest`)
+- Genesis fallback: `chain.toml` → `[chain].seed_repo`, `[seed].seed_digest` (currently HF: `ricdomolm/mini-coder-1.7b@hf:ea686024…`)
+- Registry UI: https://registry.hippius.com (search `albedo-mini-1.7b-*` under your namespace)
+
+**Download in Python** (`model_store.materialize_model`):
+
+```python
+from model_store import ModelRef, materialize_model
+ref = ModelRef("teutonic/albedo-mini-1.7b-miner0", "sha256:...")
+path = materialize_model(ref, local_dir="/tmp/my-model", max_workers=16)
+```
+
+**Auth for Hippius Hub** (download + miner upload):
+
+- **Registry push/pull** (OCI): robot login via `hippius-hub login --username … --password …`, or env vars read by `model_store.py`:
+  - `ALBEDO_HIPPIUS_USERNAME` + `ALBEDO_HIPPIUS_PASSWORD` (recommended for miners — push-scoped project key)
+  - `HIPPIUS_HUB_USERNAME` + `HIPPIUS_HUB_PASSWORD` (legacy fallback)
+- **Console API** (provision namespace, rotate secrets, create push keys): token from https://console.hippius.com → `hippius-hub login --hippius-token …` (stored as `~/.cache/hippius/hub/api_token`; can also set `HIPPIUS_CONSOLE_TOKEN` in your secrets manager).
+- **S3 keys** (`HIPPIUS_ACCESS_KEY`, `R2_*`, etc.) work for dashboard/state/dataset buckets only — they do **not** authenticate `upload_folder` / registry blob pushes.
+
+If both `ALBEDO_HIPPIUS_*` and `HIPPIUS_HUB_*` are set, **`ALBEDO_HIPPIUS_*` wins** (so a stale shared `teutonic-bot` password does not override your miner push key).
+
+**HF-only pulls:** set digest `hf:<commit>`; optional `HF_TOKEN` / `HUGGINGFACE_API_KEY`. For uploads without Hippius, set `ALBEDO_UPLOAD_BACKEND=hf` (returns `hf:` digests; king may still be HF-backed).
+
+**Genesis one-shot** (operators): `python scripts/seed_genesis.py` downloads `ricdomolm/mini-coder-1.7b` from HF, uploads to Hippius, prints digest for `chain.toml [seed].seed_digest`.
+
+**Challenger repo naming:** must match `chain.toml` `repo_pattern` (currently `^[^/]+/albedo-mini-1.7b-.+$`), e.g. `teutonic/albedo-mini-1.7b-myhotkey`. Display name in `[chain].name` is `Albedo-Mini-1.7B` but **Hippius registry paths must be lowercase** — set `ALBEDO_CHALLENGER_REPO_NAME=albedo-mini-1.7b` when running `miner.py` if your tooling derives repos from the display name.
+
+## Mining (submit a challenger)
+
+Goal: beat the king on the judge duel, take emission (plus rolling share for past kings — see King).
+
+**Prerequisites**
+
+- Registered hotkey on the subnet (`ALBEDO_NETUID`)
+- Hippius Hub **push** auth (see Models) — read-only / S3 creds are not enough
+- Bittensor wallet (`BT_WALLET_NAME`); coldkey unlock via `BT_WALLET_PASSWORD`
+- Enough TAO to register if not already on the subnet (`btcli subnet register --netuid …`)
+
+**Run (Hippius path — production)**
+
+```bash
+cd albedo && source .venv/bin/activate
+export ALBEDO_NETUID=<subnet>
+export BT_WALLET_NAME=<wallet>
+export ALBEDO_CHALLENGER_NAMESPACE=<your-hippius-namespace>   # e.g. teutonic
+export ALBEDO_CHALLENGER_REPO_NAME=albedo-mini-1.7b           # required: lowercase for Hippius
+export ALBEDO_HIPPIUS_USERNAME=robot$<namespace>+<push-key>
+export ALBEDO_HIPPIUS_PASSWORD=<push-secret>
+python miner.py --hotkey <hotkey_name> [--noise 0.001] [--force]
+```
+
+**Run (HF fallback — smoke tests only)**
+
+```bash
+export ALBEDO_UPLOAD_BACKEND=hf
+export ALBEDO_CHALLENGER_NAMESPACE=<your-hf-user>             # must own the namespace on HF
+export HF_TOKEN=...
+python miner.py --hotkey <hotkey_name> --noise 0.001
+```
+
+**What `miner.py` does**
+
+1. Fetches `dashboard.json` for current `king` repo + digest (falls back to seed)
+2. `materialize_model` king weights locally
+3. `train_or_perturb` — default is tiny Gaussian noise on safetensors (pipeline stub only; real dethrones need real SFT/RL)
+4. Validates `config.json` matches king arch locks (`chain.toml [arch].extra_lock_keys`)
+5. `upload_model_folder` → Hippius Hub (or HF if `ALBEDO_UPLOAD_BACKEND=hf`)
+6. `set_reveal_commitment` with v4 payload: `v4|<repo>|<digest>|<author_hotkey>`
+
+**Gates:** validator skips if you are the current king, or already have a reveal (1 eval per hotkey). Use `--force` to override warnings.
+
+**Swap training:** replace `train_or_perturb` in `miner.py` with your training loop; keep upload + reveal unchanged.
+
+### Mining gotchas
+
+**Hippius registry**
+
+- Provision your namespace once: `hippius-hub login --hippius-token …` then `hippius-hub registry provision <namespace> --docker-login` (Free plan = 1 namespace per account).
+- Create a **push** project key: `hippius-hub registry keys create <name> --role push` — save the secret immediately; use as `ALBEDO_HIPPIUS_USERNAME` / `ALBEDO_HIPPIUS_PASSWORD`.
+- **Lowercase repo paths only.** Uploads to `…/Albedo-Mini-1.7B-…` (mixed case) return `401` from `registry.hippius.com`. Always use `albedo-mini-1.7b-<suffix>`.
+- Do not confuse console token (`hippius-hub login --hippius-token`, ~40 hex chars from console.hippius.com) with the robot push secret (used with `--username` / `--password`).
+- `hippius-hub login` printing “saved” does not validate the token — test with `hippius-hub registry me`.
+- Shared org namespaces (e.g. `teutonic/`) may already exist; you need your own push key on that project, not just read creds.
+
+**On-chain / validator**
+
+- Reveal format is **v4 only**: `v4|repo|sha256:…|hotkey` (or `hf:…` digest). Legacy v3 reveals are dropped.
+- **One eval per hotkey** — a second submission from the same hotkey is ignored after the first duel completes.
+- You **cannot challenge as the current king** hotkey (validator skips).
+- After commit, wait ~30s (commit-reveal blocks) before the validator picks up the reveal.
+- Challenger must pass server-side gates: repo matches `repo_pattern`, arch locks match king, no `*.py` or `auto_map` in the Hub snapshot, at least one `.safetensors`.
+
+**Wallet / env**
+
+- `Wallet.unlock_coldkey(password=…)` is not used — miner decrypts via `wallet.coldkey_file.decrypt()`.
+- Set `ALBEDO_NETUID` explicitly; default `0` aborts with an error.
+- Default noise (`--noise 0.001`) will **not** dethrone a real king — expect `REJECTED` (0 wins, ties on all judges). That is a successful pipeline smoke test.
+
+**Monitoring**
+
+- Dashboard: https://us-east-1.hippius.com/albedo/dashboard.json — watch `queue` → `current_eval` → `history`.
+- Typical smoke-test timeline: upload ~3 min (1.7B) → reveal → validator download from Hippius ~20s → eval ~60–90s → verdict logged.
+
+**Hippius setup cheat sheet**
+
+```bash
+hippius-hub login --hippius-token <console-token>
+hippius-hub registry me                              # confirm project + namespace
+hippius-hub registry keys create my-miner --role push
+hippius-hub login --username 'robot$<ns>+my-miner' --password '<secret>'
+hippius-hub upload <namespace>/albedo-mini-1.7b-test ./tiny-folder   # sanity check
+hippius-hub models list --mine
+```
+
+## Mining (distillation / training data)
+
+Every duel publishes **full turn-by-turn traces** for distillation/SFT — not just scores.
+
+- **Browse:** https://us-east-1.hippius.com/albedo/evals/
+- **Layout:** `evals/YYYY-MM-DD/<eval_id>.jsonl.gz` (gzip JSONL) + daily `manifest.jsonl`
+- **Schema:** `schema_version` (currently `1`) on `duel_meta`, `turn`, and `verdict` records
+- **Per file:** line 1 `duel_meta` (king, challenger, hotkey, seed, judges, gen params), then `turn` records (`messages_prefix` = dataset prefix, `messages_prompt` = what vLLM saw, `prompt_truncated` + `prompt_truncation`, king/chal replies, judge verdict + rationale + optional `king_raw`/`chal_raw`), final `verdict`
+- **Manifest:** `evals/YYYY-MM-DD/manifest.jsonl` — one line per duel with quality stats (`n_valid_turns`, `parse_failures_by_judge`, `accepted`, URL)
+- **Export:** `python scripts/export_training_jsonl.py --input <url-or-path> --output training.jsonl` (SFT) or `--format dpo` for preference pairs
+- **Dashboard link:** `history[].evals_url` when present
+- **Local backup on eval box:** `/var/albedo/evals/` (`ALBEDO_EVALS_LOCAL_DIR`)
+
+Download with any S3 client against the public bucket prefix, or HTTPS GET when objects are public-read.
+
+## Validation (how duels run)
+
+Two processes: **validator** (CPU/chain) + **eval server** (GPU). Validator reaches eval via `ALBEDO_EVAL_SERVER` (often SSH tunnel — see `tunnel.sh`, `ecosystem.config.js`).
+
+### Validator wallet & netuid
+
+Albedo validator **sets weights on subnet 97**. Miners reveal on the same netuid (`ALBEDO_NETUID=97`).
+
+| Setting | Value | Notes |
+|---------|-------|-------|
+| `ALBEDO_NETUID` | **97** | Reveals, metagraph, and `set_weights` all use this. |
+| `BT_WALLET_NAME` | your validator wallet | Must be registered on SN97. |
+| `BT_WALLET_HOTKEY` | your validator hotkey | Must match the registered hotkey SS58. |
+
+**Do not:**
+
+- Point the validator at an unregistered hotkey (`set_weights failed: Hotkey … not registered`).
+- Change netuid without updating every component (reveals, metagraph, weights).
+
+**Validator loop** (`validator.py`)
+
+1. `scan_reveals` — decode v4 on-chain commitments; filter seen hotkeys / completed repos
+2. `validate_challenger_config` — config-only Hub fetch; arch lock + no `*.py` / `auto_map`
+3. `POST /eval` to eval server (SSE stream)
+4. On `accepted`: crown king, `POST /set_king`, `set_weights` (split across `king_chain_depth` registered kings)
+5. Flush `dashboard.json` to Hippius S3 (+ R2 fallback for private state)
+
+**Eval server** (`eval.py` on GPU box)
+
+1. Verify dataset shard SHA256
+2. Sample `n_samples` trajectories × `max_turns` per duel using `seed = blake2b(block_hash || hotkey)`
+3. vLLM: long-lived king (`ALBEDO_KING_GPUS`), per-duel challenger (`ALBEDO_CHAL_GPUS`)
+4. Each turn: both models complete the next assistant message; Chutes judges score replies (`chain.toml [judge].models`, `CHUTES_API_KEY`)
+5. Upload eval trace; emit final verdict
+
+**Dethrone rule** (per judge model, `tie_band` default 0.01):
+
+- **Win** on a dimension: mean(challenger − king) > `tie_band`
+- **Lose:** mean delta < −`tie_band`
+- **Crown** when: ≥1 judge dimension is a win, **and** zero dimensions are losses (ties OK on the rest)
+
+Judges are listed in `chain.toml [judge].models` (currently DeepSeek-V3.2-TEE, Qwen3-235B-Thinking, Kimi-K2.6-TEE via Chutes).
+
+**Eval operator startup**
+
+```bash
+# prefetch dataset first, then:
+cd albedo && source .venv/bin/activate
+export CHUTES_API_KEY=...
+export ALBEDO_DATASET_SHARD_PATH=...
+export ALBEDO_EVALS_S3_BUCKET=albedo ALBEDO_EVALS_S3_ACCESS_KEY=... ALBEDO_EVALS_S3_SECRET_KEY=...
+export HIPPIUS_HUB_TOKEN=...
+bash scripts/start_eval.sh
+```
+
+**Validator operator startup** (local PM2)
+
+```bash
+cd albedo
+# export ALBEDO_* / BT_* / R2_* / HIPPIUS_* env vars, then:
+pm2 start ecosystem.config.js --only albedo-validator
+# after editing ecosystem.config.js: pm2 delete albedo-validator && pm2 start ...
+```
+
+## King
+
+- Kings are numbered ALBEDO-I, ALBEDO-II, … (Roman numerals by reign)
+- Live state: https://us-east-1.hippius.com/albedo/dashboard.json
+- Genesis king weights: `ricdomolm/mini-coder-1.7b@hf:ea686024…` (Qwen3 1.7B); challengers upload to Hippius as `sha256:` manifests
+- Rolling payout: current king + up to four prior kings share emission (`king_chain_depth = 5`)
