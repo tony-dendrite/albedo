@@ -48,6 +48,7 @@ from pydantic import BaseModel, Field
 
 import chain_config
 import judge as judge_mod
+import preeval
 import trajectory_sampler
 from model_store import (
     MODEL_CACHE_DIR,
@@ -536,6 +537,9 @@ class EvalState:
     chal_proc: VLLMProcess = field(default_factory=lambda: VLLMProcess("challenger", CHAL_PORT, CHAL_GPUS))
     eval_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     current_eval_id: str | None = None
+    # In-memory cache of uploaded_models_state.json — loaded at startup from
+    # Hippius S3 and updated after every duel so restarts don't re-check known models.
+    models_state_cache: dict | None = None
 
 
 STATE = EvalState()
@@ -1045,6 +1049,73 @@ async def _run_duel_inner(req: EvalRequest, sink: "DatasetSink",
                                      "error": f"materialize_failed: {exc}"})
         return
 
+    # ── preeval duplicate check ──────────────────────────────────────────────
+    # Compute a per-layer L2 norm fingerprint and compare it against every
+    # previously evaluated model. State is held in STATE.models_state_cache
+    # (loaded from Hippius S3 at startup) so restarts don't lose history and
+    # known models skip recomputation. Failure is non-fatal.
+    _chal_fp: dict | None = None
+    _models_state: dict | None = None
+    if EVALS_S3_BUCKET and EVALS_S3_ACCESS and EVALS_S3_SECRET:
+        yield _sse_event("phase", {"eval_id": eval_id, "phase": "preeval_fingerprint"})
+        try:
+            _s3 = preeval._get_or_create_s3_client(
+                EVALS_S3_ENDPOINT, EVALS_S3_ACCESS, EVALS_S3_SECRET
+            )
+            # Use in-memory cache; fall back to S3 if not yet populated.
+            if STATE.models_state_cache is not None:
+                _models_state = STATE.models_state_cache
+            else:
+                _models_state = await asyncio.to_thread(
+                    preeval.load_models_state, _s3, EVALS_S3_BUCKET
+                )
+                STATE.models_state_cache = _models_state
+
+            # If this exact ref was already evaluated, reuse stored fingerprint
+            # (handles retries after infra failures without re-reading weights).
+            _existing = _models_state.get("models", {}).get(chal_ref.immutable_ref)
+            if _existing:
+                log.info("preeval: reusing cached fingerprint for %s", chal_ref.immutable_ref)
+                _chal_fp = {k: _existing[k] for k in
+                            ("fingerprint_method", "sha256_bytes", "layer_keys", "norm_vector")
+                            if k in _existing}
+            else:
+                _chal_fp = await asyncio.to_thread(
+                    preeval.compute_fingerprint, chal_dir
+                )
+
+            _commit_block: int = req.challenger.get("commit_block") or preeval._UNKNOWN_BLOCK
+            _is_dup, _matched = preeval.check_duplicate(
+                _chal_fp,
+                _models_state,
+                threshold=chain_config.PREEVAL_SIMILARITY_THRESHOLD,
+                skip_key=chal_ref.immutable_ref,
+                commit_block=_commit_block,
+            )
+            if _is_dup:
+                _orig_block = (
+                    (_models_state.get("models") or {})
+                    .get(_matched or "", {})
+                    .get("commit_block", preeval._UNKNOWN_BLOCK)
+                )
+                yield _sse_event("verdict", {
+                    "eval_id": eval_id,
+                    "accepted": False,
+                    "is_duplicate": True,
+                    "duplicate_of": _matched,
+                    "duplicate_of_commit_block": _orig_block if _orig_block > 0 else None,
+                    "error": (
+                        f"duplicate_model: too similar to {_matched}"
+                        + (f" (original committed at block {_orig_block})" if _orig_block > 0 else "")
+                        + f" (threshold={chain_config.PREEVAL_SIMILARITY_THRESHOLD})"
+                    ),
+                })
+                return
+        except Exception as exc:
+            log.warning("preeval fingerprint check failed (non-fatal, proceeding with duel): %s", exc)
+            _chal_fp = None
+            _models_state = None
+
     yield _sse_event("phase", {"eval_id": eval_id, "phase": "start_challenger_vllm",
                                  "challenger": chal_ref.immutable_ref})
 
@@ -1387,6 +1458,32 @@ async def _run_duel_inner(req: EvalRequest, sink: "DatasetSink",
     # Best-effort upload — never blocks the verdict on Hippius being up.
     sink_info = await _safe_flush_sink(sink, flushed_ref)
 
+    # Persist fingerprint to uploaded_models_state.json and refresh cache.
+    if _chal_fp is not None and _models_state is not None:
+        try:
+            verdict_str = "accepted" if accepted else "rejected"
+            _updated_state = preeval.add_fingerprint_to_state(
+                _models_state,
+                chal_ref.immutable_ref,
+                _chal_fp,
+                hotkey=req.hotkey or "",
+                verdict=verdict_str,
+                repo=chal_ref.repo,
+                digest=chal_ref.digest,
+                commit_block=req.challenger.get("commit_block") or preeval._UNKNOWN_BLOCK,
+            )
+            _s3 = preeval._get_or_create_s3_client(
+                EVALS_S3_ENDPOINT, EVALS_S3_ACCESS, EVALS_S3_SECRET
+            )
+            await asyncio.to_thread(
+                preeval.save_models_state, _s3, EVALS_S3_BUCKET, _updated_state
+            )
+            STATE.models_state_cache = _updated_state
+            log.info("fingerprint state updated: %d models in cache",
+                     len(_updated_state.get("models", {})))
+        except Exception:
+            log.exception("fingerprint state save failed (non-fatal)")
+
     yield _sse_event("verdict", {
         **{k: v for k, v in verdict_record.items() if k != "type"},
         "per_turn":  per_turn_records,
@@ -1442,6 +1539,49 @@ async def health() -> JSONResponse:
     })
 
 
+async def _fingerprint_king_if_new(ref: ModelRef, king_dir: str) -> None:
+    """Background task: fingerprint the king and persist to Hippius S3 if not already stored.
+
+    Runs after /set_king returns so the validator is never blocked by the
+    ~20s CPU fingerprint computation.
+    """
+    if not (EVALS_S3_BUCKET and EVALS_S3_ACCESS and EVALS_S3_SECRET):
+        return
+    if ref.digest.startswith("hf:"):
+        log.info("set_king: skipping fingerprint for HF-backed king %s (challengers are Hippius-only)", ref.immutable_ref)
+        return
+    try:
+        _s3 = preeval._get_or_create_s3_client(
+            EVALS_S3_ENDPOINT, EVALS_S3_ACCESS, EVALS_S3_SECRET
+        )
+        state = STATE.models_state_cache
+        if state is None:
+            state = await asyncio.to_thread(
+                preeval.load_models_state, _s3, EVALS_S3_BUCKET
+            )
+            STATE.models_state_cache = state
+
+        if ref.immutable_ref in state.get("models", {}):
+            log.info("set_king: fingerprint already stored for %s, skipping", ref.immutable_ref)
+            return
+
+        log.info("set_king: fingerprinting king %s in background …", ref.immutable_ref)
+        fp = await asyncio.to_thread(preeval.compute_fingerprint, Path(king_dir))
+        updated = preeval.add_fingerprint_to_state(
+            state, ref.immutable_ref, fp,
+            hotkey="", verdict="king",
+            repo=ref.repo, digest=ref.digest,
+        )
+        await asyncio.to_thread(
+            preeval.save_models_state, _s3, EVALS_S3_BUCKET, updated
+        )
+        STATE.models_state_cache = updated
+        log.info("set_king: king fingerprint saved (%d total in state)",
+                 len(updated.get("models", {})))
+    except Exception:
+        log.exception("set_king: background king fingerprinting failed (non-fatal)")
+
+
 @app.post("/set_king")
 async def set_king(req: SetKingRequest) -> JSONResponse:
     try:
@@ -1461,6 +1601,11 @@ async def set_king(req: SetKingRequest) -> JSONResponse:
         await STATE.king_proc.start(king_dir, ref.immutable_ref)
     except Exception as exc:
         raise HTTPException(500, f"king_vllm_start_failed: {exc}")
+
+    # Fingerprint the king in the background — first call after deploy seeds
+    # uploaded_models_state.json; subsequent calls are no-ops if already stored.
+    asyncio.create_task(_fingerprint_king_if_new(ref, king_dir))
+
     return JSONResponse({"status": "ok", "king": ref.immutable_ref})
 
 
@@ -1510,6 +1655,22 @@ async def eval_endpoint(req: EvalRequest, request: Request) -> StreamingResponse
                 STATE.current_eval_id = None
 
     return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+@app.on_event("startup")
+async def _startup() -> None:
+    if EVALS_S3_BUCKET and EVALS_S3_ACCESS and EVALS_S3_SECRET:
+        try:
+            _s3 = preeval._get_or_create_s3_client(
+                EVALS_S3_ENDPOINT, EVALS_S3_ACCESS, EVALS_S3_SECRET
+            )
+            STATE.models_state_cache = await asyncio.to_thread(
+                preeval.load_models_state, _s3, EVALS_S3_BUCKET
+            )
+            n = len(STATE.models_state_cache.get("models", {}))
+            log.info("loaded fingerprint state from Hippius S3: %d known model(s)", n)
+        except Exception:
+            log.exception("fingerprint state load at startup failed (non-fatal)")
 
 
 @app.on_event("shutdown")

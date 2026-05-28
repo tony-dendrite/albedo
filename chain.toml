@@ -85,3 +85,11 @@ gen_max_model_len = 32768
 # and the remainder renormalizes to sum to 1. A dethroned miner therefore
 # continues to earn for (king_chain_depth - 1) more transitions.
 king_chain_depth = 5
+
+[preeval]
+# Cosine similarity threshold between per-layer L2 norm vectors used to
+# detect near-duplicate model submissions before the GPU duel.
+# 1.0 = byte-identical; values near 1.0 indicate near-identical weights.
+# 0.95 catches lazy copy-paste submissions while allowing genuinely
+# trained models (which shift layer norms more substantially) to pass.
+similarity_threshold = 0.95

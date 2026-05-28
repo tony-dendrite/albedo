@@ -38,6 +38,7 @@ _seed = _doc.get("seed", {})
 _judge = _doc.get("judge", {})
 _dataset = _doc.get("dataset", {})
 _duel = _doc.get("duel", {})
+_preeval = _doc.get("preeval", {})
 
 _VALID_SEED_REPO_BACKENDS = {"hf", "hippius"}
 
@@ -117,6 +118,9 @@ DUEL_GEN_MAX_TOKENS: int = int(_duel.get("gen_max_tokens", 1024))
 DUEL_GEN_MAX_MODEL_LEN: int = int(_duel.get("gen_max_model_len", 32768))
 DUEL_KING_CHAIN_DEPTH: int = int(_duel.get("king_chain_depth", 5))
 
+# [preeval]
+PREEVAL_SIMILARITY_THRESHOLD: float = float(_preeval.get("similarity_threshold", 0.95))
+
 
 def load_arch() -> ModuleType:
     """Import the configured architecture module.
@@ -164,5 +168,6 @@ __all__ = [
     "DUEL_GEN_MAX_TOKENS",
     "DUEL_GEN_MAX_MODEL_LEN",
     "DUEL_KING_CHAIN_DEPTH",
+    "PREEVAL_SIMILARITY_THRESHOLD",
     "load_arch",
 ]

@@ -936,6 +936,8 @@ class State:
 
     def record_verdict(self, entry: dict, verdict: dict) -> None:
         evals = verdict.get("evals") or {}
+        error_str = verdict.get("error") or ""
+        is_dup = bool(verdict.get("is_duplicate")) or error_str.startswith("duplicate_model")
         rec = {
             "challenge_id": entry.get("challenge_id"),
             "hotkey": entry.get("hotkey"),
@@ -943,6 +945,10 @@ class State:
             "model_repo": entry.get("model_repo"),
             "model_digest": entry.get("model_digest"),
             "accepted": verdict.get("accepted", False),
+            "is_duplicate": is_dup,
+            "duplicate_of": verdict.get("duplicate_of"),
+            "duplicate_of_commit_block": verdict.get("duplicate_of_commit_block"),
+            "error": error_str or None,
             "king_mean": verdict.get("king_mean", 0.0),
             "chal_mean": verdict.get("chal_mean", 0.0),
             "mean_delta": verdict.get("mean_delta", 0.0),
@@ -966,10 +972,18 @@ class State:
         self.history = self.history[-200:]
         if verdict.get("accepted"):
             self.stats["accepted"] += 1
+        elif is_dup:
+            self.stats.setdefault("duplicates", 0)
+            self.stats["duplicates"] += 1
         else:
             self.stats["rejected"] += 1
 
     def record_failure(self, entry: dict, code: str, detail: str) -> None:
+        _INJECTION_MARKERS = ("auto_map", ".py files", "chat_template")
+        is_injection = (
+            code == "config_mismatch"
+            and any(m in (detail or "") for m in _INJECTION_MARKERS)
+        )
         self.history.append({
             "challenge_id": entry.get("challenge_id"),
             "hotkey": entry.get("hotkey"),
@@ -978,10 +992,15 @@ class State:
             "model_digest": entry.get("model_digest"),
             "error_code": code,
             "error_detail": detail,
+            "is_injection": is_injection,
             "completed_at": _now(),
         })
         self.history = self.history[-200:]
-        self.stats["failed"] += 1
+        if is_injection:
+            self.stats.setdefault("injection_attempts", 0)
+            self.stats["injection_attempts"] += 1
+        else:
+            self.stats["failed"] += 1
 
     def flush_dashboard(self, *, force: bool = False) -> bool:
         # MUST NOT raise into the main loop. A Hippius/R2 outage during
@@ -1245,7 +1264,7 @@ async def _eval_set_king(http: httpx.AsyncClient, king: dict) -> None:
 async def process_challenge(state: State, http: httpx.AsyncClient,
                              entry: dict, subtensor, wallet) -> None:
     cid = entry["challenge_id"]
-    challenger = {"repo": entry["model_repo"], "digest": entry["model_digest"]}
+    challenger = {"repo": entry["model_repo"], "digest": entry["model_digest"], "commit_block": entry.get("block") or -1}
     king = state.king
     if not king:
         log.error("%s: no king set; skipping", cid)
@@ -1438,6 +1457,10 @@ async def process_challenge(state: State, http: httpx.AsyncClient,
         state.record_verdict(entry, verdict)
         if verdict.get("accepted"):
             log.info("%s: ACCEPTED. crowning %s", cid, entry.get("hotkey", "?")[:16])
+        elif verdict.get("is_duplicate") or (verdict.get("error") or "").startswith("duplicate_model"):
+            log.info("%s: DUPLICATE. hotkey=%s repo=%s is a copy of %s",
+                     cid, entry.get("hotkey", "?")[:16],
+                     entry.get("model_repo", "?"), verdict.get("duplicate_of", "?"))
             try:
                 block = subtensor.block
             except Exception:

@@ -308,6 +308,11 @@ def ensure_chat_template(model_dir: str | os.PathLike[str]) -> bool:
     if existing and existing != template.strip():
         log.warning("overwriting non-canonical chat_template in %s "
                     "(miner-supplied templates are not allowed)", root)
+        # Write sentinel so validators and the eval server can detect and
+        # reject this as an injection attempt without re-reading the file.
+        (root / ".albedo_injection_detected").write_text(
+            f"chat_template: custom template detected ({len(existing)} chars)"
+        )
     cfg["chat_template"] = template
     cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n")
     (root / "chat_template.jinja").write_text(template)
