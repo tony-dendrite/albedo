@@ -63,10 +63,10 @@ repo        = "AlienKevin/SWE-ZERO-12M-trajectories"
 shard_glob  = "data/train-*.parquet"
 # sha256 of manifest.json produced by prefetch_dataset.py; eval refuses
 # to start if the on-disk manifest drifts from this pin.
-manifest_sha256 = ""
+manifest_sha256 = "982a92bd85d122d287b15f2ddb4e2050b9e345fb3921aa9a63382c7af022bd7f"
 
 [duel]
-n_samples = 32
+n_samples = 64
 max_turns_per_sample = 10
 # Legacy knob kept in verdict JSON for dashboards; dethrone is per-judge
 # (match-and-exceed one dimension), not ensemble LCB >= eval_delta.
