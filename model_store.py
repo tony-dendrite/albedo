@@ -22,7 +22,8 @@ log = logging.getLogger("albedo.model_store")
 _REPO_ROOT = Path(__file__).resolve().parent
 _DEFAULT_CHAT_TEMPLATE_PATH = _REPO_ROOT / "archs" / "qwen3_minicoder" / "chat_template.jinja"
 
-MODEL_CACHE_DIR = os.environ.get("ALBEDO_MODEL_CACHE_DIR", "/tmp/albedo/hippius_models")
+_MODEL_CACHE_DEFAULT = os.path.expanduser("~/.cache/albedo/hippius_models")
+MODEL_CACHE_DIR = os.environ.get("ALBEDO_MODEL_CACHE_DIR", _MODEL_CACHE_DEFAULT)
 HUB_TOKEN_PATH = Path("~/.cache/hippius/hub/token").expanduser()
 
 REVEAL_V3_PREFIX = "v3"
@@ -222,6 +223,50 @@ def _cache_snapshot_path(ref: ModelRef) -> Path:
     return Path(MODEL_CACHE_DIR) / repo_key / "snapshots" / digest_key
 
 
+def _repo_cache_dir(ref: ModelRef) -> Path:
+    return Path(MODEL_CACHE_DIR) / ref.repo.replace("/", "--")
+
+
+def disk_free_bytes(path: str | os.PathLike[str] | None = None) -> int:
+    """Return free bytes on the filesystem hosting `path` (default: model cache)."""
+    target = Path(path or MODEL_CACHE_DIR)
+    while not target.exists() and target.parent != target:
+        target = target.parent
+    return shutil.disk_usage(str(target)).free
+
+
+def ensure_disk_bytes(min_bytes: int, path: str | os.PathLike[str] | None = None) -> None:
+    """Raise OSError when free space under `path` is below `min_bytes`."""
+    free = disk_free_bytes(path)
+    if free < min_bytes:
+        root = path or MODEL_CACHE_DIR
+        raise OSError(
+            f"need at least {min_bytes} bytes free under {root}, have {free}"
+        )
+
+
+def prune_model_cache(*keep: ModelRef) -> int:
+    keep_dirs = {_repo_cache_dir(ref).resolve() for ref in keep}
+    root = Path(MODEL_CACHE_DIR)
+    if not root.is_dir():
+        return 0
+    freed = 0
+    for child in sorted(root.iterdir()):
+        if not child.is_dir():
+            continue
+        resolved = child.resolve()
+        if resolved in keep_dirs:
+            continue
+        has_weights = any(child.rglob("*.safetensors"))
+        if not has_weights:
+            continue
+        size = sum(p.stat().st_size for p in child.rglob("*") if p.is_file())
+        shutil.rmtree(child)
+        freed += size
+        log.info("pruned model cache %s (%.2f GB)", child.name, size / 1e9)
+    return freed
+
+
 def local_snapshot_path(ref: ModelRef) -> str:
     path = _cache_snapshot_path(ref)
     if not path.exists():
@@ -300,6 +345,10 @@ def materialize_model(ref: ModelRef, local_dir: str | None = None, max_workers: 
     if target.exists():
         shutil.rmtree(target)
     target.parent.mkdir(parents=True, exist_ok=True)
+    # Fail fast with a clear error instead of a partial download mid-stream.
+    min_bytes = int(os.environ.get("ALBEDO_MIN_DISK_BYTES", str(6 * 1024**3)))
+    if not config_only:
+        ensure_disk_bytes(min_bytes, MODEL_CACHE_DIR)
     patterns = CONFIG_ONLY_PATTERNS if config_only else ALLOW_PATTERNS
     path = _call_snapshot_download(ref, str(target), max_workers, allow_patterns=patterns)
     ensure_chat_template(path)
@@ -350,37 +399,6 @@ def sha256_safetensors(path: str | os.PathLike[str]) -> str:
     return h.hexdigest()
 
 
-def _hf_token() -> str | None:
-    return os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_API_KEY")
-
-
-def upload_model_folder_hf(
-    folder_path: str | os.PathLike[str],
-    repo: str,
-    revision: str | None = None,
-    commit_message: str | None = None,
-) -> ModelRef:
-    """Upload a model folder to HuggingFace Hub and return an hf: commit digest."""
-    from huggingface_hub import HfApi, create_repo
-
-    token = _hf_token()
-    if not token:
-        raise HippiusHubAuthError(
-            "HF upload requires HF_TOKEN or HUGGINGFACE_API_KEY in the environment."
-        )
-    api = HfApi(token=token)
-    create_repo(repo, token=token, exist_ok=True, repo_type="model")
-    info = api.upload_folder(
-        folder_path=str(folder_path),
-        repo_id=repo,
-        commit_message=commit_message or f"upload {repo}",
-        allow_patterns=ALLOW_PATTERNS,
-        token=token,
-    )
-    digest = f"hf:{info.oid}"
-    return ModelRef(repo, _normalise_digest(digest))
-
-
 def upload_model_folder(
     folder_path: str | os.PathLike[str],
     repo: str,
@@ -389,16 +407,12 @@ def upload_model_folder(
     *,
     backend: str | None = None,
 ) -> ModelRef:
-    """Upload a model folder and return its immutable digest.
-
-    `backend` is ``hippius`` (default) or ``hf``. When unset, uses
-    ``ALBEDO_UPLOAD_BACKEND`` (default ``hippius``).
-    """
+    """Upload a model folder to Hippius Hub and return its sha256: OCI digest."""
     chosen = (backend or os.environ.get("ALBEDO_UPLOAD_BACKEND") or "hippius").strip().lower()
-    if chosen == "hf":
-        return upload_model_folder_hf(folder_path, repo, revision, commit_message)
     if chosen != "hippius":
-        raise ValueError(f"unsupported upload backend {chosen!r}; use hippius or hf")
+        raise ValueError(
+            f"unsupported upload backend {chosen!r}; miners must upload via Hippius Hub (hippius)"
+        )
 
     token = _prepare_upload_token(f"Uploading {folder_path} to {repo}")
     result = upload_folder(
