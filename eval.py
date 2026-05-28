@@ -537,9 +537,11 @@ class EvalState:
     chal_proc: VLLMProcess = field(default_factory=lambda: VLLMProcess("challenger", CHAL_PORT, CHAL_GPUS))
     eval_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     current_eval_id: str | None = None
-    # In-memory cache of uploaded_models_state.json — loaded at startup from
-    # Hippius S3 and updated after every duel so restarts don't re-check known models.
+    # In-memory caches loaded at startup from Hippius S3.
+    # models_state_cache   → uploaded_models_state.json (human-readable metadata + norms)
+    # models_tensor_state_cache → models_tensor_state.json (tensor_samples arrays)
     models_state_cache: dict | None = None
+    models_tensor_state_cache: dict | None = None
 
 
 STATE = EvalState()
@@ -1056,6 +1058,7 @@ async def _run_duel_inner(req: EvalRequest, sink: "DatasetSink",
     # known models skip recomputation. Failure is non-fatal.
     _chal_fp: dict | None = None
     _models_state: dict | None = None
+    _tensor_state: dict | None = None
     if EVALS_S3_BUCKET and EVALS_S3_ACCESS and EVALS_S3_SECRET:
         yield _sse_event("phase", {"eval_id": eval_id, "phase": "preeval_fingerprint"})
         try:
@@ -1071,6 +1074,14 @@ async def _run_duel_inner(req: EvalRequest, sink: "DatasetSink",
                 )
                 STATE.models_state_cache = _models_state
 
+            if STATE.models_tensor_state_cache is not None:
+                _tensor_state = STATE.models_tensor_state_cache
+            else:
+                _tensor_state = await asyncio.to_thread(
+                    preeval.load_tensor_state, _s3, EVALS_S3_BUCKET
+                )
+                STATE.models_tensor_state_cache = _tensor_state
+
             # If this exact ref was already evaluated, reuse stored fingerprint
             # (handles retries after infra failures without re-reading weights).
             _existing = _models_state.get("models", {}).get(chal_ref.immutable_ref)
@@ -1079,6 +1090,10 @@ async def _run_duel_inner(req: EvalRequest, sink: "DatasetSink",
                 _chal_fp = {k: _existing[k] for k in
                             ("fingerprint_method", "sha256_bytes", "layer_keys", "norm_vector")
                             if k in _existing}
+                # Also pull tensor_samples from tensor_state for v2 metric.
+                _ts_entry = (_tensor_state or {}).get("tensors", {}).get(chal_ref.immutable_ref)
+                if _ts_entry and "tensor_samples" in _ts_entry:
+                    _chal_fp["tensor_samples"] = _ts_entry["tensor_samples"]
             else:
                 _chal_fp = await asyncio.to_thread(
                     preeval.compute_fingerprint, chal_dir
@@ -1091,6 +1106,7 @@ async def _run_duel_inner(req: EvalRequest, sink: "DatasetSink",
                 threshold=chain_config.PREEVAL_SIMILARITY_THRESHOLD,
                 skip_key=chal_ref.immutable_ref,
                 commit_block=_commit_block,
+                tensor_state=_tensor_state,
             )
             if _is_dup:
                 _orig_block = (
@@ -1098,6 +1114,31 @@ async def _run_duel_inner(req: EvalRequest, sink: "DatasetSink",
                     .get(_matched or "", {})
                     .get("commit_block", preeval._UNKNOWN_BLOCK)
                 )
+                # Save the duplicate's fingerprint as "invalid" so it is tracked
+                # and future re-submissions of the same weights are caught instantly.
+                try:
+                    _dup_state, _dup_tensor_state = preeval.add_fingerprint_to_state(
+                        _models_state,
+                        _tensor_state,
+                        chal_ref.immutable_ref,
+                        _chal_fp,
+                        hotkey=req.hotkey or "",
+                        verdict="invalid",
+                        repo=chal_ref.repo,
+                        digest=chal_ref.digest,
+                        commit_block=_commit_block,
+                    )
+                    await asyncio.to_thread(
+                        preeval.save_models_state, _s3, EVALS_S3_BUCKET, _dup_state
+                    )
+                    await asyncio.to_thread(
+                        preeval.save_tensor_state, _s3, EVALS_S3_BUCKET, _dup_tensor_state
+                    )
+                    STATE.models_state_cache = _dup_state
+                    STATE.models_tensor_state_cache = _dup_tensor_state
+                    log.info("duplicate fingerprint saved as invalid: %s", chal_ref.immutable_ref)
+                except Exception:
+                    log.exception("failed to save duplicate fingerprint (non-fatal)")
                 yield _sse_event("verdict", {
                     "eval_id": eval_id,
                     "accepted": False,
@@ -1115,6 +1156,7 @@ async def _run_duel_inner(req: EvalRequest, sink: "DatasetSink",
             log.warning("preeval fingerprint check failed (non-fatal, proceeding with duel): %s", exc)
             _chal_fp = None
             _models_state = None
+            _tensor_state = None
 
     yield _sse_event("phase", {"eval_id": eval_id, "phase": "start_challenger_vllm",
                                  "challenger": chal_ref.immutable_ref})
@@ -1458,12 +1500,14 @@ async def _run_duel_inner(req: EvalRequest, sink: "DatasetSink",
     # Best-effort upload — never blocks the verdict on Hippius being up.
     sink_info = await _safe_flush_sink(sink, flushed_ref)
 
-    # Persist fingerprint to uploaded_models_state.json and refresh cache.
+    # Persist fingerprint to both state files and refresh caches.
     if _chal_fp is not None and _models_state is not None:
         try:
             verdict_str = "accepted" if accepted else "rejected"
-            _updated_state = preeval.add_fingerprint_to_state(
+            _ts = _tensor_state if _tensor_state is not None else {}
+            _updated_state, _updated_tensor_state = preeval.add_fingerprint_to_state(
                 _models_state,
+                _ts,
                 chal_ref.immutable_ref,
                 _chal_fp,
                 hotkey=req.hotkey or "",
@@ -1478,7 +1522,11 @@ async def _run_duel_inner(req: EvalRequest, sink: "DatasetSink",
             await asyncio.to_thread(
                 preeval.save_models_state, _s3, EVALS_S3_BUCKET, _updated_state
             )
+            await asyncio.to_thread(
+                preeval.save_tensor_state, _s3, EVALS_S3_BUCKET, _updated_tensor_state
+            )
             STATE.models_state_cache = _updated_state
+            STATE.models_tensor_state_cache = _updated_tensor_state
             log.info("fingerprint state updated: %d models in cache",
                      len(_updated_state.get("models", {})))
         except Exception:
@@ -1561,23 +1609,34 @@ async def _fingerprint_king_if_new(ref: ModelRef, king_dir: str) -> None:
             )
             STATE.models_state_cache = state
 
+        tensor_state = STATE.models_tensor_state_cache
+        if tensor_state is None:
+            tensor_state = await asyncio.to_thread(
+                preeval.load_tensor_state, _s3, EVALS_S3_BUCKET
+            )
+            STATE.models_tensor_state_cache = tensor_state
+
         if ref.immutable_ref in state.get("models", {}):
             log.info("set_king: fingerprint already stored for %s, skipping", ref.immutable_ref)
             return
 
         log.info("set_king: fingerprinting king %s in background …", ref.immutable_ref)
         fp = await asyncio.to_thread(preeval.compute_fingerprint, Path(king_dir))
-        updated = preeval.add_fingerprint_to_state(
-            state, ref.immutable_ref, fp,
+        updated_state, updated_tensor_state = preeval.add_fingerprint_to_state(
+            state, tensor_state, ref.immutable_ref, fp,
             hotkey="", verdict="king",
             repo=ref.repo, digest=ref.digest,
         )
         await asyncio.to_thread(
-            preeval.save_models_state, _s3, EVALS_S3_BUCKET, updated
+            preeval.save_models_state, _s3, EVALS_S3_BUCKET, updated_state
         )
-        STATE.models_state_cache = updated
+        await asyncio.to_thread(
+            preeval.save_tensor_state, _s3, EVALS_S3_BUCKET, updated_tensor_state
+        )
+        STATE.models_state_cache = updated_state
+        STATE.models_tensor_state_cache = updated_tensor_state
         log.info("set_king: king fingerprint saved (%d total in state)",
-                 len(updated.get("models", {})))
+                 len(updated_state.get("models", {})))
     except Exception:
         log.exception("set_king: background king fingerprinting failed (non-fatal)")
 
@@ -1664,11 +1723,13 @@ async def _startup() -> None:
             _s3 = preeval._get_or_create_s3_client(
                 EVALS_S3_ENDPOINT, EVALS_S3_ACCESS, EVALS_S3_SECRET
             )
-            STATE.models_state_cache = await asyncio.to_thread(
-                preeval.load_models_state, _s3, EVALS_S3_BUCKET
+            STATE.models_state_cache, STATE.models_tensor_state_cache = await asyncio.gather(
+                asyncio.to_thread(preeval.load_models_state, _s3, EVALS_S3_BUCKET),
+                asyncio.to_thread(preeval.load_tensor_state, _s3, EVALS_S3_BUCKET),
             )
             n = len(STATE.models_state_cache.get("models", {}))
-            log.info("loaded fingerprint state from Hippius S3: %d known model(s)", n)
+            t = len(STATE.models_tensor_state_cache.get("tensors", {}))
+            log.info("loaded fingerprint state from Hippius S3: %d model(s), %d tensor entry(s)", n, t)
         except Exception:
             log.exception("fingerprint state load at startup failed (non-fatal)")
 

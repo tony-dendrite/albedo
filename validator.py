@@ -1286,7 +1286,6 @@ async def process_challenge(state: State, http: httpx.AsyncClient,
     if rejection:
         log.info("%s: rejected at config gate: %s", cid, rejection)
         state.record_failure(entry, "config_mismatch", rejection)
-        state.maybe_retry(entry, "config_mismatch", rejection)
         state.current_eval = None
         state.flush()
         state.flush_dashboard(force=True)
@@ -1349,7 +1348,6 @@ async def process_challenge(state: State, http: httpx.AsyncClient,
                 log.error("%s: eval server %s: %s", cid, resp.status_code, err[:300])
                 _detail = f"{resp.status_code}: {err[:300].decode(errors='ignore')}"
                 state.record_failure(entry, "eval_http", _detail)
-                state.maybe_retry(entry, "eval_http", _detail)
                 state.current_eval = None
                 state.flush()
                 state.flush_dashboard(force=True)
@@ -1419,7 +1417,6 @@ async def process_challenge(state: State, http: httpx.AsyncClient,
                 cid, exc, backoff, state.eval_box_consecutive_fails,
             )
             state.record_failure(entry, "eval_infra", f"eval_unreachable: {exc}")
-            state.queue.insert(0, entry)
             state.current_eval = None
             state.flush()
             state.flush_dashboard(force=True)
@@ -1427,7 +1424,6 @@ async def process_challenge(state: State, http: httpx.AsyncClient,
         log.exception("%s: eval failed", cid)
         _detail = str(exc)
         state.record_failure(entry, "eval_error", _detail)
-        state.maybe_retry(entry, "eval_error", _detail)
         state.current_eval = None
         state.flush()
         state.flush_dashboard(force=True)
@@ -1440,7 +1436,6 @@ async def process_challenge(state: State, http: httpx.AsyncClient,
     if not verdict:
         log.error("%s: eval stream ended without verdict", cid)
         state.record_failure(entry, "no_verdict", "stream closed without verdict")
-        state.maybe_retry(entry, "no_verdict", "stream closed without verdict")
         state.current_eval = None
         state.flush()
         state.flush_dashboard(force=True)
@@ -1452,7 +1447,6 @@ async def process_challenge(state: State, http: httpx.AsyncClient,
         if "disk_full" in err and entry.get("hotkey"):
             state.infra_cooldown[entry["hotkey"]] = _monotonic_now() + 300.0
         state.record_failure(entry, "eval_infra", err)
-        state.maybe_retry(entry, "eval_infra", err)
     else:
         state.record_verdict(entry, verdict)
         if verdict.get("accepted"):
@@ -1665,7 +1659,6 @@ async def main() -> int:
                         _detail = f"exceeded {TICK_RESTART_AFTER}s"
                         state.unburn_challenge(entry)
                         state.record_failure(entry, "hard_timeout", _detail)
-                        state.maybe_retry(entry, "hard_timeout", _detail)
                         state.current_eval = None
                         state.flush()
                         state.flush_dashboard(force=True)

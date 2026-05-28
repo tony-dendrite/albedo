@@ -43,9 +43,11 @@ def main() -> None:
 
     s3 = preeval._get_or_create_s3_client(endpoint, access, secret)
 
-    log.info("Loading existing models state from s3://%s/%s", bucket, preeval.MODELS_STATE_KEY)
+    log.info("Loading existing state from s3://%s/", bucket)
     state = preeval.load_models_state(s3, bucket)
-    log.info("Found %d existing entries.", len(state.get("models", {})))
+    tensor_state = preeval.load_tensor_state(s3, bucket)
+    log.info("Found %d model entries, %d tensor entries.",
+             len(state.get("models", {})), len(tensor_state.get("tensors", {})))
 
     genesis_ref = ModelRef(chain_config.SEED_REPO, chain_config.SEED_DIGEST)
     ref_key = genesis_ref.immutable_ref
@@ -66,8 +68,9 @@ def main() -> None:
     fp = preeval.compute_fingerprint(genesis_dir)
     log.info("Fingerprint computed: %d layers, sha256=%s", len(fp["layer_keys"]), fp["sha256_bytes"][:16])
 
-    preeval.add_fingerprint_to_state(
+    state, tensor_state = preeval.add_fingerprint_to_state(
         state,
+        tensor_state,
         ref_key,
         fp,
         hotkey="",
@@ -76,10 +79,12 @@ def main() -> None:
         digest=genesis_ref.digest,
     )
     preeval.save_models_state(s3, bucket, state)
-    log.info("Genesis fingerprint saved. Total entries: %d", len(state["models"]))
+    preeval.save_tensor_state(s3, bucket, tensor_state)
+    log.info("Genesis fingerprint saved. Total model entries: %d, tensor entries: %d",
+             len(state["models"]), len(tensor_state.get("tensors", {})))
 
     # ── Verify upload ─────────────────────────────────────────────────────────
-    log.info("Verifying upload by re-downloading from s3://%s/%s …", bucket, preeval.MODELS_STATE_KEY)
+    log.info("Verifying upload by re-downloading from s3://%s/ …", bucket)
     try:
         readback = preeval.load_models_state(s3, bucket)
         if ref_key not in readback.get("models", {}):
