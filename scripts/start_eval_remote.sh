@@ -45,6 +45,13 @@ export VLLM_MOE_USE_DEEP_GEMM="${VLLM_MOE_USE_DEEP_GEMM:-0}"
 export ALBEDO_EVAL_HOST="${ALBEDO_EVAL_HOST:-0.0.0.0}"
 export ALBEDO_EVAL_PORT="${ALBEDO_EVAL_PORT:-9001}"
 export ALBEDO_MAX_PARALLEL_TURNS="${ALBEDO_MAX_PARALLEL_TURNS:-8}"
+export ALBEDO_MODEL_CACHE_DIR="${ALBEDO_MODEL_CACHE_DIR:-/root/albedo/hippius_models}"
+export ALBEDO_TMP_DIR="${ALBEDO_TMP_DIR:-/root/albedo/tmp}"
+export ALBEDO_MIN_DISK_BYTES="${ALBEDO_MIN_DISK_BYTES:-6442450944}"
+mkdir -p "$ALBEDO_TMP_DIR/triton_cache" "$ALBEDO_TMP_DIR/torchinductor"
+export TMPDIR="$ALBEDO_TMP_DIR"
+export TRITON_CACHE_DIR="$ALBEDO_TMP_DIR/triton_cache"
+export TORCHINDUCTOR_CACHE_DIR="$ALBEDO_TMP_DIR/torchinductor"
 
 exec .venv/bin/uvicorn eval:app \
   --host "$ALBEDO_EVAL_HOST" \
