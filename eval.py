@@ -98,6 +98,11 @@ VLLM_PROMPT_TOKEN_BUDGET = max(
 )
 # Reject duels where too many turns fail vLLM generation (unfair comparison).
 MIN_VALID_TURN_FRAC = float(os.environ.get("ALBEDO_MIN_VALID_TURN_FRAC", "0.8"))
+if not 0.0 < MIN_VALID_TURN_FRAC <= 1.0:
+    raise RuntimeError(
+        f"ALBEDO_MIN_VALID_TURN_FRAC must be in (0.0, 1.0], got {MIN_VALID_TURN_FRAC}. "
+        "Values ≤ 0 remove the valid-turn quality gate; values > 1 always reject duels."
+    )
 # Headroom for one challenger snapshot (~3.5 GB) + vLLM temp files.
 MIN_DISK_BYTES = int(os.environ.get("ALBEDO_MIN_DISK_BYTES", str(6 * 1024**3)))
 # Overlay `/tmp` on the eval box is often full (teutonic data). Triton JIT and
