@@ -302,21 +302,36 @@ def ensure_chat_template(model_dir: str | os.PathLike[str]) -> bool:
     cfg = json.loads(cfg_path.read_text())
     template = _load_default_chat_template()
     existing = (cfg.get("chat_template") or "").strip()
-    if existing and existing == template.strip():
-        return False  # already canonical — skip the write
+    changed = False
 
-    if existing and existing != template.strip():
-        log.warning("overwriting non-canonical chat_template in %s "
-                    "(miner-supplied templates are not allowed)", root)
-        # Write sentinel so validators and the eval server can detect and
-        # reject this as an injection attempt without re-reading the file.
-        (root / ".albedo_injection_detected").write_text(
-            f"chat_template: custom template detected ({len(existing)} chars)"
-        )
-    cfg["chat_template"] = template
+    if not existing or existing != template.strip():
+        if existing and existing != template.strip():
+            log.warning("overwriting non-canonical chat_template in %s "
+                        "(miner-supplied templates are not allowed)", root)
+            (root / ".albedo_injection_detected").write_text(
+                f"chat_template: custom template detected ({len(existing)} chars)"
+            )
+        cfg["chat_template"] = template
+        (root / "chat_template.jinja").write_text(template)
+        changed = True
+
+    # Strip execution vectors from tokenizer_config.json — validate_challenger_config()
+    # checks config.json for auto_map, but a miner can also embed it here.
+    if "auto_map" in cfg:
+        log.warning("removing auto_map from tokenizer_config.json in %s "
+                    "(custom modeling code is not allowed)", root)
+        del cfg["auto_map"]
+        changed = True
+    if cfg.get("trust_remote_code"):
+        log.warning("disabling trust_remote_code in tokenizer_config.json in %s", root)
+        cfg["trust_remote_code"] = False
+        changed = True
+
+    if not changed:
+        return False
+
     cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n")
-    (root / "chat_template.jinja").write_text(template)
-    log.info("enforced canonical chat template in %s", root)
+    log.info("enforced canonical tokenizer config in %s", root)
     return True
 
 
