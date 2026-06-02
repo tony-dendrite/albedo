@@ -50,8 +50,13 @@ thinking_models = [
 ]
 # When the judge returns malformed JSON or an unknown verdict the parser
 # scores it as `reject`. Below are the strictness/cost knobs.
-retry_max    = 3
+retry_max    = 20
 retry_initial_backoff_s = 1.5
+# Maximum seconds between individual retry attempts (exponential backoff is
+# capped here so a long outage doesn't produce multi-hour inter-retry gaps).
+retry_max_backoff_s = 60
+# Hard wall: stop retrying after this many seconds regardless of retry_max.
+retry_timeout_s = 300
 # |chal_mean - king_mean| <= tie_band -> per-judge TIE; > tie_band -> WIN;
 # < -tie_band -> LOSE. These per-judge outcomes gate dethrone (see [judge]).
 tie_band     = 0.01

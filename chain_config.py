@@ -97,8 +97,10 @@ JUDGE_THINKING_MODELS: frozenset[str] = frozenset(
 JUDGE_THINKING_MAX_TOKENS: int = int(
     _judge.get("thinking_max_tokens", max(JUDGE_MAX_TOKENS, 4096))
 )
-JUDGE_RETRY_MAX: int = int(_judge.get("retry_max", 3))
+JUDGE_RETRY_MAX: int = int(_judge.get("retry_max", 20))
 JUDGE_RETRY_INITIAL_BACKOFF_S: float = float(_judge.get("retry_initial_backoff_s", 1.5))
+JUDGE_RETRY_MAX_BACKOFF_S: float = float(_judge.get("retry_max_backoff_s", 60.0))
+JUDGE_RETRY_TIMEOUT_S: float = float(_judge.get("retry_timeout_s", 300.0))
 JUDGE_TIE_BAND: float = float(_judge.get("tie_band", 0.01))
 JUDGE_DEFAULT_BASE_URL = "https://llm.chutes.ai/v1"
 
@@ -154,6 +156,8 @@ __all__ = [
     "JUDGE_THINKING_MAX_TOKENS",
     "JUDGE_RETRY_MAX",
     "JUDGE_RETRY_INITIAL_BACKOFF_S",
+    "JUDGE_RETRY_MAX_BACKOFF_S",
+    "JUDGE_RETRY_TIMEOUT_S",
     "JUDGE_TIE_BAND",
     "JUDGE_DEFAULT_BASE_URL",
     "DATASET_REPO",

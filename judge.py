@@ -253,7 +253,7 @@ class ChutesJudge:
         if self._client is None:
             self._client = httpx.AsyncClient(
                 base_url=self.base_url,
-                timeout=httpx.Timeout(120.0, connect=10.0),
+                timeout=httpx.Timeout(600.0, connect=10.0),
                 headers={
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
@@ -290,6 +290,8 @@ class ChutesJudge:
             "temperature": self.temperature,
             "max_tokens": max_tokens,
         }
+        import time as _time
+        deadline = _time.monotonic() + chain_config.JUDGE_RETRY_TIMEOUT_S
         delay = self.retry_initial_backoff_s
         last_exc: Exception | None = None
         for attempt in range(self.retry_max + 1):
@@ -329,11 +331,13 @@ class ChutesJudge:
                     return Verdict("reject", 0.0, f"http_{resp.status_code}",
                                    resp.text[:200], False, use_model)
 
-            if attempt >= self.retry_max:
+            if attempt >= self.retry_max or _time.monotonic() >= deadline:
                 break
-            jitter = delay * (0.5 + random.random())
+            jitter = min(delay, chain_config.JUDGE_RETRY_MAX_BACKOFF_S) * (0.5 + random.random())
+            log.info("judge[%s] retry %d/%d after %.1fs: %s",
+                     use_model, attempt + 1, self.retry_max, jitter, last_exc)
             await asyncio.sleep(jitter)
-            delay *= 2
+            delay = min(delay * 2, chain_config.JUDGE_RETRY_MAX_BACKOFF_S)
 
-        log.warning("judge[%s] exhausted retries: %s", use_model, last_exc)
+        log.warning("judge[%s] exhausted retries (%d): %s", use_model, self.retry_max, last_exc)
         return Verdict("reject", 0.0, "retries_exhausted", str(last_exc or ""), False, use_model)

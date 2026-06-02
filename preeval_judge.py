@@ -40,6 +40,8 @@ from dataclasses import dataclass, field
 
 import httpx
 
+import chain_config
+
 log = logging.getLogger("albedo.preeval_judge")
 
 # ---------------------------------------------------------------------------
@@ -243,8 +245,10 @@ async def _judge_call_raw(
     has its own system prompt and schema.
     Returns empty string on any unrecoverable error.
     """
+    import time as _time
     body = {"model": model, "messages": messages,
             "temperature": temperature, "max_tokens": max_tokens}
+    deadline = _time.monotonic() + chain_config.JUDGE_RETRY_TIMEOUT_S
     delay = retry_initial_backoff_s
     last_exc: Exception | None = None
 
@@ -274,11 +278,11 @@ async def _judge_call_raw(
             else:
                 log.warning("_judge_call_raw[%s] non-retryable %s", model, resp.status_code)
                 return ""
-        if attempt >= retry_max:
+        if attempt >= retry_max or _time.monotonic() >= deadline:
             break
-        jitter = delay * (0.5 + random.random())
+        jitter = min(delay, chain_config.JUDGE_RETRY_MAX_BACKOFF_S) * (0.5 + random.random())
         await asyncio.sleep(jitter)
-        delay *= 2
+        delay = min(delay * 2, chain_config.JUDGE_RETRY_MAX_BACKOFF_S)
 
     log.warning("_judge_call_raw[%s] exhausted retries: %s", model, last_exc)
     return ""
@@ -369,20 +373,19 @@ async def probe_injection(
 
     # Build a dedicated judge client for the injection probe.
     # Reads the same env vars as ChutesJudge so no extra config is needed.
-    import chain_config as _cc
     import os as _os
     _judge_base = (
-        _os.environ.get(_cc.JUDGE_BASE_URL_ENV) or _cc.JUDGE_DEFAULT_BASE_URL
+        _os.environ.get(chain_config.JUDGE_BASE_URL_ENV) or chain_config.JUDGE_DEFAULT_BASE_URL
     ).rstrip("/")
-    _judge_key = _os.environ.get(_cc.JUDGE_API_KEY_ENV) or ""
-    _judge_temperature = _cc.JUDGE_TEMPERATURE
-    _judge_max_tokens  = _cc.JUDGE_MAX_TOKENS
-    _judge_retry_max   = _cc.JUDGE_RETRY_MAX
-    _judge_backoff     = _cc.JUDGE_RETRY_INITIAL_BACKOFF_S
+    _judge_key = _os.environ.get(chain_config.JUDGE_API_KEY_ENV) or ""
+    _judge_temperature = chain_config.JUDGE_TEMPERATURE
+    _judge_max_tokens  = chain_config.JUDGE_MAX_TOKENS
+    _judge_retry_max   = chain_config.JUDGE_RETRY_MAX
+    _judge_backoff     = chain_config.JUDGE_RETRY_INITIAL_BACKOFF_S
 
     async with httpx.AsyncClient(
         base_url=_judge_base,
-        timeout=httpx.Timeout(120.0, connect=10.0),
+        timeout=httpx.Timeout(600.0, connect=10.0),
         headers={"Authorization": f"Bearer {_judge_key}",
                  "Content-Type": "application/json"},
     ) as judge_http, httpx.AsyncClient() as chal_http:
