@@ -1,0 +1,505 @@
+# Albedo
+
+> Trajectory-distillation king-of-the-hill subnet on Bittensor (netuid 97). Miners submit
+> Qwen3-4B challengers locked to the king's size class; the reigning king and challenger duel
+> on SWE-ZERO coding trajectories judged by an ensemble of LLMs. Full duel traces are
+> published for downstream distillation.
+
+**Subnet:** `ALBEDO_NETUID=97` (finney mainnet)
+
+---
+
+## Repository layout
+
+```
+├── albedo/                      ← main package (all shared logic)
+│   ├── config.py                    Single source of truth — reads chain.toml at import time
+│   ├── stats.py                     Pure math: paired_bootstrap_lcb, aggregate_duel
+│   │
+│   ├── storage/
+│   │   ├── r2.py                    R2 (Cloudflare) client — validator-private state
+│   │   ├── hippius.py               Hippius S3 client — public dashboard writes
+│   │   ├── store.py                 ObjectStore — composes r2 + hippius
+│   │   └── state.py                 State — all mutable validator state + close_eval()
+│   │
+│   ├── models/
+│   │   ├── ref.py                   ModelRef dataclass (repo@digest)
+│   │   ├── reveal.py                build_reveal_v4 / parse_reveal_v4 ("v4|repo|digest|hotkey")
+│   │   ├── download.py              materialize_model — download to local cache
+│   │   ├── upload.py                upload_model_folder — push weights to Hippius
+│   │   └── template.py              ensure_chat_template + scrub_tokenizer_config
+│   │
+│   ├── judge/
+│   │   ├── rubric.py                RUBRIC_SYSTEM + PROBE_SYSTEM prompt strings (only)
+│   │   ├── verdict.py               Verdict dataclass + parse_verdict()
+│   │   └── client.py                ChutesJudge — async HTTP, retry, deadline, 429 handling
+│   │
+│   ├── preeval/
+│   │   ├── fingerprint.py           L2-norm near-duplicate detection (cosine sim ≥ 0.95)
+│   │   └── injection.py             LLM injection probe (N=3 turns, separate seed)
+│   │
+│   ├── duel/
+│   │   ├── sampler.py               TrajectoryDataset + Sample — deterministic SWE-ZERO sampling
+│   │   ├── turn.py                  score_turn — generate + judge, fairness (concurrent)
+│   │   └── stream.py                run_duel — SSE generator, two-stage dethrone gate
+│   │
+│   ├── validator/
+│   │   ├── chain.py                 scan_reveals — decode v4 on-chain commitments
+│   │   ├── admission.py             validate_challenger_config — 9 checks before GPU duel
+│   │   ├── faults.py                is_infra_failure / is_miner_fault — classify eval failures
+│   │   ├── weights.py               maybe_set_weights — emission split with uid_map snapshot
+│   │   ├── challenge.py             process_challenge — one challenger end-to-end
+│   │   ├── website.py               upload_website — push dashboard HTML to Hippius
+│   │   └── loop.py                  main(), _startup(), _main_loop()
+│   │
+│   └── eval_server/
+│       ├── vllm.py                  VLLMProcess — manages one vLLM subprocess
+│       ├── server_state.py          EvalState singleton (king_proc, chal_proc, eval_lock)
+│       ├── endpoints.py             FastAPI: /health, /set_king, /eval, /prune_cache
+│       └── sink.py                  DatasetSink — publish eval traces to S3
+│
+├── eval.py                      Thin entrypoint → albedo.eval_server (PM2 target)
+├── validator.py                 Thin entrypoint → albedo.validator (PM2 target)
+├── miner.py                     Standalone miner: discover king → train → upload → reveal
+├── chain.toml                   Active chain config (single source of truth for all params)
+├── archs/qwen3/__init__.py      Arch shim — imports transformers so HF Auto* resolves without trust_remote_code
+│
+├── scripts/
+│   ├── collect_traces.py        Step 1: download public duel traces, format for training
+│   ├── inspect_dataset.py       Step 2: validate dataset health before GPU hours
+│   ├── train_sft.py             Step 3: full SFT fine-tune (single/multi-GPU)
+│   ├── sanity_check.py          Step 4: run 3 SWE prompts, check format before upload
+│   ├── upload_challenger.py     Step 5: upload checkpoint to Hippius + print reveal string
+│   ├── seed_genesis.py          Operator: upload a new genesis king, print chain.toml snippet
+│   └── reset_state.py           Operator: wipe all R2 validator state for fresh competition
+│
+└── configs/ds_zero2.json        DeepSpeed ZeRO-2 config for multi-GPU training
+```
+
+---
+
+## chain.toml — configuration reference
+
+All runtime parameters come from here. `albedo/config.py` loads it at import time.
+
+```toml
+[chain]
+name        = "Albedo"
+seed_repo   = "yourorg/albedo-qwen3-4b-genesis"   # genesis king Hippius repo
+repo_pattern = "^[^/]+/albedo-qwen3-4b-.+$"       # challenger naming — must include "qwen3-4b"
+
+[arch]
+module = "archs.qwen3"              # HF shim — no trust_remote_code needed
+extra_lock_keys = [
+  # Architecture identity
+  "max_position_embeddings",        # 40960 for Qwen3-4B
+  "tie_word_embeddings",            # false
+  "rope_theta",                     # 1000000.0
+  # Capacity — locks competition to the 4B size class
+  "hidden_size",
+  "num_hidden_layers",
+  "num_attention_heads",
+  "num_key_value_heads",
+  "intermediate_size",
+  "head_dim",
+]
+# vocab_size and model_type are always locked (from albedo/config.py COMPAT_KEYS)
+
+[seed]
+tokenizer_repo = "Qwen/Qwen3-4B"   # HF tokenizer for eval server
+seed_digest    = "sha256:..."       # fill after: python scripts/seed_genesis.py
+
+[judge]
+models = [                          # T=3 independent judges
+  "deepseek-ai/DeepSeek-V3.2-TEE",
+  "Qwen/Qwen3-235B-A22B-Thinking-2507",
+  "moonshotai/Kimi-K2.6-TEE",
+]
+tie_band           = 0.01           # |delta| ≤ 0.01 → tie (not a win or loss)
+call_timeout_s     = 300.0          # hard deadline per judge call — returns parse_failure on expiry
+max_429_wait_s     = 60.0           # cap per 429-retry sleep (prevents 384s waits)
+retry_max          = 3              # non-429 retries
+retry_initial_backoff_s = 1.5
+
+[duel]
+n_samples            = 64           # SWE-ZERO trajectories per duel
+max_turns_per_sample = 10           # max turns per trajectory
+gate_alpha           = 0.05         # bootstrap LCB gate threshold
+bootstrap_resamples  = 10000
+gen_temperature      = 1.0
+gen_max_tokens       = 1024
+gen_max_model_len    = 32768
+king_chain_depth     = 5            # rolling payout: current + 4 past kings
+win_margin           = 2.0          # challenger must beat king by ≥2 point (0–100 scale)
+
+[preeval]
+similarity_threshold = 0.95         # cosine sim ≥ this → duplicate rejection
+
+[dataset]
+repo        = "AlienKevin/SWE-ZERO-12M-trajectories"
+shard_glob  = "data/train-*.parquet"
+manifest_sha256 = "982a92bd..."     # dataset integrity pin
+```
+
+---
+
+## Environment variables
+
+### Validator
+| Variable | Default | Purpose |
+|---|---|---|
+| `ALBEDO_NETUID` | **0** (aborts) | Must set to `97` |
+| `ALBEDO_NETWORK` | `finney` | Bittensor network |
+| `BT_WALLET_NAME` | `default` | Validator wallet name |
+| `BT_WALLET_HOTKEY` | `default` | Validator hotkey name |
+| `ALBEDO_EVAL_SERVER_URL` | `http://localhost:9001` | Eval server endpoint |
+| `ALBEDO_R2_ENDPOINT` | — | Cloudflare R2 endpoint (private state) |
+| `ALBEDO_R2_BUCKET` | — | R2 bucket name |
+| `ALBEDO_R2_ACCESS_KEY` | — | R2 access key |
+| `ALBEDO_R2_SECRET_KEY` | — | R2 secret key |
+| `ALBEDO_DS_BUCKET` | — | Hippius public dashboard bucket |
+| `ALBEDO_DS_ACCESS_KEY` | — | Hippius S3 access key |
+| `ALBEDO_DS_SECRET_KEY` | — | Hippius S3 secret key |
+| `ALBEDO_WEIGHT_INTERVAL` | `300` | Blocks between weight sets |
+| `ALBEDO_BURN_UID` | `0` | UID to burn weights to when no registered king |
+
+### Eval server
+| Variable | Default | Purpose |
+|---|---|---|
+| `CHUTES_API_KEY` | required | Judge LLM API key |
+| `CHUTES_BASE_URL` | `https://llm.chutes.ai/v1` | Judge API base URL |
+| `HIPPIUS_HUB_TOKEN` | required | Model download auth |
+| `ALBEDO_DATASET_DIR` | `/root/albedo/dataset` | Local SWE-ZERO parquet directory |
+| `ALBEDO_KING_GPUS` | `0` | CUDA_VISIBLE_DEVICES for king vLLM |
+| `ALBEDO_CHAL_GPUS` | `1` | CUDA_VISIBLE_DEVICES for challenger vLLM |
+| `ALBEDO_GPU_MEMORY_UTILIZATION` | `0.85` | vLLM memory fraction |
+| `ALBEDO_MODEL_CACHE_DIR` | `/root/albedo/hippius_models` | Model weight cache |
+| `ALBEDO_EVALS_S3_BUCKET` | — | Bucket for published eval traces |
+| `ALBEDO_EVALS_S3_ENDPOINT` | — | S3 endpoint for eval traces |
+
+### Miner
+| Variable | Default | Purpose |
+|---|---|---|
+| `ALBEDO_NETUID` | **0** (aborts) | Must set to `97` |
+| `ALBEDO_NETWORK` | `finney` | Bittensor network |
+| `BT_WALLET_NAME` | `albedo` | Miner wallet name |
+| `HIPPIUS_HUB_TOKEN` | required | Upload auth |
+| `ALBEDO_CHALLENGER_NAMESPACE` | `miner` | Your Hippius namespace |
+
+---
+
+## Complete flow: new challenger model
+
+### Step 1 — Collect training data
+
+Downloads all public `eval-*.jsonl.gz` traces from Hippius, extracts turns where
+the challenger beat the king (`delta_avg > min_delta`), formats them for SFT.
+
+```bash
+python scripts/collect_traces.py \
+  --out       data/traces.jsonl \
+  --min-delta 0.05 \
+  --cache-dir data/cache
+```
+
+Each output line: `{"text": "<Qwen3 chat-formatted conversation>", "delta_avg": 0.12, "eval_id": "eval-0042"}`
+
+The `text` field is the full conversation including the winning challenger reply,
+formatted with Qwen3 chat template. Train the model to predict this reply.
+
+### Step 2 — Inspect dataset
+
+```bash
+python scripts/inspect_dataset.py data/traces.jsonl
+```
+
+Shows: example count, length distribution, delta histogram, and warnings for
+too few examples (<200), dominant single eval (>40%), or missing `text` fields.
+
+### Step 3 — Fine-tune
+
+**Single A100:**
+```bash
+python scripts/train_sft.py \
+  --base    Qwen/Qwen3-4B \
+  --data    data/traces.jsonl \
+  --output  checkpoints/v1 \
+  --epochs  3
+```
+
+**4×A100 with DeepSpeed:**
+```bash
+torchrun --nproc_per_node=4 scripts/train_sft.py \
+  --base       Qwen/Qwen3-4B \
+  --data       data/traces.jsonl \
+  --output     checkpoints/v1 \
+  --deepspeed  configs/ds_zero2.json \
+  --batch-size 4 \
+  --grad-accum 2
+```
+
+Checkpoint saved to `checkpoints/v1/final/`.
+
+### Step 4 — Sanity check
+
+```bash
+python scripts/sanity_check.py checkpoints/v1/final
+```
+
+Runs 3 SWE-style prompts and verifies: non-empty reply, exactly one bash block,
+no injected verdict JSON. A model that fails format gets score 0.0 from every
+judge on every turn.
+
+### Step 5 — Upload to Hippius
+
+```bash
+HIPPIUS_HUB_TOKEN=your_token python scripts/upload_challenger.py \
+  --model  checkpoints/v1/final \
+  --repo   youruser/albedo-qwen3-4b-v1 \
+  --hotkey 5GcD3Pk5XscAESmb...
+```
+
+Repo name must match `repo_pattern` from `chain.toml`:
+`^[^/]+/albedo-qwen3-4b-.+$`
+Valid: `alice/albedo-qwen3-4b-v1`, `bob/albedo-qwen3-4b-sft`
+
+### Step 6 — Submit reveal on-chain
+
+The script prints the reveal string. Submit it:
+
+```python
+import bittensor as bt
+wallet    = bt.Wallet(name="default", hotkey="default")
+subtensor = bt.Subtensor(network="finney")
+result    = subtensor.commit(wallet, 97, "v4|youruser/albedo-qwen3-4b-v1|sha256:...|5GcD3...")
+print("Committed:", result)
+```
+
+### Step 7 — Monitor
+
+```bash
+# Watch for your eval in the validator log
+ssh templar "grep 'youruser\|albedo-qwen3' ~/.pm2/logs/albedo-validator-error.log -f"
+
+# Dashboard
+python3 -c "
+import json, urllib.request
+d = json.load(urllib.request.urlopen('https://us-east-1.hippius.com/albedo/dashboard.json'))
+print('King:', d['king'].get('model_repo'), '| Queue:', len(d.get('queue', [])))
+"
+```
+
+---
+
+## Validator flow (internal)
+
+```
+chain scan (every ~20s)
+  scan_reveals()
+    → filter seen hotkeys, completed repos, king hotkeys
+    → spoof detection: author_hotkey ≠ chain_hotkey → burn + record_failure
+  enqueue()
+    → 1-hotkey-1-eval enforcement
+    → same repo from two hotkeys → second blocked at enqueue
+  process_challenge()
+    → validate_challenger_config() (9 checks — repo pattern, sha256, arch, locks, no .py, etc.)
+    → _compute_seed(reveal_block)  ← uses commit block, not current block
+    → POST /eval  (SSE stream)
+    →   eval server: check_fingerprint (cosine sim ≥ 0.95 → duplicate)
+    →   eval server: probe_injection (N=3, separate seed)
+    →   eval server: run_duel (64 turns × up to 10 turns × 3 judges)
+    →   eval server: stage-1 gate (wins ≥ 1, losses = 0)
+    →   eval server: stage-2 gate (bootstrap LCB > 0 at α=0.05)
+    →   verdict SSE event
+    → accepted → state.set_king() + /set_king on eval + set_weights
+    → always: state.close_eval() in finally
+```
+
+**Key guarantees:**
+- `close_eval()` is always called (finally block) even if `set_king()` raises
+- `uid_map` is snapshotted before first `await` in `maybe_set_weights` (TOCTOU fix)
+- King hotkeys excluded from `scan_reveals` via explicit `king_hotkeys` set (genesis king fix)
+- `seen_hotkeys` S3 failure → `RuntimeError` raised, validator refuses to start
+
+---
+
+## Eval server flow (internal)
+
+```
+POST /eval (EvalRequest)
+  ├─ 409 if eval_lock.locked()
+  ├─ parse king/challenger ModelRef from req (repo + digest keys)
+  └─ _stream() generator:
+       acquire eval_lock
+       Gate 1: materialize challenger → start vLLM → wait_healthy()
+               on failure → emit error verdict SSE, return
+       Gate 2: check_fingerprint(chal_dir, STATE.fingerprints)
+               is_dup=True → emit duplicate verdict SSE, return
+       Gate 3: probe_injection(challenger_url, eval_id, dataset_dir)
+               not is_clean → emit injection verdict SSE, return
+       resolve_model_names() once (not per turn)
+       run_duel(samples, king_client, chal_client, ...)
+         for each turn (up to max_parallel=8 concurrent):
+           score_turn(): generate king+chal simultaneously, score all judges simultaneously
+           vllm_error turns → excluded from delta calculation (not unfairly penalised)
+         aggregate_duel(): metric-first mean → per-judge score → challenger_score vs king_score
+         gate-1: (challenger_score - king_score) >= win_margin (2.0 points, 0–100 scale)
+         gate-2: paired_bootstrap_lcb() LCB > 0 at gate_alpha=0.05
+       emit verdict SSE
+       add challenger fingerprint (background task)
+       sink.flush() → publish trace to S3
+
+POST /set_king ({"king": {"repo": ..., "digest": ...}})
+  ├─ idempotency: same model already alive → return ok
+  ├─ materialize_model() (await — yield point)
+  ├─ eval_lock.locked() check AFTER materialize (TOCTOU fix)
+  ├─ king_proc.start() + wait_healthy()
+  └─ fingerprint king in background
+```
+
+---
+
+## Judge retry logic (DeepSeek / rate limits)
+
+`ChutesJudge._chat()` uses separate budgets for 429 and non-429 failures:
+
+| Error | Retries | Backoff | Notes |
+|---|---|---|---|
+| 429 rate-limited | **indefinite** | `1.5 × 4^min(n,4)` capped at `max_429_wait_s=60s` | Respects `Retry-After`; each sleep extends the deadline so 429 waits never consume the time budget |
+| 5xx / network | up to `retry_max=3` | `1.5 × 2^attempt` | |
+| 4xx (not 429) | 0 | — | Permanent — raised immediately |
+
+**Hard deadline** (`call_timeout_s=300s`): applies only to non-429 failures. If the non-429
+retry budget runs out, `pairwise_judge()` returns a `parse_failure` MetricVerdict
+(score=0.0, parse_ok=False) so the duel turn continues rather than stalling.
+Probe calls (`probe()`) catch all exceptions including `DeadlineExceeded` and retry
+indefinitely — a probe always completes with a definitive True/False answer.
+
+**Jitter**: 0–500ms random pre-call sleep staggers simultaneous king + challenger
+requests to the same judge, halving rate-limit pressure.
+
+**The "7 consecutive 429s" case** (DeepSeek under load):
+- Without cap: ~1,280s total wait (~21 min)
+- With cap at 60s: ~272s total wait (~4.5 min), deadline fires at 300s
+
+---
+
+## Admission gates (what gets a challenger rejected)
+
+`validate_challenger_config()` in `albedo/validator/admission.py` runs these checks
+in order before dispatching to the GPU eval box:
+
+1. Repo name matches `REPO_PATTERN` from `chain.toml`
+2. Digest starts with `sha256:` (not `hf:`)
+3. `config.json` downloadable from Hippius (config-only fetch — fast)
+4. `architectures` field matches king (`["Qwen3ForCausalLM"]`)
+5. All lock keys match king: `vocab_size`, `model_type`, `max_position_embeddings`, `tie_word_embeddings`, `rope_theta`, `hidden_size`, `num_hidden_layers`, `num_attention_heads`, `num_key_value_heads`, `intermediate_size`, `head_dim`
+6. No `auto_map` key in `config.json`
+7. No `quantization_config` key in `config.json` — quantized models rejected
+8. No `*.py` files in the repo
+9. At least one `.safetensors` file
+
+The capacity keys (`hidden_size`, `num_hidden_layers`, etc.) lock the competition to the **Qwen3-4B** size class — challengers must match the king's architecture exactly.
+
+---
+
+## Eval data (public duel traces)
+
+```
+https://us-east-1.hippius.com/albedo/evals/YYYY-MM-DD/eval-NNNN.jsonl.gz
+```
+
+Each file is gzip JSONL. Per-turn fields relevant for training:
+- `messages_prefix` — conversation history up to this turn
+- `messages_prompt` — current user turn
+- `chal_reply` — the challenger's response (training target)
+- `king_reply` — the king's response (for DPO preference pairs)
+- `delta_avg` — `chal_score - king_score` averaged across judges
+- `parse_ok` — False if any judge failed to parse a verdict
+- `vllm_error` — set if vLLM failed to generate (turn not valid for training)
+
+Filter: `delta_avg > 0.05` and `parse_ok=True` and `vllm_error is None` for clean SFT data.
+
+---
+
+## Launching a fresh competition (genesis reset)
+
+```bash
+# 1. Train or choose genesis model, upload to Hippius
+python scripts/seed_genesis.py --hf-model Qwen/Qwen3-4B --repo yourorg/albedo-qwen3-4b-genesis
+# — or for custom fine-tune:
+python scripts/seed_genesis.py --local-dir checkpoints/genesis/final --repo yourorg/albedo-qwen3-4b-genesis
+
+# 2. Paste printed digest into chain.toml [seed].seed_digest
+# 3. Stop validator
+ssh templar "pm2 stop albedo-validator"
+
+# 4. Clear all R2 state
+python scripts/reset_state.py  # requires ALBEDO_R2_* env vars
+
+# 5. Deploy updated code
+git push
+ssh templar "cd /path/to/albedo && git pull && pm2 restart albedo-validator"
+
+# 6. Verify — logs should show: "crowned new king: reign=#0"
+```
+
+Clears: `king/current.json`, `state/king_chain.json`, `state/seen_hotkeys.json`,
+`state/completed_repos.json`, `state/queue.json`, `state/validator_state.json`,
+`state/dashboard_history.json`
+
+---
+
+## Key API contracts
+
+**Reveal format:** `v4|{repo}|{digest}|{author_hotkey_ss58}`
+
+**EvalRequest body (POST /eval):**
+```json
+{
+  "eval_id":    "eval-000042",
+  "hotkey":     "5GcD3...",
+  "seed_hex":   "a3f9c2...",
+  "king":       {"repo": "org/albedo-qwen3-4b-v1", "digest": "sha256:..."},
+  "challenger": {"repo": "org/albedo-qwen3-4b-v2", "digest": "sha256:..."}
+}
+```
+
+**Verdict SSE event (event: verdict):**
+```json
+{
+  "eval_id":          "eval-000042",
+  "accepted":         true,
+  "n_done":           64,
+  "n_valid":          61,
+  "vllm_errors":      3,
+  "challenger_score": 56.2,
+  "king_score":       43.8,
+  "winner":           "challenger",
+  "by_judge":         {"deepseek-ai/DeepSeek-V3.2-TEE": 57.4, "Qwen/Qwen3-235B-A22B-Thinking-2507": 55.1, ...},
+  "by_metric":        {"correctness": 55.1, "grounding": 57.0, "progress": 56.8, "protocol": 55.9, "efficiency": 56.2},
+  "win_margin":       2.0,
+  "margin_ok":        true,
+  "mean_delta":       0.062,
+  "lcb":              0.031,
+  "se":               0.018,
+  "gate_alpha":       0.05,
+  "gate_lcb":         true,
+  "judge_models":     ["deepseek-ai/DeepSeek-V3.2-TEE", ...]
+}
+```
+
+**set_king body (POST /set_king):**
+```json
+{"king": {"repo": "org/albedo-qwen3-4b-v1", "digest": "sha256:..."}}
+```
+
+---
+
+## Links
+
+- **Dashboard JSON:** https://us-east-1.hippius.com/albedo/dashboard.json
+- **Dashboard UI:** https://us-east-1.hippius.com/albedo/index.html
+- **Eval traces:** https://us-east-1.hippius.com/albedo/evals/
+- **SWE-ZERO dataset:** https://huggingface.co/datasets/AlienKevin/SWE-ZERO-12M-trajectories
+- **Hippius registry:** https://registry.hippius.com

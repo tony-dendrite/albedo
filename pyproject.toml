@@ -1,31 +1,31 @@
 [project]
 name = "albedo"
 version = "0.1.0"
-description = "Trajectory-distillation king-of-the-hill subnet — challengers duel the king on SWE-ZERO trajectories, judged by Chutes LLM-as-judge."
+description = "Trajectory-distillation king-of-the-hill subnet (modular rewrite) — challengers duel the king on SWE-ZERO trajectories, judged by Chutes LLM-as-judge."
 requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [
     "bittensor>=10.3,<11",
     "boto3",
-    "minio",
     "httpx",
     "numpy",
-    "scipy",
-    "hippius-hub",
-    "huggingface-hub",
-    "hf_transfer>=0.1",
+    "pydantic",
     "safetensors",
     "torch",
     "transformers",
     "fastapi",
     "uvicorn",
-    "pydantic",
-    "pyarrow",
-    "accelerate",
     "datasets",
+    "pyarrow",
+    "pandas",
+    "huggingface-hub",
+    "hf_transfer>=0.1",
+    "hippius-hub",
 ]
 
 [project.optional-dependencies]
+# Miner-side SFT/RL training (scripts/train_sft.py + DeepSpeed configs in configs/).
+train = ["trl", "accelerate", "deepspeed"]
 dev = ["ruff"]
 
 [build-system]
@@ -33,20 +33,19 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["archs"]
-only-include = [
-    "validator.py",
-    "miner.py",
-    "eval.py",
-    "judge.py",
-    "trajectory_sampler.py",
-    "model_store.py",
-    "chain_config.py",
-    "chain.toml",
-    "archs",
-    "scripts",
-]
+# The package is the `albedo/` tree; `archs/` ships the Qwen3 shim + chat templates.
+packages = ["albedo", "archs"]
+
+# chain.toml is the single source of truth and is read from the repo root at import
+# time (albedo/config.py). Bundle it so non-editable installs still resolve it.
+[tool.hatch.build.targets.wheel.force-include]
+"chain.toml" = "chain.toml"
 
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.ruff.lint]
+# E/W pycodestyle, F pyflakes (F401 unused imports, F841 unused vars) to enforce the
+# no-dead-code rule, I import sorting.
+select = ["E", "W", "F", "I"]

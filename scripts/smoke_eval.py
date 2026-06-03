@@ -1,107 +1,74 @@
 #!/usr/bin/env python3
-"""Smoke-test the eval server end-to-end without paying for chain ops.
+"""smoke_eval.py — quick liveness check of a running eval server.
 
-Posts a synthetic /eval request directly to eval.py and streams the SSE
-events to stdout. Use to sanity-check that:
-
-    1. eval.py is reachable and king vLLM is up.
-    2. /set_king worked for the seed king.
-    3. The trajectory shard is loadable and sampling is deterministic.
-    4. Chutes judge auth is correct (no 401s).
-    5. The verdict shape matches what validator.py expects.
+Verifies /health (subprocesses, disk, dataset), and optionally drives /set_king
+to confirm the king boots and gets fingerprinted+persisted (Part B). Run this on
+the eval box after deploy.
 
 Usage:
-    export ALBEDO_EVAL_SERVER=http://127.0.0.1:9000
-    python scripts/smoke_eval.py \\
-        --chal-repo your-org/Albedo-Mini-1.7B-smoketest \\
-        --chal-digest sha256:....
-
-If --chal-repo is omitted we point challenger at the seed king itself.
-This is a useful "null duel" — both sides identical, the verdict should
-have mean_delta ≈ 0 and accepted=False.
+    python scripts/smoke_eval.py [--url http://localhost:8000]
+    python scripts/smoke_eval.py --set-king ns/albedo-qwen3-4b-genesis@sha256:<hex>
 """
 from __future__ import annotations
 
 import argparse
-import asyncio
-import json
-import os
 import sys
+import time
 
 import httpx
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import chain_config
+def _check_health(client: httpx.Client, url: str) -> dict:
+    r = client.get(f"{url}/health", timeout=15).raise_for_status()
+    h = r.json()
+    print(f"  ok={h.get('ok')}  king_alive={h['king']['alive']}  chal_alive={h['challenger']['alive']}")
+    print(f"  eval_lock_held={h.get('eval_lock_held')}  current_eval_id={h.get('current_eval_id')}")
+    print(f"  disk_free={h['disk']['free_bytes'] / 1e9:.1f}GB  dataset={h['dataset']}")
+    return h
 
-EVAL_URL = os.environ.get("ALBEDO_EVAL_SERVER", "http://127.0.0.1:9000")
 
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Eval server smoke test")
+    ap.add_argument("--url", default="http://localhost:8000")
+    ap.add_argument("--set-king", default=None, metavar="REPO@sha256:HEX",
+                    help="Optionally boot a king and confirm it comes alive")
+    args = ap.parse_args()
+    url = args.url.rstrip("/")
 
-async def main() -> int:
-    p = argparse.ArgumentParser()
-    p.add_argument("--chal-repo", default=chain_config.SEED_REPO)
-    p.add_argument("--chal-digest", default=chain_config.SEED_DIGEST)
-    p.add_argument("--seed-hex", default="00" * 32,
-                   help="32 bytes of seed material (default: zeros). Pin to "
-                        "reproduce a fixture set.")
-    p.add_argument("--n-samples", type=int, default=4)
-    p.add_argument("--max-turns", type=int, default=2)
-    args = p.parse_args()
+    with httpx.Client() as client:
+        print(f"[1] GET {url}/health")
+        try:
+            h = _check_health(client, url)
+        except Exception as exc:
+            print(f"  FAIL: eval server unreachable: {exc}")
+            return 1
+        if not h.get("ok"):
+            print("  FAIL: /health returned ok=false")
+            return 1
+        if not h["dataset"].get("exists"):
+            print("  WARN: dataset manifest not found — run scripts/prefetch_dataset.py")
 
-    async with httpx.AsyncClient(timeout=httpx.Timeout(None, connect=30.0)) as client:
-        h = await client.get(f"{EVAL_URL}/health")
-        h.raise_for_status()
-        health = h.json()
-        print("health:", json.dumps(health, indent=2))
-        if not health.get("king", {}).get("alive"):
-            print("ERROR: king vllm is not up. POST /set_king first.", file=sys.stderr)
-            return 2
+        if args.set_king:
+            repo, _, digest = args.set_king.partition("@")
+            if not digest.startswith("sha256:"):
+                print("  FAIL: --set-king must be REPO@sha256:<hex>")
+                return 1
+            print(f"\n[2] POST {url}/set_king  {repo}@{digest[:19]}…")
+            r = client.post(f"{url}/set_king", json={"king": {"repo": repo, "digest": digest}}, timeout=600)
+            print(f"  status={r.status_code} body={r.json()}")
+            if r.status_code != 200:
+                print("  FAIL: /set_king did not return 200")
+                return 1
+            time.sleep(5)  # let the background fingerprint+persist run
+            print("\n[3] GET /health (confirm king alive after set_king)")
+            h2 = _check_health(client, url)
+            if not h2["king"]["alive"]:
+                print("  FAIL: king not alive after /set_king")
+                return 1
 
-        req = {
-            "king": {
-                "repo": chain_config.SEED_REPO,
-                "digest": chain_config.SEED_DIGEST,
-            },
-            "challenger": {"repo": args.chal_repo, "digest": args.chal_digest},
-            "seed_hex": args.seed_hex,
-            "eval_id": "smoke-0001",
-            "n_samples": args.n_samples,
-            "max_turns": args.max_turns,
-        }
-        print("posting /eval:", json.dumps(req, indent=2))
-
-        async with client.stream("POST", f"{EVAL_URL}/eval", json=req,
-                                  timeout=httpx.Timeout(None, connect=30.0)) as resp:
-            if resp.status_code != 200:
-                err = await resp.aread()
-                print("HTTP", resp.status_code, err[:500].decode(errors="ignore"),
-                      file=sys.stderr)
-                return 3
-            cur_event = ""
-            async for line in resp.aiter_lines():
-                if line.startswith("event:"):
-                    cur_event = line.split(":", 1)[1].strip()
-                    continue
-                if not line.startswith("data:"):
-                    continue
-                payload = line.split(":", 1)[1].strip()
-                if not payload:
-                    continue
-                try:
-                    data = json.loads(payload)
-                except Exception:
-                    continue
-                if cur_event == "progress":
-                    print(f"[{cur_event}] {data.get('n_done')}/{data.get('n_total')} "
-                          f"king={data.get('king_mean', 0):.3f} chal={data.get('chal_mean', 0):.3f} "
-                          f"Δ={data.get('mean_delta', 0):+.3f} pf={data.get('parse_failures', 0)}")
-                elif cur_event == "verdict":
-                    print("[verdict]", json.dumps(data, indent=2))
-                    return 0 if data.get("accepted") is not None else 1
-                else:
-                    print(f"[{cur_event}] {data}")
+    print("\nSMOKE OK")
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(asyncio.run(main()))
+    raise SystemExit(main())
