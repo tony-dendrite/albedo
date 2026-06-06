@@ -144,6 +144,13 @@ if not 0.0 < DUEL_MIN_VALID_TURN_FRAC <= 1.0:
     raise RuntimeError(
         f"chain.toml [duel].min_valid_turn_frac must be in (0.0, 1.0]; got {DUEL_MIN_VALID_TURN_FRAC}"
     )
+# Max rescore passes for turns with failed judge replies. Each pass retries only
+# the specific failed judge(s) per turn, not the full turn.
+DUEL_RESCORE_PASSES: int = int(_u.get("rescore_passes", 2))
+if not 1 <= DUEL_RESCORE_PASSES <= 5:
+    raise RuntimeError(
+        f"chain.toml [duel].rescore_passes must be in [1, 5]; got {DUEL_RESCORE_PASSES}"
+    )
 if not 0.0 < DUEL_ALPHA < 1.0:
     raise RuntimeError(
         f"chain.toml [duel].alpha must be in (0.0, 1.0); got {DUEL_ALPHA}"

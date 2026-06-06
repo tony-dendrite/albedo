@@ -13,6 +13,7 @@ from albedo.config import (
     DUEL_BUDGET_S,
     DUEL_GATE_ALPHA,
     DUEL_MIN_VALID_TURN_FRAC,
+    DUEL_RESCORE_PASSES,
     DUEL_RESAMPLES,
     DUEL_WIN_MARGIN,
     JUDGE_METRIC_KEYS,
@@ -210,16 +211,20 @@ async def run_duel(
 
     n_done = len(results)
 
-    # Retry any turns that weren't fully scored (judge parse failures).
-    # Runs after ALL turns complete so nothing blocks the initial parallel pass.
-    unscored = [r for r in results if not r.parse_ok]
-    if unscored:
+    # Multi-pass rescore: retry only the failed judge(s) per turn, not the full turn.
+    # Each pass fires after all previous work completes so in-flight OR calls resolve first.
+    # Capped at DUEL_RESCORE_PASSES to avoid infinite waits on persistently broken judges.
+    for rescore_pass in range(1, DUEL_RESCORE_PASSES + 1):
+        unscored = [r for r in results if not r.parse_ok]
+        if not unscored:
+            break
         log.info(
-            "Retrying judge scoring for %d unscored turn(s) (of %d total)",
-            len(unscored), n_done,
+            "Rescore pass %d/%d — %d turn(s) with failed judge(s) (of %d total)",
+            rescore_pass, DUEL_RESCORE_PASSES, len(unscored), n_done,
         )
         yield _sse("retry", {
             "eval_id":          eval_id,
+            "rescore_pass":     rescore_pass,
             "n_retrying":       len(unscored),
             "retry_global_idx": [r.sample.global_idx for r in unscored],
         })
@@ -236,9 +241,11 @@ async def run_duel(
         ])
         still_unscored = sum(1 for r in results if not r.parse_ok)
         log.info(
-            "After retry: %d/%d turns fully scored (%d still unscored)",
-            n_done - still_unscored, n_done, still_unscored,
+            "Rescore pass %d done — %d/%d turns fully scored (%d still unscored)",
+            rescore_pass, n_done - still_unscored, n_done, still_unscored,
         )
+        if still_unscored == 0:
+            break
 
     n_valid = sum(1 for r in results if r.parse_ok)
 

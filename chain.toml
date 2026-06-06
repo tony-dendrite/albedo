@@ -109,6 +109,7 @@ duel_budget_s        = 11500.0
 # S4 acceptance: crown only if (challenger_score - king_score) >= win_margin (0–100 scale).
 win_margin           = 2.0
 min_valid_turn_frac  = 0.5
+rescore_passes       = 2      # max per-judge retry passes after main scoring (reduces excluded turns)
 
 [preeval]
 similarity_threshold = 0.95
