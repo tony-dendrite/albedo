@@ -187,6 +187,10 @@ function renderScores(scores) {
   if (chalScore != null) {
     const cCls = chalScore > 50 ? "win" : chalScore < 50 ? "lose" : "";
     const kCls = kScore   > 50 ? "win" : kScore   < 50 ? "lose" : "";
+    const lcb = scores.lcb;
+    const lcbCard = lcb != null
+      ? `<div class="score-card"><div class="label">lcb</div><div class="value ${scores.gate_lcb ? "win" : "lose"}" title="lower confidence bound of the win margin${scores.gate_alpha != null ? ` · gate α=${scores.gate_alpha}` : ""} · ${scores.gate_lcb ? "passed" : "failed"}">${Number(lcb).toFixed(4)}</div></div>`
+      : "";
     html += `
 <div class="detail-section">
   <h2>overall scores</h2>
@@ -195,6 +199,7 @@ function renderScores(scores) {
     <div class="score-card"><div class="label">king</div><div class="value ${kCls}">${Number(kScore).toFixed(2)}</div></div>
     <div class="score-card"><div class="label">winner</div><div class="value dim">${esc(winner)}</div></div>
     <div class="score-card"><div class="label">turns</div><div class="value dim">${nValid} / ${nDone}</div></div>
+    ${lcbCard}
   </div>
 </div>`;
   }
