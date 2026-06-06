@@ -1,4 +1,3 @@
-import { EVO_SCALE_MAX } from "./config.js";
 import { fmtScore3 } from "./format.js";
 import { judgeMeta, kingTitleName, modelLinkHtml } from "./model.js";
 import { kingDateShort } from "./format.js";
@@ -29,29 +28,6 @@ export function kingBarScores(entry, index, chain, currentEval) {
   return models.map(m => ({ model: m, score: null, chal_score: null, n: 0, live: false }));
 }
 
-function evoBarPx(score) {
-  if (score == null) return 0;
-  const root = getComputedStyle(document.documentElement);
-  const barH = parseFloat(root.getPropertyValue("--evo-bar-h")) || 232;
-  return Math.min(barH, Math.max(0, (Number(score) / EVO_SCALE_MAX) * barH));
-}
-
-function fmtBeatDelta(score, prev) {
-  if (score == null || prev == null || prev <= 0) return null;
-  const gain = Number(score) - Number(prev);
-  if (gain <= 0) return null;
-  return `+${((gain / Number(prev)) * 100).toFixed(1)}%`;
-}
-
-function evoBarLayers(score, prevScore) {
-  const currPx = evoBarPx(score);
-  const prevPx = prevScore == null ? 0 : evoBarPx(prevScore);
-  const gainPx = prevScore == null ? 0 : Math.max(0, currPx - prevPx);
-  const beat = gainPx > 0.5;
-  const seed = prevScore == null;
-  return { currPx, prevPx, gainPx, beat, seed };
-}
-
 function judgeColumns(kc, chain, currentEval) {
   const models = [];
   const seen = new Set();
@@ -62,46 +38,37 @@ function judgeColumns(kc, chain, currentEval) {
   return models;
 }
 
-function renderEvolutionTower(s, prevScore, filter) {
+function renderEvolutionTower(s, filter) {
   const meta = judgeMeta(s.model);
   const hidden = filter !== "all" && filter !== s.model ? " hidden" : "";
   const liveCls = s.live ? " live" : "";
-  if (s.score == null) {
+  // No verdict data (e.g. the genesis/base model) → ghost placeholder bar.
+  if (s.chal_score == null && s.score == null) {
     return `<div class="evo-tower${hidden}" data-judge="${s.model}" title="${s.model}">
       <div class="evo-tower-metrics"><span class="evo-tower-val">—</span></div>
       <div class="evo-bar missing"><div class="evo-bar-baseline"></div></div>
       <span class="evo-tower-letter">${meta.letter}</span>
     </div>`;
   }
-  const { currPx, prevPx, gainPx, beat, seed } = evoBarLayers(s.score, prevScore);
-  const delta = seed ? null : fmtBeatDelta(s.score, prevScore);
-  const deltaHtml = seed
-    ? `<span class="evo-tower-delta na">—</span>`
-    : (beat ? `<span class="evo-tower-delta beat">${delta}</span>` : "");
-  const barCls = ["evo-bar", seed ? "is-seed" : "", beat ? "" : "no-gain"].filter(Boolean).join(" ");
-
-  // Head-to-head labels: winner score on top (how this king won), prev-king score below
-  // (how they defended). Each value is a short number that fits the 44px tower.
-  const prevKingLabel = s.chal_score != null
-    ? `<span class="evo-tower-val evo-tower-king-val">${fmtScore3(s.score)}</span>`
-    : "";
-  const mainVal = s.chal_score != null ? fmtScore3(s.chal_score) : fmtScore3(s.score);
+  // Each bar is a full-height (100%) head-to-head split of the crowning duel:
+  // the current king it dethroned on TOP (blacked gold), the latest king
+  // (challenger that won) as solid gold filling from the BOTTOM.
+  // chal_score + score == 1, so the two segments fill the bar.
+  const latest  = s.chal_score != null ? Number(s.chal_score) : 1 - Number(s.score);
+  const current = s.score != null ? Number(s.score) : 1 - latest;
+  const latestPct  = (latest  * 100).toFixed(2);
+  const currentPct = (current * 100).toFixed(2);
   const tip = s.model
     + (s.n ? ` · n=${s.n}` : "")
-    + (s.chal_score != null ? ` · winner ${fmtScore3(s.chal_score)} / prev-king ${fmtScore3(s.score)}` : "")
-    + (beat && delta ? ` · beat prev by ${delta}` : "");
-  const style = `--curr-h:${currPx}px;--prev-h:${prevPx}px;--gain-h:${gainPx}px`;
+    + ` · latest ${fmtScore3(latest)} / current king ${fmtScore3(current)}`;
   return `<div class="evo-tower${hidden}${liveCls}" data-judge="${s.model}" title="${tip}">
     <div class="evo-tower-metrics">
-      <span class="evo-tower-val">${mainVal}</span>
-      ${prevKingLabel}
-      ${deltaHtml}
+      <span class="evo-tower-val">${fmtScore3(latest)}</span>
+      <span class="evo-tower-val evo-tower-king-val">${fmtScore3(current)}</span>
     </div>
-    <div class="${barCls}" style="${style}">
-      <div class="evo-bar-baseline"></div>
-      <div class="evo-bar-outline"></div>
-      <div class="evo-bar-gain"></div>
-      <div class="evo-bar-cap"></div>
+    <div class="evo-bar split">
+      <div class="evo-seg current" style="height:${currentPct}%"></div>
+      <div class="evo-seg latest" style="height:${latestPct}%"></div>
     </div>
     <span class="evo-tower-letter">${meta.letter}</span>
   </div>`;
@@ -144,20 +111,9 @@ export function renderEvolution(kc, chain, currentEval) {
     const dataIdx = kc.length - 1 - displayIdx;
     const scores = kingBarScores(kc[dataIdx], dataIdx, chain, currentEval);
     const byModel = Object.fromEntries(scores.map(s => [s.model, s]));
-    let prevScores = {};
-    if (displayIdx > 0) {
-      const prevIdx = kc.length - 1 - (displayIdx - 1);
-      const prevKingScores = kingBarScores(kc[prevIdx], prevIdx, chain, currentEval);
-      // Compare how well each king WON (chal_score) vs how well the previous king won,
-      // so the delta reflects improvement in winning margin, not in how badly each lost.
-      prevScores = Object.fromEntries(
-        prevKingScores.map(s => [s.model, s.chal_score ?? s.score])
-      );
-    }
     const towers = judges.map(m => {
       const s = byModel[m] || { model: m, score: null, chal_score: null, n: 0, live: false };
-      // prevScore for the delta is previous king's chal_score (winning performance).
-      return renderEvolutionTower(s, prevScores[m], evoJudgeFilter);
+      return renderEvolutionTower(s, evoJudgeFilter);
     }).join("");
     const dim = e.registered ? "" : " dim";
     const current = dataIdx === 0 ? " is-current" : "";

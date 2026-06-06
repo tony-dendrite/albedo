@@ -23,7 +23,9 @@ export function buildKingsList(d) {
         king_digest:   h.model_digest,
         crowned_at:    h.completed_at,
         crowned_block: null,
-        reign_number:  null,
+        // A crowned challenger's reign = the champion it beat (king_reign_number) + 1,
+        // so kingTitle() can name it (ALBEDO-I …) instead of falling back to base model.
+        reign_number:  h.king_reign_number != null ? h.king_reign_number + 1 : null,
         weight:        null,
         registered:    null,
         judges:        h.judges || [],

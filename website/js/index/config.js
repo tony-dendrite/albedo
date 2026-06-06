@@ -23,4 +23,4 @@ export const ENDPOINT_CACHE_KEY = "albedo.endpoint.v1";
 export const EVALS_BASE = "https://us-east-1.hippius.com/albedo/evals/";
 export const SUBNET_ALPHA_DAY = 2960;
 export const BITTENSOR_BLOCK_TIME_S = 12;
-export const EVO_SCALE_MAX = 0.7;
+export const EVO_SCALE_MAX = 1.0;

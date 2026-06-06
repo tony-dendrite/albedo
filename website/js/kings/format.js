@@ -7,9 +7,10 @@ export function toRoman(n) {
 }
 
 export function kingTitle(reignNumber) {
-  if (reignNumber == null) return "ALBEDO-?";
-  const r = toRoman(Number(reignNumber) + 1);
-  return r ? `ALBEDO-${r}` : "ALBEDO-?";
+  const n = Number(reignNumber);
+  if (reignNumber == null || !Number.isFinite(n) || n <= 0) return "base model";
+  const r = toRoman(n);
+  return r ? `ALBEDO-${r}` : "base model";
 }
 
 export function shortDigest(d) {

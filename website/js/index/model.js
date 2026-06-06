@@ -22,9 +22,10 @@ export function judgeMeta(model) {
 }
 
 export function kingTitleName(reignNumber) {
-  if (reignNumber == null) return "ALBEDO";
-  const roman = toRoman(Number(reignNumber) + 1);
-  return roman ? `ALBEDO-${roman}` : "ALBEDO";
+  const n = Number(reignNumber);
+  if (reignNumber == null || !Number.isFinite(n) || n <= 0) return "base model";
+  const roman = toRoman(n);
+  return roman ? `ALBEDO-${roman}` : "base model";
 }
 
 export function challengerDisplayName(hotkey) {
@@ -59,4 +60,20 @@ export function evalsUrlForEntry(entry, history) {
     if (h?.evals_url) return h.evals_url;
   }
   return EVALS_BASE;
+}
+
+// Eval-artifact directory URL for a history entry. The backend doesn't emit
+// eval_dir_url/evals_url, so derive it from eval_id + completed_at, which map
+// 1:1 to the S3 layout: <EVALS_BASE>/<YYYY-MM-DD>/<NNN>/{scores.json,...}.
+// Failures never produce scores/rollouts, so they have no artifact dir — return
+// null so the detail page renders the fail record instead of 404ing on scores.json.
+export function evalDirUrl(h) {
+  if (h?.eval_dir_url) return h.eval_dir_url;
+  if (h?.evals_url)    return h.evals_url;
+  if (h?.error_code || h?.code) return null;
+  const m    = String(h?.eval_id || "").match(/(\d+)\s*$/);
+  const date = String(h?.completed_at || "").slice(0, 10);
+  if (!m || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+  const dir = String(parseInt(m[1], 10)).padStart(3, "0");
+  return `${EVALS_BASE}${date}/${dir}/`;
 }

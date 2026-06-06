@@ -94,7 +94,7 @@ export function failReasonCell(h) {
     const safedup = escHtml(dupOf);
     const simStr  = h.duplicate_sim != null ? ` · sim ${Number(h.duplicate_sim).toFixed(4)}` : "";
     const label   = safedup
-      ? `duplicate of <span class="fail-reason" title="${safedup}">${safedup.length > 60 ? safedup.slice(0, 60) + "…" : safedup}</span>${simStr}`
+      ? `duplicate of <span class="fail-reason" title="${safedup}">${safedup}</span>${simStr}`
       : "duplicate model";
     return `<span class="outcome-lose">⚠ ${label}</span>`;
   }
@@ -107,7 +107,7 @@ export function failReasonCell(h) {
       .trim();
     if (!display) display = "injection attempt detected";
     const safe = escHtml(display);
-    const label = `injection: <span class="fail-reason" title="${safe}">${safe.length > 80 ? safe.slice(0, 80) + "…" : safe}</span>`;
+    const label = `injection: <span class="fail-reason" title="${safe}">${safe}</span>`;
     return `<span class="outcome-lose">⚠ ${label}</span>`;
   }
 
@@ -124,16 +124,14 @@ export function failReasonCell(h) {
     }
     const safe   = escHtml(display);
     const prefix = code === "identity_mismatch" ? "spoofed identity" : "not registered";
-    const label  = `${prefix}: <span class="fail-reason" title="${safe}">${safe.length > 80 ? safe.slice(0, 80) + "…" : safe}</span>`;
+    const label  = `${prefix}: <span class="fail-reason" title="${safe}">${safe}</span>`;
     return `<span class="outcome-lose">⚠ ${label}</span>`;
   }
 
   // Generic error_code (includes eval_infra, chal_vllm_start_failed, etc.)
   if (code) {
-    const raw = detail || code;
-    const safe = escHtml(raw);
-    const truncated = safe.length > 100 ? safe.slice(0, 100) + "…" : safe;
-    return `<span class="fail-reason" title="${safe}">${truncated}</span>`;
+    const safe = escHtml(detail || code);
+    return `<span class="fail-code">${escHtml(code)}</span> <span class="fail-reason" title="${safe}">${safe}</span>`;
   }
 
   // Lost (accepted=false with valid judge data)
@@ -148,6 +146,40 @@ export function failReasonCell(h) {
   }
 
   return '<span class="muted-dash">—</span>';
+}
+
+// Build the full king lineage for the releases table + evolution chart. The backend
+// keeps the current king in d.king, separate from the on-chain king_chain, so we merge
+// it in. Each entry's `judges` is normalized to score objects
+// {model, chal_mean, king_mean, n} pulled from that king's crowning verdict in history,
+// so the evolution bars and final score have data to draw.
+export function buildIndexKings(d) {
+  const chain   = d.king_chain || [];
+  const history = d.history || [];
+
+  const judgesFromVerdict = (cid) => {
+    const h = (history || []).find(x => x.accepted && (x.eval_id === cid || x.challenge_id === cid));
+    const v = h?.verdict;
+    if (!v?.by_judge) return [];
+    return Object.entries(v.by_judge).map(([model, pct]) => {
+      const chal = Number(pct) / 100;
+      return { model, chal_mean: chal, king_mean: 1 - chal, n: v.n_valid ?? 0 };
+    });
+  };
+
+  const norm = (k) => {
+    const hasScores = Array.isArray(k.judges) && k.judges.length && typeof k.judges[0] === "object";
+    return { ...k, judges: hasScores ? k.judges : judgesFromVerdict(k.challenge_id) };
+  };
+
+  const byId = new Map();
+  chain.forEach(k => byId.set(k.challenge_id, norm(k)));
+  if (d.king?.challenge_id && !byId.has(d.king.challenge_id)) {
+    byId.set(d.king.challenge_id, norm(d.king));
+  }
+
+  return Array.from(byId.values())
+    .sort((a, b) => (b.reign_number ?? 0) - (a.reign_number ?? 0));
 }
 
 export function applyDisplayStartBlock(d) {

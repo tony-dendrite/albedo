@@ -1,9 +1,9 @@
 import { setText, fmtWhenCell, fmtAlphaDay, kingDateShort } from "./format.js";
-import { kingTitleName, challengerDisplayName, modelLinkHtml, taoMinerUrl, evalsUrlForEntry } from "./model.js";
+import { kingTitleName, challengerDisplayName, modelLinkHtml, taoMinerUrl, evalsUrlForEntry, evalDirUrl } from "./model.js";
 import { isValidEval, verdictBadge, judgeScoreCell, judgeByLetter, failReasonCell } from "./data.js";
 import { dlButton, failDlButton, DL_ICON } from "./download.js";
 import { renderEvolution } from "./evolution.js";
-import { applyDisplayStartBlock } from "./data.js";
+import { applyDisplayStartBlock, buildIndexKings } from "./data.js";
 import { judgeMeta } from "./model.js";
 
 function renderHero(d) {
@@ -138,7 +138,8 @@ function _verdictLink(h, badge) {
   const qs = new URLSearchParams();
   if (h.eval_id)      qs.set("eval_id",    h.eval_id);
   if (h.hotkey)       qs.set("hotkey",     h.hotkey);
-  if (h.eval_dir_url) qs.set("dir_url",    h.eval_dir_url);
+  const _dirUrl = evalDirUrl(h);
+  if (_dirUrl) qs.set("dir_url",    _dirUrl);
   if (h.error_code)   qs.set("error_code", h.error_code);
   if (h.error_detail) qs.set("error_detail", String(h.error_detail).slice(0, 300));
   if (h.model_repo)   qs.set("model_repo", h.model_repo);
@@ -156,7 +157,7 @@ function renderHistory(history, chain, king) {
     return;
   }
   const judgeHead = judges.map(j => `<th class="r">${j.label}</th>`).join("");
-  const ordered = valid.slice().reverse().slice(0, 50);
+  const ordered = valid.slice(0, 50);
   const rows = ordered.map(h => {
     const byLetter = judgeByLetter(h.judges);
     const uid = h.uid != null ? h.uid : "—";
@@ -166,7 +167,12 @@ function renderHistory(history, chain, king) {
       : uid;
     const repo = h.model_repo || "";
     const digest = h.model_digest || "";
-    const modelCell = modelLinkHtml(repo, digest, challengerDisplayName(h.hotkey));
+    // A crowned challenger earned the throne, so show the king name it became
+    // (champion's reign + 1) instead of its temporary challenger handle.
+    const modelLabel = h.accepted
+      ? kingTitleName((h.king_reign_number ?? 0) + 1)
+      : challengerDisplayName(h.hotkey);
+    const modelCell = modelLinkHtml(repo, digest, modelLabel);
     const judgeCells = judges.map(j => `<td class="r">${judgeScoreCell(byLetter[j.letter])}</td>`).join("");
     const badge = verdictBadge(h);
     return `<tr>
@@ -176,7 +182,7 @@ function renderHistory(history, chain, king) {
       <td>${_kingCell(h, king)}</td>
       <td class="center">${_verdictLink(h, badge)}</td>
       ${judgeCells}
-      <td class="dl">${dlButton(h.eval_dir_url || h.evals_url)}</td>
+      <td class="dl">${dlButton(evalDirUrl(h))}</td>
     </tr>`;
   }).join("");
   wrap.innerHTML = `<table class="data-table">
@@ -202,7 +208,7 @@ function renderFails(history, chain, king) {
     wrap.innerHTML = '<div class="empty">no failures.</div>';
     return;
   }
-  const ordered = fails.slice().reverse().slice(0, 50);
+  const ordered = fails.slice(0, 50);
   const rows = ordered.map(h => {
     const uid = h.uid != null ? h.uid : "—";
     const taoUrl = taoMinerUrl(netuid, h.hotkey);
@@ -221,7 +227,6 @@ function renderFails(history, chain, king) {
       <td class="center">${_verdictLink(h, badge)}</td>
       <td class="fail-reason-cell">${failReasonCell(h)}</td>
       <td class="dl">${failDlButton(h)}</td>
-      <td class="dl">${dlButton(h.eval_dir_url || h.evals_url)}</td>
     </tr>`;
   }).join("");
   wrap.innerHTML = `<table class="data-table">
@@ -233,7 +238,6 @@ function renderFails(history, chain, king) {
       <th class="center">verdict</th>
       <th>fail reason</th>
       <th class="r" aria-label="download JSON" title="download fail JSON">JSON</th>
-      <th class="r" aria-label="download rollouts" title="download rollouts"></th>
     </tr></thead>
     <tbody>${rows}</tbody>
   </table>`;
@@ -242,9 +246,10 @@ function renderFails(history, chain, king) {
 export function render(d) {
   if (!d) return;
   const fd = applyDisplayStartBlock(d);
+  const kings = buildIndexKings(fd);
   renderHero(fd);
-  renderEvolution(fd.king_chain, fd.chain, fd.current_eval);
-  renderReleases(fd.king_chain, fd.chain, fd.history);
+  renderEvolution(kings, fd.chain, fd.current_eval);
+  renderReleases(kings, fd.chain, fd.history);
   renderQueue(fd.queue, fd.chain, fd.current_eval);
   renderHistory(fd.history, fd.chain, fd.king);
   renderFails(fd.history, fd.chain, fd.king);
