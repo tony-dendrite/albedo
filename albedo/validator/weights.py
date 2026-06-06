@@ -75,7 +75,7 @@ async def maybe_set_weights(
                 netuid=netuid,
                 uids=uids,
                 weights=weights,
-                wait_for_inclusion=True,
+                wait_for_inclusion=False,
                 wait_for_finalization=False,
             ),
         )
@@ -85,12 +85,19 @@ async def maybe_set_weights(
 
     if success:
         state.last_weight_block = current_block
+        # Mirror the successful set to persisted state and the dashboard (the refactor
+        # dropped these; the monolithic validator flushed both after a successful set).
+        state.flush()
+        state.flush_dashboard(force=True)
         log.info("maybe_set_weights: success at block %d", current_block)
         return True
 
-    # Empty message = silent rate-limit; non-empty = real error
+    # Empty message = silent rate-limit; non-empty = real error. Advance the block on a
+    # silent rate-limit so we back off for WEIGHT_INTERVAL instead of re-submitting an
+    # extrinsic every tick (which keeps us perpetually rate-limited).
     if not message:
-        log.warning("maybe_set_weights: rate-limited (success=False, no message)")
+        state.last_weight_block = current_block
+        log.warning("maybe_set_weights: rate-limited (success=False, no message) — advancing last_weight_block")
     else:
         log.error("maybe_set_weights: failed — %s", message)
 

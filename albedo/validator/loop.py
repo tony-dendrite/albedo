@@ -85,6 +85,15 @@ async def _startup(subtensor, wallet, state: State, http: httpx.AsyncClient) -> 
         log.critical("_startup: state.load failed: %s", exc)
         return 1
 
+    _reset_flag = os.environ.get("ALBEDO_RESET", "0").strip().lower()
+    if _reset_flag in ("1", "true", "yes", "force"):
+        from albedo.validator.reset import run_reset
+        try:
+            run_reset(state, subtensor, netuid=NETUID, eval_url=EVAL_URL,
+                      force=(_reset_flag == "force"))
+        except Exception as exc:
+            log.error("_startup: ALBEDO_RESET reset failed: %s", exc)
+
     # Publish the dashboard website to the bucket (best-effort; no-op if not configured).
     try:
         from albedo.validator.website import upload_website, log_hippius_urls
@@ -108,6 +117,7 @@ async def _startup(subtensor, wallet, state: State, http: httpx.AsyncClient) -> 
 
     if state.king is not None:
         url = EVAL_URL.rstrip("/") + "/set_king"
+        log.info("_startup: pushing king to eval server — %s", state.king.model_repo)
         poll_409 = conn_fails = 0
         while True:
             try:
@@ -118,11 +128,15 @@ async def _startup(subtensor, wallet, state: State, http: httpx.AsyncClient) -> 
                     poll_409 += 1
                     if poll_409 > _STARTUP_409_MAX:
                         return 1
+                    log.info("_startup: /set_king 409 (eval in progress) — waiting %.0fs [%d/%d]",
+                             _STARTUP_409_SLEEP, poll_409, _STARTUP_409_MAX)
                     await asyncio.sleep(_STARTUP_409_SLEEP)
                     continue
                 resp.raise_for_status()
+                log.info("_startup: /set_king ok (HTTP %d)", resp.status_code)
                 break
-            except httpx.HTTPStatusError:
+            except httpx.HTTPStatusError as exc:
+                log.error("_startup: /set_king HTTP error %s — aborting", exc.response.status_code)
                 return 1
             except httpx.RequestError as exc:
                 # Connection failure — server may not be up yet
@@ -141,7 +155,9 @@ async def _startup(subtensor, wallet, state: State, http: httpx.AsyncClient) -> 
             pass
     prune_model_cache(*keep_refs)
 
+    log.info("_startup: refreshing uid map (metagraph fetch) ...")
     state.refresh_uid_map(subtensor, NETUID)
+    log.info("_startup: uid map ready — %d neurons", len(state.uid_map))
     cutoff = time.time() - _LOOKBACK_HOURS * 3600.0
     queued_hotkeys = {e.get("hotkey") for e in state.queue}
     for r in state.history:
@@ -160,7 +176,9 @@ async def _startup(subtensor, wallet, state: State, http: httpx.AsyncClient) -> 
                          "block": r.get("block")}):
             queued_hotkeys.add(hk)
 
+    log.info("_startup: setting weights (wait_for_inclusion=False) ...")
     await maybe_set_weights(subtensor, wallet, state, netuid=NETUID, force=True, reason="startup")
+    log.info("_startup: done")
     return 0
 
 
@@ -180,10 +198,19 @@ async def _main_loop(subtensor, wallet, state: State, http: httpx.AsyncClient) -
                 king_hotkeys.add(state.king.hotkey)
             king_hotkeys.update(e.hotkey for e in state.king_chain if e.hotkey)
 
+            rejected_reveals: list[dict] = []
             new_entries = scan_reveals(
                 subtensor, NETUID, state.completed_repos, state.seen,
                 king_hotkeys=king_hotkeys,
+                rejected_out=rejected_reveals,
             )
+
+            for spoofed in rejected_reveals:
+                hk = spoofed.get("hotkey", "")
+                state.record_failure({"eval_id": None, "hotkey": hk}, "spoof_rejected",
+                    f"author={spoofed.get('author_hotkey')} != chain={hk}")
+                state.seen.add(hk)
+                state.flush()
 
             for entry in new_entries:
                 hk = entry.get("hotkey", "")
@@ -243,6 +270,10 @@ async def _main_loop(subtensor, wallet, state: State, http: httpx.AsyncClient) -
         except Exception as exc:
             log.exception("_main_loop: unhandled error: %s", exc)
 
+        log.info("tick — king=%s  queue=%d  seen=%d  block=%s",
+                 state.king.model_repo.split("/")[-1] if state.king else "none",
+                 len(state.queue), len(state.seen),
+                 getattr(subtensor, "block", "?"))
         await asyncio.sleep(_TICK_S)
 
 
@@ -251,8 +282,11 @@ async def main() -> int:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s — %(message)s")
     bt = _bittensor()
+    log.info("connecting to bittensor network=%s ...", NETWORK)
     subtensor = bt.Subtensor(network=NETWORK)
     wallet = bt.Wallet(name=WALLET_NAME, hotkey=WALLET_HOTKEY)
+    log.info("connected — block=%s  wallet=%s/%s  netuid=%d",
+             getattr(subtensor, "block", "?"), WALLET_NAME, WALLET_HOTKEY, NETUID)
 
     cr_code = _check_commit_reveal(subtensor)
     if cr_code:
