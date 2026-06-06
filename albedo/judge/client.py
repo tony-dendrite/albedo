@@ -1,31 +1,38 @@
-"""albedo.judge.client — Async Chutes LLM-as-judge client."""
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
 import os
+import random
 import re
-from typing import Any
+import time
+from typing import Any, Callable
 
 import httpx
-
-import random
-import time
 
 from albedo.config import (
     JUDGE_API_KEY_ENV,
     JUDGE_BASE_URL_ENV,
-    JUDGE_CALL_TIMEOUT_S,
     JUDGE_MAX_TOKENS,
     JUDGE_METRIC_KEYS,
     JUDGE_RETRY_BACKOFF,
-    JUDGE_RETRY_MAX,
     JUDGE_SCORE_MAX_TOKENS,
     JUDGE_TEMPERATURE,
     JUDGE_THINKING_MODELS,
     JUDGE_THINKING_TOKENS,
-    JUDGE_429_MAX_WAIT_S,
+    JUDGE_CHUTES_TRY_S,
+    JUDGE_CHUTES_MAX_S,
+    JUDGE_OR_TIMEOUT_S,
+    JUDGE_OR_RETRIES,
+    JUDGE_TOTAL_S,
+    JUDGE_CHUTES_GIVEUP_TASKS,
+    JUDGE_MAX_CONCURRENCY_PER_MODEL,
+    JUDGE_FALLBACK_ENABLED,
+    JUDGE_FALLBACK_BASE_URL,
+    JUDGE_FALLBACK_API_KEY_ENV,
+    JUDGE_FALLBACK_MODEL_MAP,
+    JUDGE_FALLBACK_REASONING_MODELS,
 )
 from albedo.judge.rubric import PAIRWISE_RUBRIC_SYSTEM, PROBE_SYSTEM, build_pairwise_user
 from albedo.judge.verdict import MetricVerdict, parse_metric_verdict
@@ -35,320 +42,303 @@ log = logging.getLogger(__name__)
 _DEFAULT_BASE_URL = "https://llm.chutes.ai"
 
 
-class DeadlineExceeded(RuntimeError):
-    """Raised when a judge call exhausts its total time budget.
-
-    Caught by pairwise_judge() and converted to a parse_failure MetricVerdict so
-    the duel turn continues with score=0.0 rather than the whole turn being aborted.
-    """
-
-
 def _is_thinking(model: str) -> bool:
     return model in JUDGE_THINKING_MODELS
 
 
+def _max_tokens_for(model: str) -> int:
+    return JUDGE_THINKING_TOKENS if _is_thinking(model) else JUDGE_SCORE_MAX_TOKENS
+
+
 def _merge_thinking(choices: list[dict]) -> str:
-    """Concatenate reasoning_content + content from the first choice."""
+    """Concatenate reasoning_content/reasoning + content from the first choice."""
     if not choices:
         return ""
     msg = choices[0].get("message", {})
-    reasoning = msg.get("reasoning_content") or ""
-    content   = msg.get("content") or ""
-    if reasoning:
-        return f"{reasoning}\n{content}"
-    return content
+    reasoning = msg.get("reasoning_content") or msg.get("reasoning") or ""
+    content = msg.get("content") or ""
+    return f"{reasoning}\n{content}" if reasoning else content
+
+
+def _sse_delta(line: str) -> tuple[str, str, bool]:
+    """Parse one SSE 'data:' line -> (content, reasoning, done)."""
+    line = line.strip()
+    if not line.startswith("data:"):
+        return "", "", False
+    body = line[len("data:"):].strip()
+    if body == "[DONE]":
+        return "", "", True
+    try:
+        d = json.loads(body)
+        delta = (d.get("choices") or [{}])[0].get("delta", {}) or {}
+        return (delta.get("content") or ""), (delta.get("reasoning_content") or delta.get("reasoning") or ""), False
+    except Exception:
+        return "", "", False
+
+
+_INJECTION_RE = re.compile(r'\{[^{}]*"injection"\s*:\s*(?:true|false)[^{}]*\}', re.DOTALL)
+
+
+def _parse_injection(raw: str) -> bool | None:
+    """Extract the injection bool from a probe verdict; None if unparseable."""
+    obj = None
+    matches = _INJECTION_RE.findall(raw or "")
+    if matches:
+        try:
+            obj = json.loads(matches[-1])
+        except Exception:
+            obj = None
+    if obj is None:
+        s = (raw or "").strip()
+        if s.startswith("{"):
+            try:
+                obj = json.loads(s)
+            except Exception:
+                obj = None
+    return None if obj is None else bool(obj.get("injection", False))
+
+
+def _injection_accept(raw: str) -> bool:
+    return _parse_injection(raw) is not None
 
 
 class ChutesJudge:
-    """Async Chutes LLM-as-judge client; one instance shared across all judge models."""
+    """Unified judge client — one instance per eval (duel or probe); shared across models."""
 
-    def __init__(
-        self,
-        *,
-        base_url: str | None = None,
-        api_key:  str | None = None,
-    ) -> None:
-        self._base_url = (
-            base_url
-            or os.environ.get(JUDGE_BASE_URL_ENV, "")
-            or _DEFAULT_BASE_URL
-        ).rstrip("/")
+    def __init__(self, *, base_url: str | None = None, api_key: str | None = None) -> None:
+        self._base_url = (base_url or os.environ.get(JUDGE_BASE_URL_ENV, "") or _DEFAULT_BASE_URL).rstrip("/")
         self._api_key = api_key or os.environ.get(JUDGE_API_KEY_ENV, "")
-        headers = {"Authorization": f"Bearer {self._api_key}"}
-        # Separate timeouts per model class: thinking models (Qwen3-235B, Kimi-K2.6)
-        # regularly need 300–600 s for reasoning traces; regular models are fast.
-        self._client       = httpx.AsyncClient(
-            base_url=self._base_url, headers=headers,
-            timeout=httpx.Timeout(connect=10.0, read=150.0, write=30.0, pool=10.0),
+        ch_headers = {"Authorization": f"Bearer {self._api_key}"}
+        # Chutes clients (regular vs thinking read budgets); stream calls override read=CHUTES_MAX_S.
+        self._chutes = httpx.AsyncClient(
+            base_url=self._base_url, headers=ch_headers,
+            timeout=httpx.Timeout(connect=10.0, read=JUDGE_CHUTES_MAX_S, write=30.0, pool=10.0),
+            limits=httpx.Limits(max_connections=64, max_keepalive_connections=32),
         )
-        self._think_client = httpx.AsyncClient(
-            base_url=self._base_url, headers=headers,
-            timeout=httpx.Timeout(connect=10.0, read=600.0, write=30.0, pool=10.0),
-        )
+        self._chutes_think = self._chutes  # same budget; stream gate bounds it
 
-    async def _chat(
-        self,
-        messages: list[dict],
-        *,
-        model: str,
-        max_tokens: int,
-        deadline: float,
-    ) -> list[dict]:
-        """POST /v1/chat/completions with retry.
-
-        Args:
-            deadline: monotonic timestamp; extended whenever a 429 wait is taken
-                      so rate-limit sleeps never consume the caller's time budget.
-
-        Retry strategy:
-          - 429 (rate-limited): retry INDEFINITELY — each sleep extends the
-            deadline so the turn is never abandoned due to rate limiting alone.
-            Backoff is exponential, capped at JUDGE_429_MAX_WAIT_S per attempt,
-            respecting Retry-After headers.
-          - 5xx / network: up to JUDGE_RETRY_MAX attempts, 2× backoff.
-          - 4xx (not 429): raised immediately — permanent client error.
-          - DeadlineExceeded only fires when the server is genuinely unreachable
-            (non-429 budget exhausted); 429 waits never count toward the deadline.
-        """
-        client  = self._think_client if _is_thinking(model) else self._client
-        payload: dict[str, Any] = {
-            "model":       model,
-            "messages":    messages,
-            "temperature": JUDGE_TEMPERATURE,
-            "max_tokens":  max_tokens,
-        }
-
-        # Small random jitter before the first attempt so simultaneous king and
-        # challenger calls to the same judge don't land at exactly the same time,
-        # reducing double rate-limit pressure.
-        jitter = random.uniform(0.0, 0.5)
-        if time.monotonic() + jitter < deadline:
-            await asyncio.sleep(jitter)
-
-        max_non429 = JUDGE_RETRY_MAX
-        n_429      = 0
-        n_non429   = 0
-        last_exc: Exception | None = None
-
-        while True:
-            # Check deadline before each attempt (only applies to non-429 budget).
-            if time.monotonic() >= deadline:
-                raise DeadlineExceeded(
-                    f"Judge {model} deadline exceeded "
-                    f"({n_429} rate-limited, {n_non429} server errors)"
-                )
-
-            try:
-                resp = await client.post("/v1/chat/completions", json=payload)
-                resp.raise_for_status()
-                return resp.json().get("choices", [])
-
-            except httpx.HTTPStatusError as exc:
-                status = exc.response.status_code
-
-                if status == 429:
-                    n_429 += 1
-                    last_exc = exc
-
-                    retry_after = exc.response.headers.get("Retry-After")
-                    if retry_after:
-                        try:
-                            raw_wait = max(float(retry_after), 1.0)
-                        except ValueError:
-                            raw_wait = JUDGE_RETRY_BACKOFF * (4 ** min(n_429 - 1, 4))
-                    else:
-                        raw_wait = JUDGE_RETRY_BACKOFF * (4 ** min(n_429 - 1, 4))
-
-                    wait = min(raw_wait, JUDGE_429_MAX_WAIT_S)
-                    deadline += wait  # extend so 429 sleeps are free — never give up
-
-                    log.warning(
-                        "Judge %s 429 (#%d) — waiting %.1fs; deadline extended",
-                        model, n_429, wait,
-                    )
-                    await asyncio.sleep(wait)
-                    continue  # retry; 429s are never counted against the error budget
-
-                if status < 500:
-                    raise  # permanent 4xx — don't retry
-
-                last_exc = exc
-
-            except DeadlineExceeded:
-                raise
-            except Exception as exc:
-                last_exc = exc
-
-            n_non429 += 1
-            if n_non429 >= max_non429:
-                break
-            backoff = min(
-                JUDGE_RETRY_BACKOFF * (2 ** (n_non429 - 1)),
-                max(0.1, deadline - time.monotonic() - 0.1),
+        # OpenRouter fallback clients.
+        self._fb_key = os.environ.get(JUDGE_FALLBACK_API_KEY_ENV, "")
+        self._fb_enabled = bool(JUDGE_FALLBACK_ENABLED and self._fb_key)
+        self._fb = self._fb_think = None
+        if self._fb_enabled:
+            fb_headers = {"Authorization": f"Bearer {self._fb_key}"}
+            fb_base = JUDGE_FALLBACK_BASE_URL.rstrip("/")
+            self._fb = httpx.AsyncClient(
+                base_url=fb_base, headers=fb_headers,
+                timeout=httpx.Timeout(connect=10.0, read=JUDGE_OR_TIMEOUT_S, write=30.0, pool=10.0),
+                limits=httpx.Limits(max_connections=64, max_keepalive_connections=32),
             )
-            log.warning(
-                "Judge %s error (%d/%d): %s — retry in %.1fs",
-                model, n_non429, max_non429, last_exc, backoff,
-            )
-            await asyncio.sleep(backoff)
+            self._fb_think = self._fb
 
-        raise RuntimeError(
-            f"Judge {model} failed after {max_non429} non-429 attempts"
-        ) from last_exc
+        # OpenRouter per-model concurrency (lazy, created in the running loop).
+        self._or_sems: dict[str, asyncio.Semaphore] = {}
 
-    def _build_pairwise_messages(
-        self,
-        context_messages: list[dict],
-        king_reply: str,
-        chal_reply: str,
-    ) -> list[dict]:
+        # Circuit-breaker state (per eval instance).
+        self._chutes_dry_tasks = 0
+        self._chutes_off = False
+
+    # ----- helpers -----
+
+    def _or_sem(self, model: str) -> asyncio.Semaphore:
+        s = self._or_sems.get(model)
+        if s is None:
+            s = self._or_sems[model] = asyncio.Semaphore(max(1, JUDGE_MAX_CONCURRENCY_PER_MODEL))
+        return s
+
+    def _or_model(self, model: str) -> str | None:
+        return JUDGE_FALLBACK_MODEL_MAP.get(model)
+
+    def _build_pairwise_messages(self, context_messages, king_reply, chal_reply) -> list[dict]:
         return [
             {"role": "system", "content": PAIRWISE_RUBRIC_SYSTEM},
-            {"role": "user",   "content": build_pairwise_user(
-                context_messages, king_reply, chal_reply)},
+            {"role": "user", "content": build_pairwise_user(context_messages, king_reply, chal_reply)},
         ]
 
-    def _build_probe_messages(
-        self,
-        messages: list[dict],
-        reply: str,
-    ) -> list[dict]:
-        combined = json.dumps(
-            {
-                "conversation": messages,
-                "candidate_reply": reply,
-            },
-            ensure_ascii=False,
-        )
-        return [
-            {"role": "system", "content": PROBE_SYSTEM},
-            {"role": "user",   "content": combined},
-        ]
+    def _build_probe_messages(self, messages, reply) -> list[dict]:
+        combined = json.dumps({"conversation": messages, "candidate_reply": reply}, ensure_ascii=False)
+        return [{"role": "system", "content": PROBE_SYSTEM}, {"role": "user", "content": combined}]
 
-    async def pairwise_judge(
-        self,
-        context_messages: list[dict] | None = None,
-        king_reply: str = "",
-        chal_reply: str = "",
-        *,
-        model: str,
-        messages_prefix: list[dict] | None = None,
-        messages_prompt: list[dict] | None = None,
-        hotkey: str = "",
-        seed: bytes = b"",
-    ) -> MetricVerdict:
-        """Score one turn head-to-head (MODEL 1 = king, MODEL 2 = challenger).
+    # ----- providers -----
 
-        Accepts either context_messages or messages_prefix + messages_prompt
-        (the form used by turn.py). One judge call returns per-metric scores
-        in challenger perspective.
+    async def _chutes_stream(self, model: str, messages: list[dict], max_tokens: int) -> str | None:
+        """Stream-gated Chutes. Return raw text if Chutes ACCEPTS and completes, else None."""
+        client = self._chutes_think if _is_thinking(model) else self._chutes
+        payload: dict[str, Any] = {
+            "model": model, "messages": messages, "temperature": JUDGE_TEMPERATURE,
+            "max_tokens": max_tokens, "stream": True,
+        }
 
-        Returns a parse_failure MetricVerdict (all-zero, judge_mean=0.0) when the
-        call exceeds JUDGE_CALL_TIMEOUT_S — the duel continues rather than stalling.
-        """
+        async def _run() -> str | None:
+            async with client.stream(
+                "POST", "/v1/chat/completions", json=payload,
+                timeout=httpx.Timeout(connect=10.0, read=JUDGE_CHUTES_MAX_S, write=30.0, pool=10.0),
+            ) as resp:
+                if resp.status_code != 200:
+                    return None  # 429 / capacity / error -> Chutes not taking it
+                agen = resp.aiter_lines()
+
+                async def _first() -> str | None:
+                    async for ln in agen:
+                        if ln.strip().startswith("data:"):
+                            return ln
+                    return None
+
+                # accept/reject gate: first streamed chunk within JUDGE_CHUTES_TRY_S
+                try:
+                    first = await asyncio.wait_for(_first(), timeout=JUDGE_CHUTES_TRY_S)
+                except asyncio.TimeoutError:
+                    return None
+                if first is None:
+                    return None
+                # ACCEPTED — read to completion (bounded by the outer wait_for)
+                cparts: list[str] = []
+                rparts: list[str] = []
+                c, r, done = _sse_delta(first)
+                cparts.append(c); rparts.append(r)
+                if not done:
+                    async for ln in agen:
+                        c, r, done = _sse_delta(ln)
+                        cparts.append(c); rparts.append(r)
+                        if done:
+                            break
+                return "".join(rparts) + "\n" + "".join(cparts)
+
+        try:
+            return await asyncio.wait_for(_run(), timeout=JUDGE_CHUTES_MAX_S)
+        except asyncio.TimeoutError:
+            log.warning("chutes_stream %s: accepted but exceeded %.0fs — falling back", model, JUDGE_CHUTES_MAX_S)
+            return None
+        except Exception as exc:
+            log.debug("chutes_stream %s rejected/error: %s", model, exc)
+            return None
+
+    async def _openrouter(self, model: str, messages: list[dict], max_tokens: int, *,
+                          accept: Callable[[str], bool], deadline: float) -> str | None:
+        """OpenRouter, retried on any non-2xx (4xx/5xx), no-response/network error, or
+        parse-fail, up to JUDGE_OR_RETRIES times, the whole phase capped by `deadline`."""
+        if not self._fb_enabled:
+            return None
+        or_model = self._or_model(model)
+        if not or_model:
+            return None
+        client = self._fb_think if _is_thinking(model) else self._fb
+        payload: dict[str, Any] = {
+            "model": or_model, "messages": messages, "temperature": JUDGE_TEMPERATURE, "max_tokens": max_tokens,
+        }
+
+        sem = self._or_sem(model)
+        attempt = 0
+        last = ""
+        while time.monotonic() < deadline and attempt <= JUDGE_OR_RETRIES:
+            await sem.acquire()
+            try:
+                t = min(JUDGE_OR_TIMEOUT_S, max(1.0, deadline - time.monotonic()))
+                resp = await client.post("/v1/chat/completions", json=payload, timeout=t)
+                resp.raise_for_status()
+                raw = _merge_thinking(resp.json().get("choices", []))
+                if accept(raw):
+                    return raw
+                last = "parse_fail"
+            except httpx.HTTPStatusError as exc:
+                last = f"http_{exc.response.status_code}"
+            except Exception as exc:
+                last = type(exc).__name__
+            finally:
+                sem.release()
+            attempt += 1
+            wait = min(JUDGE_RETRY_BACKOFF * (2 ** attempt), 8.0) * random.uniform(0.8, 1.3)
+            wait = min(wait, max(0.0, deadline - time.monotonic()))
+            if wait > 0:
+                await asyncio.sleep(wait)
+        log.warning("openrouter %s exhausted (%s)", model, last)
+        return None
+
+    # ----- task-level orchestrator -----
+
+    async def query_judges(self, models: list[str], messages: list[dict], *,
+                       accept: Callable[[str], bool],
+                       max_tokens_fn: Callable[[str], int] = _max_tokens_for) -> dict[str, str | None]:
+
+        async def _resolve_one(m: str) -> tuple[str, str | None, bool]:
+            """Returns (model, raw_text_or_None, chutes_succeeded)."""
+            deadline = time.monotonic() + JUDGE_TOTAL_S
+            chutes_ok = False
+
+            # Chutes stream-gate (skipped if circuit breaker tripped for this eval).
+            if not self._chutes_off:
+                c = await self._chutes_stream(m, messages, max_tokens_fn(m))
+                if c is not None and accept(c):
+                    return m, c, True
+
+            # OpenRouter fallback — fires immediately on any Chutes miss.
+            raw = await self._openrouter(
+                m, messages, max_tokens_fn(m), accept=accept, deadline=deadline
+            )
+            return m, raw, chutes_ok
+
+        triples = await asyncio.gather(*[_resolve_one(m) for m in models])
+
+        results = {m: raw for m, raw, _ in triples}
+        chutes_hit = any(hit for _, _, hit in triples)
+
+        # Circuit-breaker bookkeeping: count tasks where Chutes scored zero judges.
+        if not self._chutes_off:
+            if chutes_hit:
+                self._chutes_dry_tasks = 0
+            else:
+                self._chutes_dry_tasks += 1
+                if self._chutes_dry_tasks >= JUDGE_CHUTES_GIVEUP_TASKS:
+                    self._chutes_off = True
+                    log.warning(
+                        "query_judges: Chutes dry for %d tasks — OpenRouter-only for rest of eval",
+                        JUDGE_CHUTES_GIVEUP_TASKS,
+                    )
+
+        return {m: results.get(m) for m in models}
+
+    # ----- back-compat wrappers -----
+
+    async def pairwise_judge(self, context_messages=None, king_reply="", chal_reply="", *, model,
+                             messages_prefix=None, messages_prompt=None, hotkey="", seed=b"") -> MetricVerdict:
         if context_messages is None:
             context_messages = list(messages_prefix or []) + list(messages_prompt or [])
+        msgs = self._build_pairwise_messages(context_messages, king_reply, chal_reply)
+        raws = await self.query_judges([model], msgs, accept=lambda r: parse_metric_verdict(r).parse_ok)
+        raw = raws.get(model)
+        if raw is None:
+            return MetricVerdict(metric_scores={k: 0.0 for k in JUDGE_METRIC_KEYS},
+                                 judge_mean=0.0, raw="", parse_ok=False, model=model)
+        v = parse_metric_verdict(raw)
+        v.model = model
+        return v
 
-        thinking   = _is_thinking(model)
-        max_tokens = JUDGE_THINKING_TOKENS if thinking else JUDGE_SCORE_MAX_TOKENS
-        deadline   = time.monotonic() + JUDGE_CALL_TIMEOUT_S
-
-        messages = self._build_pairwise_messages(context_messages, king_reply, chal_reply)
-        try:
-            choices = await self._chat(
-                messages, model=model, max_tokens=max_tokens, deadline=deadline
-            )
-            raw = _merge_thinking(choices)
-        except DeadlineExceeded:
-            log.warning(
-                "Judge %s score deadline exceeded (%.0fs budget) — returning parse_failure",
-                model, JUDGE_CALL_TIMEOUT_S,
-            )
-            return MetricVerdict(
-                metric_scores={k: 0.0 for k in JUDGE_METRIC_KEYS},
-                judge_mean=0.0, raw="", parse_ok=False, model=model,
-            )
-
-        verdict       = parse_metric_verdict(raw)
-        verdict.model = model
-        return verdict
-
-    async def probe(
-        self,
-        messages: list[dict],
-        reply: str,
-        *,
-        model: str,
-    ) -> tuple[bool, str]:
-        """Injection probe; returns (is_injected, evidence).
-
-        Uses PROBE_SYSTEM to check whether the reply contains injection patterns.
-        Retries indefinitely on transient errors — callers must always receive a
-        definitive answer (True/False) and must never silently skip the probe.
-
-        Schema: {"injection": true|false, "evidence": "<snippet or 'none'>"}
-        """
-        thinking   = _is_thinking(model)
-        max_tokens = JUDGE_THINKING_TOKENS if thinking else JUDGE_MAX_TOKENS
-
-        probe_messages = self._build_probe_messages(messages, reply)
-        probe_re       = re.compile(
-            r'\{[^{}]*"injection"\s*:\s*(?:true|false)[^{}]*\}', re.DOTALL
+    async def probe_batch(self, messages: list[dict], reply: str, models: list[str]) -> dict[str, bool | None]:
+        """Injection probe for all judges in ONE query_judges (per-judge sequential: each judge
+        Chutes -> OpenRouter). Returns {model: is_injected | None}; None = unresolved by both
+        providers within budget -> the caller fails closed (marks the turn untested)."""
+        probe_msgs = self._build_probe_messages(messages, reply)
+        raws = await self.query_judges(
+            models, probe_msgs, accept=_injection_accept,
+            max_tokens_fn=lambda m: JUDGE_THINKING_TOKENS if _is_thinking(m) else JUDGE_MAX_TOKENS,
         )
+        out: dict[str, bool | None] = {}
+        for m in models:
+            raw = raws.get(m)
+            out[m] = None if raw is None else _parse_injection(raw)
+        return out
 
-        attempt = 0
-        while True:
-            # Probe uses a fresh deadline per attempt — probes must always complete.
-            deadline = time.monotonic() + JUDGE_CALL_TIMEOUT_S
-            try:
-                choices = await self._chat(
-                    probe_messages, model=model, max_tokens=max_tokens, deadline=deadline
-                )
-                raw = _merge_thinking(choices)
-            except Exception as exc:
-                attempt += 1
-                wait = min(JUDGE_RETRY_BACKOFF * (2 ** min(attempt - 1, 6)), 120.0)
-                log.warning(
-                    "probe: judge %s error (attempt %d) — retrying in %.0fs: %s",
-                    model, attempt, wait, exc,
-                )
-                await asyncio.sleep(wait)
-                continue
-
-            def _extract(data: dict) -> tuple[bool, str]:
-                is_injected = bool(data.get("injection", False))
-                evidence = str(data.get("evidence") or data.get("reason") or "").strip()
-                if evidence.lower() == "none":
-                    evidence = ""
-                return is_injected, evidence
-
-            matches = probe_re.findall(raw)
-            if matches:
-                try:
-                    return _extract(json.loads(matches[-1]))
-                except json.JSONDecodeError:
-                    pass
-
-            stripped = raw.strip()
-            if stripped.startswith("{"):
-                try:
-                    return _extract(json.loads(stripped))
-                except json.JSONDecodeError:
-                    pass
-
-            # Judge responded but output was unparseable — retry to get a valid JSON.
-            attempt += 1
-            wait = min(JUDGE_RETRY_BACKOFF * (2 ** min(attempt - 1, 4)), 60.0)
-            log.warning(
-                "probe: judge %s returned unparseable output (attempt %d) "
-                "— retrying in %.0fs: %r",
-                model, attempt, wait, raw[:200],
-            )
-            await asyncio.sleep(wait)
+    async def probe(self, messages: list[dict], reply: str, *, model: str) -> tuple[bool, str]:
+        """Single-judge injection probe (back-compat). Raises RuntimeError on exhaustion."""
+        res = await self.probe_batch(messages, reply, [model])
+        if res.get(model) is None:
+            raise RuntimeError(f"probe {model}: no definitive answer (both providers exhausted)")
+        return bool(res[model]), ""
 
     async def aclose(self) -> None:
-        await self._client.aclose()
-        await self._think_client.aclose()
+        await self._chutes.aclose()
+        if self._fb is not None:
+            await self._fb.aclose()
 
     async def __aenter__(self) -> "ChutesJudge":
         return self
