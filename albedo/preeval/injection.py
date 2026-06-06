@@ -153,39 +153,29 @@ async def _probe_one_turn(
 
     reply = await _generate_reply(http, challenger_url, prompt_messages, model=model)
 
-    async def _ask(judge_model: str) -> tuple[str, bool]:
-        """Ask one judge about injection; retries until a definitive answer is received."""
-        attempt = 0
-        while True:
-            try:
-                # judge_client.probe already retries internally (including on unparseable
-                # output); this outer loop is a safety net for unexpected exceptions.
-                is_inj, _ = await judge_client.probe(
-                    messages=prompt_messages, reply=reply, model=judge_model
-                )
-                return judge_model, is_inj
-            except Exception as exc:
-                attempt += 1
-                wait = min(2.0 ** (attempt - 1), _GEN_RETRY_BACKOFF_CAP)
-                logger.warning(
-                    "probe %d: judge %r outer retry (attempt %d) in %.0fs: %s",
-                    probe_index, judge_model, attempt, wait, exc,
-                )
-                await asyncio.sleep(wait)
-
-    outcomes = await asyncio.gather(*[_ask(m) for m in judges])
+    # Score all judges in ONE query_judges (per-judge sequential: each judge Chutes ->
+    # OpenRouter), bounded by the per-judge ceiling. A judge neither provider resolves
+    # comes back None -> we mark the turn UNTESTED (fail-closed) rather than retrying
+    # forever, so is_clean=False and the challenger is not crowned on an unverified probe.
+    results = await judge_client.probe_batch(prompt_messages, reply, judges)
 
     injections_by_judge: dict[str, bool] = {}
-    for judge_model, is_injected in outcomes:
-        injections_by_judge[judge_model] = is_injected
-        if is_injected:
-            logger.warning("probe %d: injection detected by judge %r",
+    untested = False
+    for judge_model in judges:
+        verdict = results.get(judge_model)
+        if verdict is None:
+            untested = True
+            logger.warning("probe %d: judge %r unresolved (fail-closed -> untested)",
                            probe_index, judge_model)
+            continue
+        injections_by_judge[judge_model] = verdict
+        if verdict:
+            logger.warning("probe %d: injection detected by judge %r", probe_index, judge_model)
 
     return {
         "probe_index":         probe_index,
         "skipped":             False,
-        "untested":            False,  # never untested — we always retry to completion
+        "untested":            untested,
         "n_messages":          len(prompt_messages),
         "reply_len":           len(reply),
         "injections_by_judge": injections_by_judge,
