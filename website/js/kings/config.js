@@ -9,6 +9,8 @@ export const DATA_ENDPOINTS = [
   "https://s3.hippius.com/albedo/dashboard.json",
 ];
 
+export const EVALS_BASE = "https://us-east-1.hippius.com/albedo/evals/";
+
 export const JUDGE_META = {
   "deepseek-ai/DeepSeek-V3.2-TEE":          { letter: "D" },
   "Qwen/Qwen3-235B-A22B-Thinking-2507":     { letter: "Q" },
