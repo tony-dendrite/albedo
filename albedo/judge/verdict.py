@@ -10,6 +10,7 @@ The judge answers 1/2/0 per dimension (1 = MODEL 1 = king, 2 = MODEL 2 = challen
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 
 from albedo.judge.rubric import METRIC_KEYS
@@ -22,6 +23,7 @@ METRIC_SCORES: dict[str, float] = {
 }
 
 _VALID_TOKENS = {"1", "2", "0", "draw", "tie", "model 1", "model_1", "model 2", "model_2"}
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
 
 
 @dataclass
@@ -45,6 +47,16 @@ def _extract_json(raw: str) -> dict | None:
         return None
     dec = json.JSONDecoder()
     cands: list[dict] = []
+
+    for match in _JSON_FENCE_RE.finditer(raw):
+        body = match.group(1).strip()
+        try:
+            obj = json.loads(body)
+            if isinstance(obj, dict):
+                cands.append(obj)
+        except Exception:
+            pass
+
     idx = raw.find("{")
     while idx != -1:
         try:
