@@ -53,6 +53,7 @@ from albedo.config import (
     JUDGE_FALLBACK_API_KEY_ENV,
     JUDGE_FALLBACK_MODEL_MAP,
     JUDGE_FALLBACK_REASONING_MODELS,
+    JUDGE_RATE_LIMITS,
 )
 from albedo.judge.rubric import PAIRWISE_RUBRIC_SYSTEM, PROBE_SYSTEM, build_pairwise_user
 from albedo.judge.verdict import MetricVerdict, parse_metric_verdict
@@ -70,14 +71,16 @@ def _max_tokens_for(model: str) -> int:
     return JUDGE_THINKING_TOKENS if _is_thinking(model) else JUDGE_SCORE_MAX_TOKENS
 
 
-def _merge_thinking(choices: list[dict]) -> str:
-    """Concatenate reasoning_content/reasoning + content from the first choice."""
+def _message_content(choices: list[dict]) -> str:
+    """Return the assistant content from the first choice, excluding reasoning.
+
+    OpenRouter thinking models can return separate reasoning fields. We allow that
+    reasoning to happen, but only parse the final assistant content as the verdict.
+    """
     if not choices:
         return ""
     msg = choices[0].get("message", {})
-    reasoning = msg.get("reasoning_content") or msg.get("reasoning") or ""
-    content = msg.get("content") or ""
-    return f"{reasoning}\n{content}" if reasoning else content
+    return msg.get("content") or ""
 
 
 def _sse_delta(line: str) -> tuple[str, str, bool]:
@@ -171,7 +174,9 @@ class ChutesJudge:
     def _or_sem(self, model: str) -> asyncio.Semaphore:
         s = self._or_sems.get(model)
         if s is None:
-            s = self._or_sems[model] = asyncio.Semaphore(max(1, JUDGE_MAX_CONCURRENCY_PER_MODEL))
+            limit_cfg = JUDGE_RATE_LIMITS.get(model, {}) if isinstance(JUDGE_RATE_LIMITS, dict) else {}
+            limit = int(limit_cfg.get("max_concurrency", JUDGE_MAX_CONCURRENCY_PER_MODEL))
+            s = self._or_sems[model] = asyncio.Semaphore(max(1, limit))
         return s
 
     def _or_model(self, model: str) -> str | None:
@@ -253,10 +258,9 @@ class ChutesJudge:
         client = self._fb_think if _is_thinking(model) else self._fb
         payload: dict[str, Any] = {
             "model": or_model, "messages": messages, "temperature": JUDGE_TEMPERATURE, "max_tokens": max_tokens,
-            "reasoning": {"exclude": True},
         }
-        # OpenRouter returns reasoning tokens by default for thinking models. Exclude
-        # them so the response budget is spent on the strict JSON we parse.
+        # Let thinking models use their reasoning budget. We parse only the final
+        # assistant content so quoted JSON inside reasoning cannot become a verdict.
 
         sem = self._or_sem(model)
         attempt = 0
@@ -267,7 +271,7 @@ class ChutesJudge:
                 t = min(JUDGE_OR_TIMEOUT_S, max(1.0, deadline - time.monotonic()))
                 resp = await client.post("/v1/chat/completions", json=payload, timeout=t)
                 resp.raise_for_status()
-                raw = _merge_thinking(resp.json().get("choices", []))
+                raw = _message_content(resp.json().get("choices", []))
                 if accept(raw):
                     return raw
                 last = "parse_fail"
