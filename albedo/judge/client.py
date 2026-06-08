@@ -53,13 +53,20 @@ from albedo.config import (
     JUDGE_FALLBACK_API_KEY_ENV,
     JUDGE_FALLBACK_MODEL_MAP,
     JUDGE_FALLBACK_REASONING_MODELS,
+    JUDGE_RATE_LIMITS,
 )
+
+
 from albedo.judge.rubric import PAIRWISE_RUBRIC_SYSTEM, PROBE_SYSTEM, build_pairwise_user
 from albedo.judge.verdict import MetricVerdict, parse_metric_verdict
 
 log = logging.getLogger(__name__)
 
 _DEFAULT_BASE_URL = "https://llm.chutes.ai"
+
+
+def _chutes_enabled() -> bool:
+    return os.environ.get("ALBEDO_JUDGE_CHUTES_ENABLED", "1").lower() not in ("0", "false", "no", "off")
 
 
 def _is_thinking(model: str) -> bool:
@@ -70,14 +77,12 @@ def _max_tokens_for(model: str) -> int:
     return JUDGE_THINKING_TOKENS if _is_thinking(model) else JUDGE_SCORE_MAX_TOKENS
 
 
-def _merge_thinking(choices: list[dict]) -> str:
-    """Concatenate reasoning_content/reasoning + content from the first choice."""
+def _message_content(choices: list[dict]) -> str:
+    """Return only the content field from the first choice message."""
     if not choices:
         return ""
     msg = choices[0].get("message", {})
-    reasoning = msg.get("reasoning_content") or msg.get("reasoning") or ""
-    content = msg.get("content") or ""
-    return f"{reasoning}\n{content}" if reasoning else content
+    return msg.get("content") or ""
 
 
 def _sse_delta(line: str) -> tuple[str, str, bool]:
@@ -156,14 +161,18 @@ class ChutesJudge:
 
         # Circuit-breaker state (per eval instance).
         self._chutes_dry_tasks = 0
-        self._chutes_off = False
+        self._chutes_off = not _chutes_enabled()
+        if self._chutes_off:
+            log.info("ChutesJudge: Chutes disabled via ALBEDO_JUDGE_CHUTES_ENABLED=0")
 
     # ----- helpers -----
 
     def _or_sem(self, model: str) -> asyncio.Semaphore:
         s = self._or_sems.get(model)
         if s is None:
-            s = self._or_sems[model] = asyncio.Semaphore(max(1, JUDGE_MAX_CONCURRENCY_PER_MODEL))
+            limit_cfg = JUDGE_RATE_LIMITS.get(model, {}) if isinstance(JUDGE_RATE_LIMITS, dict) else {}
+            limit = int(limit_cfg.get("max_concurrency", JUDGE_MAX_CONCURRENCY_PER_MODEL))
+            s = self._or_sems[model] = asyncio.Semaphore(max(1, limit))
         return s
 
     def _or_model(self, model: str) -> str | None:
@@ -246,9 +255,11 @@ class ChutesJudge:
         payload: dict[str, Any] = {
             "model": or_model, "messages": messages, "temperature": JUDGE_TEMPERATURE, "max_tokens": max_tokens,
         }
-        # Do NOT enable reasoning mode on OR for thinking models — they follow
-        # the strict JSON instruction more reliably without it. Forced reasoning
-        # mode causes them to output verbose prose instead of the one-line JSON.
+        # Models not in reasoning_models get reasoning excluded so their full max_tokens
+        # budget goes to content. deepseek-v4-flash (in reasoning_models) reasons freely —
+        # we read only content, so reasoning tokens never corrupt the verdict.
+        if model not in JUDGE_FALLBACK_REASONING_MODELS:
+            payload["reasoning"] = {"enabled": False, "exclude": True}
 
         sem = self._or_sem(model)
         attempt = 0
@@ -259,7 +270,7 @@ class ChutesJudge:
                 t = min(JUDGE_OR_TIMEOUT_S, max(1.0, deadline - time.monotonic()))
                 resp = await client.post("/v1/chat/completions", json=payload, timeout=t)
                 resp.raise_for_status()
-                raw = _merge_thinking(resp.json().get("choices", []))
+                raw = _message_content(resp.json().get("choices", []))
                 if accept(raw):
                     return raw
                 last = "parse_fail"
@@ -322,8 +333,6 @@ class ChutesJudge:
 
             # Race: check each task as it completes
             pending = {chutes_task, or_task}
-            chutes_won = False
-            result = None
 
             while pending:
                 done, pending = await asyncio.wait(
