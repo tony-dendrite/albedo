@@ -29,9 +29,9 @@ seed_digest    = "sha256:3368b0c79b619ed90dc5610c20073cf02c3a93275ebc0c5b94a9d33
 
 [judge]
 models = [
-  "deepseek-ai/DeepSeek-V3.2-TEE",
-  "Qwen/Qwen3-235B-A22B-Thinking-2507",
-  "moonshotai/Kimi-K2.6-TEE",
+  "minimax/minimax-m3",
+  "deepseek/deepseek-v4-flash",
+  "z-ai/glm-5.1",
 ]
 base_url_env        = "CHUTES_BASE_URL"
 api_key_env         = "CHUTES_API_KEY"
@@ -43,8 +43,9 @@ metric_keys = ["correctness", "grounding", "progress", "protocol", "efficiency"]
 score_max_tokens    = 768
 thinking_max_tokens = 4096
 thinking_models = [
-  "Qwen/Qwen3-235B-A22B-Thinking-2507",
-  "moonshotai/Kimi-K2.6-TEE",
+  "minimax/minimax-m3",
+  "deepseek/deepseek-v4-flash",
+  "z-ai/glm-5.1",
 ]
 retry_max              = 3
 retry_initial_backoff_s = 1.5
@@ -71,9 +72,9 @@ chutes_giveup_tasks = 2      # circuit-breaker fires after 2 dry tasks (was 5 â€
 # Per-model OR concurrency â€” raised for racing (Chutes+OR simultaneous).
 # With 64 parallel turns all racing, each model needs enough OR slots.
 [judge.rate_limits]
-"deepseek-ai/DeepSeek-V3.2-TEE"      = { max_concurrency = 8, min_interval_s = 0.0 }
-"moonshotai/Kimi-K2.6-TEE"           = { max_concurrency = 8, min_interval_s = 0.0 }
-"Qwen/Qwen3-235B-A22B-Thinking-2507" = { max_concurrency = 8, min_interval_s = 0.0 }
+"minimax/minimax-m3"         = { max_concurrency = 8, min_interval_s = 0.0 }
+"deepseek/deepseek-v4-flash" = { max_concurrency = 8, min_interval_s = 0.0 }
+"z-ai/glm-5.1"               = { max_concurrency = 8, min_interval_s = 0.0 }
 
 # Fallback provider: on a Chutes 429 (beyond chutes_429_grace_s) re-issue the call here.
 [judge.fallback]
@@ -81,11 +82,11 @@ enabled          = true
 base_url         = "https://openrouter.ai/api"  # client appends /v1/chat/completions
 api_key_env      = "OPENROUTER_API_KEY"
 chutes_429_grace_s = 4.0
-reasoning_models = ["Qwen/Qwen3-235B-A22B-Thinking-2507", "moonshotai/Kimi-K2.6-TEE"]
+reasoning_models = ["deepseek/deepseek-v4-flash"]
 [judge.fallback.model_map]
-"deepseek-ai/DeepSeek-V3.2-TEE"      = "deepseek/deepseek-v3.2"
-"moonshotai/Kimi-K2.6-TEE"           = "moonshotai/kimi-k2.6"
-"Qwen/Qwen3-235B-A22B-Thinking-2507" = "qwen/qwen3-235b-a22b-thinking-2507"
+"minimax/minimax-m3"           = "minimax/minimax-m3"
+"deepseek/deepseek-v4-flash"   = "deepseek/deepseek-v4-flash"
+"z-ai/glm-5.1"                 = "z-ai/glm-5.1"
 
 [dataset]
 repo        = "AlienKevin/SWE-ZERO-12M-trajectories"
@@ -93,7 +94,7 @@ shard_glob  = "data/train-*.parquet"
 manifest_sha256 = "982a92bd85d122d287b15f2ddb4e2050b9e345fb3921aa9a63382c7af022bd7f"
 
 [duel]
-n_samples            = 64
+n_samples            = 128
 max_turns_per_sample = 10
 alpha                = 0.001
 gate_alpha           = 0.05
@@ -113,3 +114,5 @@ rescore_passes       = 2      # max per-judge retry passes after main scoring (r
 
 [preeval]
 similarity_threshold = 0.95
+injection_probes     = 2
+injection_judges     = ["deepseek/deepseek-v4-flash"]
