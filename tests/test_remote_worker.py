@@ -18,8 +18,17 @@ from albedo_eval_service.models import (
 )
 from albedo_eval_service.remote_config import RemoteSettings
 from albedo_eval_service.remote_generation import GenerationResult, _vllm_worker
+from albedo_eval_service.remote_models import ResolvedModel
+from albedo_eval_service.remote_scoring import ScoringResult
 from albedo_eval_service.remote_state import RemoteRun
 from albedo_eval_service.remote_worker import RemoteEvalWorker
+
+
+class _Tokenizer:
+    chat_template = "test"
+
+    def apply_chat_template(self, messages, **_kwargs):
+        return "".join(message["content"] for message in messages) + " assistant:"
 
 
 class RecordingGenerator:
@@ -79,8 +88,11 @@ def _request():
     )
 
 
-def test_remote_worker_loads_parquet_and_runs_paired_generation(tmp_path):
+def test_remote_worker_loads_parquet_and_runs_paired_generation(tmp_path, monkeypatch):
     _write_dataset(tmp_path)
+    monkeypatch.setattr(
+        "albedo_eval_service.remote_dataset._load_tokenizer", lambda _path: _Tokenizer()
+    )
     calls: list[dict[str, object]] = []
 
     def factory(side, gpu_ids, model):
@@ -121,6 +133,84 @@ def test_remote_worker_loads_parquet_and_runs_paired_generation(tmp_path):
     assert [event["batch_id"] for event in generation_events] == ["gen-0001", "gen-0002"]
     assert [event["batch_id"] for event in scoring_events] == ["score-0001", "score-0002"]
     assert {call["side"] for call in calls if "gpu_ids" in call} == {"previous_king", "challenger"}
+
+
+class RecordingModelResolver:
+    def __init__(self, calls: list[object]):
+        self.calls = calls
+
+    def resolve(self, model_ref: str) -> ResolvedModel:
+        self.calls.append(f"resolve:{model_ref}")
+        return ResolvedModel(model_ref, model_ref, "test", True, 0, 0)
+
+
+class RecordingScorer:
+    def __init__(self, calls: list[object]):
+        self.calls = calls
+
+    def start_category_prep(self, *, request, samples):
+        self.calls.append("category_prep")
+        return "prep-1"
+
+    def score(self, *, request, samples, king_results, challenger_results, category_prep_id=None):
+        self.calls.append(f"score:{category_prep_id}")
+        records = [
+            {
+                "sample_id": sample.sample_id,
+                "order": ["previous_king", "challenger"],
+                "judge_results": [],
+                "judge_scores": [],
+                "sample_score": 0.5,
+                "scored": True,
+                "scoring_mode": "test",
+            }
+            for sample in samples
+        ]
+        return ScoringResult(
+            records=records,
+            summary={
+                "state": "succeeded",
+                "score_challenger": 0.5,
+                "score_king": 0.5,
+                "challenger_won": False,
+                "valid_turns": len(records),
+                "total_turns": len(records),
+                "judge_errors": 0,
+                "scored_sample_count": len(records),
+                "scoring_mode": "test",
+            },
+        )
+
+
+def test_remote_worker_starts_category_prep_before_model_resolution(tmp_path, monkeypatch):
+    _write_dataset(tmp_path)
+    monkeypatch.setattr(
+        "albedo_eval_service.remote_dataset._load_tokenizer", lambda _path: _Tokenizer()
+    )
+    calls: list[object] = []
+
+    def factory(side, gpu_ids, model):
+        calls.append({"side": side, "model": model})
+        return RecordingGenerator(side=side, calls=calls)
+
+    request = _request()
+    run = RemoteRun(remote_run_id=str(request.eval_run_id), request=request, state="accepted")
+    settings = RemoteSettings(
+        dataset_root=str(tmp_path),
+        generation_backend="vllm",
+        upload_artifacts=False,
+        artifact_spool_dir=str(tmp_path / "artifacts"),
+        scoring_backend="mock",
+    )
+
+    RemoteEvalWorker(
+        settings,
+        generator_factory=factory,
+        model_resolver=RecordingModelResolver(calls),
+        scorer=RecordingScorer(calls),
+    ).execute(run)
+
+    assert calls.index("category_prep") < calls.index("resolve:s3-or-hippius-uri/king")
 
 
 def test_remote_worker_rejects_overlapping_gpu_groups(tmp_path):

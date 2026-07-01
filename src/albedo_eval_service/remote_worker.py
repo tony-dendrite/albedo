@@ -23,6 +23,12 @@ from .sampling import multi_source_manifest_sample_ids
 
 GeneratorFactory = Callable[[str, list[str], str], Generator]
 T = TypeVar("T")
+_CANONICAL_TOKENIZER_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "assets"
+    / "tokenizers"
+    / "Qwen3.6-35B-A3B"
+)
 
 
 class ModelResolver(Protocol):
@@ -72,6 +78,8 @@ class RemoteEvalWorker:
     def _execute(self, run: RemoteRun) -> None:
         request = run.request
         topology = self._topology(request)
+        samples = self._load_samples(request, tokenizer_path=str(_CANONICAL_TOKENIZER_PATH))
+        category_prep_id = self._start_category_prep(run, request, samples)
         run.append_event(
             {
                 "type": "model_resolution_started",
@@ -91,9 +99,6 @@ class RemoteEvalWorker:
                 ],
             }
         )
-        tokenizer_path = king_model.local_path if Path(king_model.local_path).exists() else None
-        samples = self._load_samples(request, tokenizer_path=tokenizer_path)
-        category_prep_id = self._start_category_prep(run, request, samples)
         run.set_state("generating")
         run.append_event(
             {
@@ -360,7 +365,9 @@ class RemoteEvalWorker:
                     "allowed_scores": request.scoring.allowed_scores,
                     "scored_sample_count": scored_so_far,
                     "judge_errors": judge_errors,
-                    "scoring_modes": sorted({str(record.get("scoring_mode") or "") for record in batch}),
+                    "scoring_modes": sorted(
+                        {str(record.get("scoring_mode") or "") for record in batch}
+                    ),
                     "category_generation_errors": sum(
                         1 for record in batch if record.get("category_generation_error")
                     ),
