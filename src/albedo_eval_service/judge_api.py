@@ -82,6 +82,12 @@ class CategoryPrepResult:
     error: str | None = None
 
 
+@dataclass(frozen=True)
+class CategoryPrepLookup:
+    result: CategoryPrepResult | None
+    reason: str
+
+
 class CategoryScoringUnavailable(RuntimeError):
     pass
 
@@ -151,26 +157,93 @@ class CategoryPrepStore:
         self.service = service
         self._preps: dict[str, dict[str, asyncio.Task[CategoryPrepResult]]] = {}
         self._created_at: dict[str, float] = {}
+        self._total: dict[str, int] = {}
+        self._finished: dict[str, int] = {}
+        self._failed: dict[str, int] = {}
 
     def start(self, request: CategoryPrepRequest) -> str:
         self._sweep_expired()
         prep_id = f"{request.eval_run_id}:{uuid4()}"
         self._created_at[prep_id] = time.monotonic()
+        self._total[prep_id] = len(request.samples)
+        self._finished[prep_id] = 0
+        self._failed[prep_id] = 0
         self._preps[prep_id] = {
-            sample.sample_id: asyncio.create_task(self.service.prepare(sample))
+            sample.sample_id: asyncio.create_task(self._prepare_sample(prep_id, request, sample))
             for sample in request.samples
         }
         return prep_id
 
     async def get(self, prep_id: str, sample: JudgeSample) -> CategoryPrepResult | None:
+        return (await self.get_with_reason(prep_id, sample)).result
+
+    async def get_with_reason(self, prep_id: str, sample: JudgeSample) -> CategoryPrepLookup:
         self._sweep_expired()
         tasks = self._preps.get(prep_id)
         if not tasks:
-            return None
+            return CategoryPrepLookup(None, "unknown_or_expired_category_prep_id")
         task = tasks.get(sample.sample_id)
         if task is None:
-            return None
-        return await task
+            return CategoryPrepLookup(None, "sample_not_in_category_prep")
+        return CategoryPrepLookup(await task, "prepared")
+
+    async def _prepare_sample(
+        self, prep_id: str, request: CategoryPrepRequest, sample: CategoryPrepSample
+    ) -> CategoryPrepResult:
+        try:
+            result = await self.service.prepare(sample)
+        except Exception as exc:
+            finished, failed = self._mark_finished(prep_id, failed=True)
+            logger.warning(
+                "category_prep_sample_failed eval_run_id={} category_prep_id={} "
+                "finished={}/{} failed={} sample_id={} error={} elapsed_s={:.1f}",
+                request.eval_run_id,
+                prep_id,
+                finished,
+                self._total.get(prep_id, len(request.samples)),
+                failed,
+                sample.sample_id,
+                f"{type(exc).__name__}: {exc}",
+                time.monotonic() - self._created_at.get(prep_id, time.monotonic()),
+            )
+            self._log_all_done_if_complete(prep_id, request)
+            raise
+        finished, failed = self._mark_finished(prep_id, failed=False)
+        logger.info(
+            "category_prep_sample_done eval_run_id={} category_prep_id={} "
+            "finished={}/{} failed={} sample_id={} provider={} elapsed_s={:.1f}",
+            request.eval_run_id,
+            prep_id,
+            finished,
+            self._total.get(prep_id, len(request.samples)),
+            failed,
+            sample.sample_id,
+            result.category_source.get("provider", ""),
+            time.monotonic() - self._created_at.get(prep_id, time.monotonic()),
+        )
+        self._log_all_done_if_complete(prep_id, request)
+        return result
+
+    def _mark_finished(self, prep_id: str, *, failed: bool) -> tuple[int, int]:
+        self._finished[prep_id] = self._finished.get(prep_id, 0) + 1
+        if failed:
+            self._failed[prep_id] = self._failed.get(prep_id, 0) + 1
+        return self._finished[prep_id], self._failed.get(prep_id, 0)
+
+    def _log_all_done_if_complete(self, prep_id: str, request: CategoryPrepRequest) -> None:
+        total = self._total.get(prep_id, len(request.samples))
+        finished = self._finished.get(prep_id, 0)
+        if finished != total:
+            return
+        logger.info(
+            "category_prep_all_done eval_run_id={} category_prep_id={} "
+            "samples={} failed={} elapsed_s={:.1f}",
+            request.eval_run_id,
+            prep_id,
+            total,
+            self._failed.get(prep_id, 0),
+            time.monotonic() - self._created_at.get(prep_id, time.monotonic()),
+        )
 
     def _sweep_expired(self) -> None:
         ttl = self.settings.category_prep_ttl_seconds
@@ -182,6 +255,9 @@ class CategoryPrepStore:
                     task.cancel()
             self._preps.pop(prep_id, None)
             self._created_at.pop(prep_id, None)
+            self._total.pop(prep_id, None)
+            self._finished.pop(prep_id, None)
+            self._failed.pop(prep_id, None)
 
 
 def create_app(settings: JudgeSettings | None = None) -> FastAPI:
@@ -422,9 +498,21 @@ async def _score_samples_with_categories(
 
     async def _categories_for(sample: JudgeSample) -> CategoryPrepResult:
         if request.category_prep_id:
-            prepared = await prep_store.get(request.category_prep_id, sample)
-            if prepared is not None:
-                return prepared
+            lookup = await prep_store.get_with_reason(request.category_prep_id, sample)
+            if lookup.result is not None:
+                return lookup.result
+            reason = lookup.reason
+        else:
+            reason = "missing_category_prep_id"
+        logger.warning(
+            "score_batch_category_sync_generation eval_run_id={} batch_id={} "
+            "sample_id={} category_prep_id={} reason={}",
+            request.eval_run_id,
+            request.batch_id,
+            sample.sample_id,
+            request.category_prep_id or "",
+            reason,
+        )
         return await category_service.prepare(sample)
 
     async def _score_one(index: int, sample: JudgeSample) -> dict[str, Any]:

@@ -361,20 +361,48 @@ class FailingCategoryService:
         raise RuntimeError("category fail")
 
 
+class RecordingCategoryService:
+    def __init__(self):
+        self.prepared = []
+
+    async def prepare(self, sample):
+        self.prepared.append(sample.sample_id)
+        return type(
+            "CategoryPrepResult",
+            (),
+            {
+                "categories": _category_payload_list(),
+                "category_hash": "sha256:test",
+                "category_source": {"provider": "test"},
+                "error": None,
+            },
+        )()
+
+
 class EmptyPrepStore:
-    async def get(self, prep_id, sample):
-        return None
+    async def get_with_reason(self, prep_id, sample):
+        return type(
+            "Lookup",
+            (),
+            {"result": None, "reason": "unknown_or_expired_category_prep_id"},
+        )()
 
 
 class FakeJudgeClient:
     async def score(self, *, model, messages, response_schema=None, schema_name=""):
-        return JudgeRawResponse(model=model, provider="fake", raw=json.dumps({
-            "correctness": 2,
-            "grounding": 2,
-            "progress": 2,
-            "protocol": 2,
-            "efficiency": 2,
-        }))
+        if response_schema:
+            raw = json.dumps({f"cat_{idx:02d}": 2 for idx in range(1, 6)})
+        else:
+            raw = json.dumps(
+                {
+                    "correctness": 2,
+                    "grounding": 2,
+                    "progress": 2,
+                    "protocol": 2,
+                    "efficiency": 2,
+                }
+            )
+        return JudgeRawResponse(model=model, provider="fake", raw=raw)
 
 
 def test_category_scoring_failure_can_be_caught_for_fixed_metric_fallback():
@@ -406,3 +434,35 @@ def test_category_scoring_failure_can_be_caught_for_fixed_metric_fallback():
         assert "category fail" in str(exc)
     else:
         raise AssertionError("expected category failure")
+
+
+def test_score_batch_generates_categories_when_prep_id_is_unknown():
+    request = ScoreBatchRequest(
+        eval_run_id="run",
+        batch_id="score-1",
+        total_sample_count=1,
+        judge_models=["z-ai/glm-5.1"],
+        category_prep_id="missing-prep",
+        samples=[
+            JudgeSample(
+                sample_id="s1",
+                prompt="task",
+                previous_king_output="king",
+                challenger_output="challenger",
+                sample_index=0,
+            )
+        ],
+    )
+    service = RecordingCategoryService()
+
+    records = asyncio.run(
+        _score_samples_with_categories(
+            client=FakeJudgeClient(),
+            request=request,
+            category_service=service,
+            prep_store=EmptyPrepStore(),
+        )
+    )
+
+    assert service.prepared == ["s1"]
+    assert records[0]["scoring_mode"] == "glm_categories"
