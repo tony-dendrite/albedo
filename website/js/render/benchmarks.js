@@ -12,6 +12,7 @@ const BENCHMARK_LABELS = {
 const BENCHMARK_ORDER = ["tau2_airline", "tau2_retail", "tau2_telecom", "tau2_banking_knowledge"];
 
 const PAGE_SIZES = [5, 10, 25, 50];
+const ACTIVE_STATES = new Set(["QUEUED", "CLAIMED", "LOADING_MODEL", "RUNNING", "SCORING"]);
 
 let pageSize = 10;
 let page = 1;
@@ -34,6 +35,48 @@ function hfRepoUrl(model) {
 
 function completedRuns(model) {
   return (model?.runs || []).filter(run => run.score != null || Number(run.task_count || 0) > 0 || run.finished_at);
+}
+
+function progressKey(modelRepo, suite) {
+  return `${modelRepo || ""}\n${suite || ""}`;
+}
+
+function activeState(item) {
+  return String(item?.phase || item?.state || "").toUpperCase();
+}
+
+function isActiveProgress(item) {
+  return ACTIVE_STATES.has(activeState(item));
+}
+
+function activeProgressByModelSuite(data) {
+  const out = new Map();
+  for (const source of [...(data?.jobs || []), ...(data?.workers || [])]) {
+    if (!source?.model_repo || !source?.suite || !isActiveProgress(source)) continue;
+    out.set(progressKey(source.model_repo, source.suite), source);
+  }
+  return out;
+}
+
+function hasActiveProgress(model, activeProgress) {
+  return BENCHMARK_ORDER.some(suite => activeProgress.has(progressKey(model?.model_repo || model?.id, suite)));
+}
+
+function progressLabel(progress) {
+  const done = Number(progress?.progress_done);
+  const total = Number(progress?.progress_total);
+  if (Number.isFinite(done) && Number.isFinite(total) && total > 0) {
+    return `${Math.max(0, Math.min(100, Math.round((done / total) * 100)))}%`;
+  }
+  const state = activeState(progress).toLowerCase().replaceAll("_", " ");
+  return state || "active";
+}
+
+function progressMeta(progress) {
+  const seconds = Number(progress?.seconds_since_last_progress);
+  if (Number.isFinite(seconds)) return `${Math.max(0, Math.round(seconds))}s since progress`;
+  if (progress?.updated_at) return fmtRelative(progress.updated_at);
+  return progress?.worker_id || "active";
 }
 
 function latestRun(model) {
@@ -152,9 +195,15 @@ function renderFeatured(model, baseline) {
     el("div", { class: "bench-summary-grid" }, scoreItems));
 }
 
-function tableScoreCell(model, run, baseline, boxed = false) {
+function tableScoreCell(model, run, baseline, boxed = false, progress = null) {
   const cls = boxed ? "bench-table-score" : "bench-table-score plain";
   if (!run) {
+    if (progress) {
+      return el("span", { class: `${cls} pending live` },
+        el("span", { class: "bench-card-name" }, activeState(progress).toLowerCase().replaceAll("_", " ") || "active"),
+        el("span", { class: "bench-score pending" }, progressLabel(progress)),
+        el("span", { class: "bench-card-meta" }, progressMeta(progress)));
+    }
     return el("span", { class: `${cls} pending` },
       el("span", { class: "bench-card-name" }, "pending"),
       el("span", { class: "bench-score pending" }, "—"));
@@ -165,7 +214,7 @@ function tableScoreCell(model, run, baseline, boxed = false) {
     el("span", { class: "bench-card-meta" }, run.finished_at ? fmtRelative(run.finished_at) : "running"));
 }
 
-function renderTableRows(models, baseline, highlightedModel) {
+function renderTableRows(models, baseline, highlightedModel, activeProgress) {
   return models.map(model => {
     const runs = new Map(latestRunsByBenchmark(model).map(run => [run.suite, run]));
     const boxed = highlightedModel?.id === model.id;
@@ -174,12 +223,14 @@ function renderTableRows(models, baseline, highlightedModel) {
       el("td", { class: "bench-label-col" }, repoUrl
         ? el("a", { class: "bench-label-link", href: repoUrl, target: "_blank", rel: "noopener" }, modelLabel(model))
         : modelLabel(model)),
-      BENCHMARK_ORDER.map(suite => el("td", { class: "bench-score-col" }, tableScoreCell(model, runs.get(suite), baseline, boxed))));
+      BENCHMARK_ORDER.map(suite => el("td", { class: "bench-score-col" },
+        tableScoreCell(model, runs.get(suite), baseline, boxed, activeProgress.get(progressKey(model.model_repo || model.id, suite))))));
   });
 }
 
 export function renderBenchmarks(container, metaNode, data) {
-  const models = (data?.models || []).filter(model => completedRuns(model).length);
+  const activeProgress = activeProgressByModelSuite(data);
+  const models = (data?.models || []).filter(model => completedRuns(model).length || hasActiveProgress(model, activeProgress));
   if (!models.length) {
     mount(container, el("div", { class: "empty" }, "no benchmark data yet."));
     if (metaNode) metaNode.textContent = "no data";
@@ -210,6 +261,6 @@ export function renderBenchmarks(container, metaNode, data) {
         el("thead", {}, el("tr", {},
           el("th", { class: "bench-label-col" }, "label"),
           BENCHMARK_ORDER.map(suite => el("th", { class: "bench-score-col" }, benchmarkLabel(suite))))),
-        el("tbody", {}, shown.length ? renderTableRows(shown, baseline, highlightedModel) : el("tr", {}, el("td", { colspan: "5" }, "no models yet."))))));
+        el("tbody", {}, shown.length ? renderTableRows(shown, baseline, highlightedModel, activeProgress) : el("tr", {}, el("td", { colspan: "5" }, "no models yet."))))));
   if (metaNode) metaNode.textContent = `${models.length} models · ${data.counts?.runs ?? 0} benchmark runs · updated ${fmtRelative(data.generated_at)}`;
 }
