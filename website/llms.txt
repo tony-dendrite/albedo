@@ -8,7 +8,7 @@
 > mini-coder (400k) — sampled 70/30 across the two. An evaluator (GLM 5.2) writes yes/no checklist
 > questions about a good next step for each task; an ensemble of LLM judges answers them 1/0 for the
 > king and challenger responses independently, and the mean yes-rate is each side's score.
-> A challenger must beat the king by a **3% margin** to win. Winners are crowned into a
+> A challenger must beat the king by a **6% margin** to win. Winners are crowned into a
 > rolling 5-king chain and earn emissions.
 >
 > This codebase is the **production backend + miner CLI** — a set of independent,
@@ -379,7 +379,7 @@ fp8), seeing only the questions + one response — never the trajectory or the o
 challenger are scored **independently** against the same questions: per judge, the mean of its 1/0
 answers; then the mean across judges → an absolute score in `[0,1]` per side (`score_king` and
 `score_challenger` are independent — they do NOT sum to 1). The challenger wins (`EVAL_WIN`) only if
-`score_challenger − score_king ≥ CHALLENGER_WIN_MARGIN` (`0.03`, margin-only); otherwise
+`score_challenger − score_king ≥ CHALLENGER_WIN_MARGIN` (`0.06`, margin-only); otherwise
 `COMPLETE_LOSS`. Per-model concurrency is capped by a semaphore
 (`ALBEDO_JUDGE_MAX_CONCURRENCY_PER_MODEL`, default 128) with retry + backoff; an eval needs
 `min_valid_fraction` (0.8) of samples scored on both sides or it's a provider fault.
