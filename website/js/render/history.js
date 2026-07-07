@@ -5,8 +5,10 @@ import { verdictInfo, faultCategory, faultCodeLabel } from "../data.js";
 
 const stop = e => e.stopPropagation();
 
-function judgeCell(chal) {
+// binary scoring mode: by_judge is the challenger's independent yes-rate — king is not 1 - chal.
+function judgeCell(chal, binary) {
   if (chal == null) return el("span", { class: "muted-dash" }, "—");
+  if (binary) return el("span", { class: "judge-scores" }, pct(chal));
   return el("span", { class: "judge-scores" },
     pct(chal), el("span", { class: "sep" }, " / "),
     el("span", { class: "king-score" }, pct(1 - chal)));
@@ -48,7 +50,7 @@ export function renderHistory(container, rows, judgeModels, netuid, currentKingE
       el("td", { class: "uid" }, tao ? link(tao, String(r.uid ?? "—"), { onClick: stop }) : String(r.uid ?? "—")),
       el("td", { class: "model" }, repoUrl ? link(repoUrl, modelName(r), { class: "model-cell", title: repo, onClick: stop }) : el("span", { class: "model-cell", title: repo }, modelName(r))),
       el("td", { class: "model vs" }, kingUrl ? link(kingUrl, kingName, { class: "model-cell", title: kingTitle, onClick: stop }) : el("span", { class: "model-cell", title: kingTitle }, kingName)),
-      ...judges.map(m => el("td", { class: "center" }, judgeCell(bj[m]))),
+      ...judges.map(m => el("td", { class: "center" }, judgeCell(bj[m], r.scoring_mode === "binary"))),
       el("td", { class: "r" }, el("span", { class: `verdict-badge ${v.badge}` }, v.badge)));
   });
 
