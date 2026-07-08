@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import threading
 from typing import Annotated
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, WebSocket
+from loguru import logger
+from pydantic import BaseModel
 
 from .models import EvalRequest
 from .remote_config import RemoteSettings, get_remote_settings
+from .remote_models import ModelArtifactResolver
 from .remote_state import RemoteRun, RemoteRunStore
 from .remote_worker import RemoteEvalWorker
 from .score_bridge import score_bridge_hub
@@ -92,6 +96,43 @@ def start_eval_run(
         if queued_run:
             background_tasks.add_task(_execute_remote_run, queued_run, settings)
     return {"remote_run_id": run.remote_run_id, "state": run.state}
+
+
+class ModelPrefetchRequest(BaseModel):
+    model_uri: str
+
+
+_prefetch_inflight: set[str] = set()
+_prefetch_inflight_guard = threading.Lock()
+
+
+@app.post("/model-prefetch")
+def prefetch_model(
+    request: ModelPrefetchRequest,
+    background_tasks: BackgroundTasks,
+    settings: RemoteSettings = Depends(get_remote_settings),
+    _: None = Depends(require_auth),
+) -> dict[str, str]:
+    model_uri = request.model_uri.strip()
+    if not model_uri:
+        raise HTTPException(status_code=422, detail="model_uri must be non-empty")
+    with _prefetch_inflight_guard:
+        if model_uri in _prefetch_inflight:
+            return {"model_uri": model_uri, "state": "in_progress"}
+        _prefetch_inflight.add(model_uri)
+    background_tasks.add_task(_prefetch_model_artifact, model_uri, settings)
+    return {"model_uri": model_uri, "state": "started"}
+
+
+def _prefetch_model_artifact(model_uri: str, settings: RemoteSettings) -> None:
+    try:
+        resolved = ModelArtifactResolver(settings).resolve(model_uri)
+        print(f"model_prefetch_done ref={model_uri} cache_hit={resolved.cache_hit}", flush=True)
+    except Exception as exc:  # noqa: BLE001 - prefetch is best-effort; the eval retries the download itself
+        logger.warning(f"[remote-api] model prefetch failed ref={model_uri}: {exc}")
+    finally:
+        with _prefetch_inflight_guard:
+            _prefetch_inflight.discard(model_uri)
 
 
 @app.get("/eval-runs/{remote_run_id}")

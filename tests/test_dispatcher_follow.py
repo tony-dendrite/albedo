@@ -9,11 +9,12 @@ import albedo_eval_service.dispatcher as dispatcher_module
 
 
 class RecordingRepository:
-    def __init__(self):
+    def __init__(self, next_model_uri=None):
         self.events = []
         self.heartbeats = 0
         self.failed = []
         self.succeeded = []
+        self.next_model_uri = next_model_uri
 
     def record_remote_event(self, *, submission_id, attempt_id, event):
         self.events.append(event)
@@ -26,6 +27,9 @@ class RecordingRepository:
 
     def mark_eval_succeeded(self, **kwargs):
         self.succeeded.append(kwargs)
+
+    def peek_next_challenger_model_uri(self):
+        return self.next_model_uri
 
 
 class PollingClient:
@@ -74,6 +78,65 @@ def test_follow_until_verdict_polls_and_records_only_new_events():
     assert verdict["state"] == "succeeded"
     assert [event["type"] for event in repo.events] == ["eval_started", "generation_started", "verdict"]
     assert repo.heartbeats == 5
+
+
+class PrefetchingClient(PollingClient):
+    def __init__(self):
+        super().__init__()
+        self.prefetched = []
+
+    async def prefetch_model(self, model_uri):
+        self.prefetched.append(model_uri)
+        return {"model_uri": model_uri, "state": "started"}
+
+
+def test_follow_until_verdict_prefetches_next_challenger_once():
+    repo = RecordingRepository(next_model_uri="oci://registry/next@sha256:abc")
+    client = PrefetchingClient()
+    dispatcher = EvalDispatcher(
+        settings=Settings(
+            database_url="postgresql://example",
+            dataset_manifest_uri="s3://manifest",
+            judge_config_hash="sha256:judge",
+            remote_event_poll_seconds=0,
+        ),
+        repository=repo,
+    )
+
+    asyncio.run(
+        dispatcher._follow_until_verdict(
+            client,
+            submission_id=uuid4(),
+            attempt_id=uuid4(),
+            remote_run_id="remote-1",
+        )
+    )
+
+    assert client.prefetched == ["oci://registry/next@sha256:abc"]
+
+
+def test_maybe_prefetch_skips_repeat_ref_and_disabled_setting():
+    repo = RecordingRepository(next_model_uri="oci://registry/next@sha256:abc")
+    client = PrefetchingClient()
+    base_kwargs = dict(
+        database_url="postgresql://example",
+        dataset_manifest_uri="s3://manifest",
+        judge_config_hash="sha256:judge",
+    )
+
+    dispatcher = EvalDispatcher(settings=Settings(**base_kwargs), repository=repo)
+    result = asyncio.run(
+        dispatcher._maybe_prefetch_next_challenger(client, "oci://registry/next@sha256:abc")
+    )
+    assert result == "oci://registry/next@sha256:abc"
+    assert client.prefetched == []
+
+    disabled = EvalDispatcher(
+        settings=Settings(prefetch_next_challenger=False, **base_kwargs), repository=repo
+    )
+    result = asyncio.run(disabled._maybe_prefetch_next_challenger(client, None))
+    assert result is None
+    assert client.prefetched == []
 
 
 def test_complete_eval_failed_verdict_sends_notification(monkeypatch):

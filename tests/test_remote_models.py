@@ -232,3 +232,10 @@ def test_model_resolver_rejects_oci_download_without_model_files(tmp_path, monke
         / manifest_digest.removeprefix("sha256:")
     )
     assert not cache_dir.exists()
+
+
+def test_resolve_lock_is_shared_per_ref():
+    from albedo_eval_service.remote_models import _resolve_lock
+
+    assert _resolve_lock("oci://registry/a@sha256:aa") is _resolve_lock("oci://registry/a@sha256:aa")
+    assert _resolve_lock("oci://registry/a@sha256:aa") is not _resolve_lock("oci://registry/b@sha256:bb")

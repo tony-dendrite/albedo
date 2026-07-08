@@ -254,6 +254,8 @@ class EvalDispatcher:
         seen_event_count = 0
         consecutive_errors = 0
         max_consecutive_errors = 5
+        polls_until_prefetch_check = 0
+        last_prefetched_model_uri: str | None = None
         while True:
             try:
                 events: list[dict[str, Any]] = []
@@ -300,7 +302,33 @@ class EvalDispatcher:
                 return remote_state
             # renew the lease even when no new events arrive (generation takes 30+ min with no events)
             self.repository.heartbeat_attempt(attempt_id=attempt_id, lease_seconds=self.settings.lease_seconds)
+            if polls_until_prefetch_check <= 0:
+                polls_until_prefetch_check = 12  # ~1 min at the 5s poll cadence
+                last_prefetched_model_uri = await self._maybe_prefetch_next_challenger(
+                    client, last_prefetched_model_uri
+                )
+            polls_until_prefetch_check -= 1
             await asyncio.sleep(self.settings.remote_event_poll_seconds)
+
+    async def _maybe_prefetch_next_challenger(
+        self, client: RemoteEvalClient, last_prefetched: str | None
+    ) -> str | None:
+        """Ask the remote host to pre-download the next queued challenger's model.
+
+        Best-effort: any failure (no queue, old remote API, network) is swallowed —
+        the eval itself downloads the model if the prefetch never happened.
+        """
+        if not self.settings.prefetch_next_challenger:
+            return last_prefetched
+        try:
+            model_uri = self.repository.peek_next_challenger_model_uri()
+            if model_uri and model_uri != last_prefetched:
+                await client.prefetch_model(model_uri)
+                logger.info(f"[eval-dispatch] requested prefetch of next challenger model {model_uri}")
+                return model_uri
+        except Exception as exc:  # noqa: BLE001 - prefetch must never break the follow loop
+            logger.debug(f"[eval-dispatch] challenger prefetch skipped: {exc}")
+        return last_prefetched
 
     async def run_forever(self) -> None:
         # Keeps the loop alive across unexpected errors (DB glitch, transient exception).

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -71,26 +73,23 @@ class HttpScoringClient:
         challenger_results: list[GenerationResult],
         category_prep_id: str | None = None,
     ) -> ScoringResult:
-        all_records: list[dict[str, Any]] = []
-        summaries: list[dict[str, Any]] = []
+        payloads = _score_batch_payloads(
+            request, samples, king_results, challenger_results, category_prep_id=category_prep_id
+        )
         with httpx.Client(
             base_url=self.settings.scoring_base_url.rstrip("/"),
             headers={"Authorization": f"Bearer {self.settings.scoring_auth_token}"},
             timeout=httpx.Timeout(self.settings.scoring_timeout_seconds),
         ) as client:
-            for payload in _score_batch_payloads(
-                request, samples, king_results, challenger_results, category_prep_id=category_prep_id
-            ):
+
+            def send(payload: dict[str, Any]) -> dict[str, Any]:
                 response = client.post("/score-batch", json=payload)
                 response.raise_for_status()
-                body = response.json()
-                records = body.get("scoring_records", [])
-                if not isinstance(records, list):
-                    raise ValueError("judge API returned non-list scoring_records")
-                all_records.extend(records)
-                summary = body.get("summary", {})
-                if isinstance(summary, dict):
-                    summaries.append(summary)
+                return response.json()
+
+            all_records, summaries = _collect_score_batches(
+                payloads, send, max_concurrency=self.settings.scoring_batch_concurrency
+            )
         return ScoringResult(
             records=all_records,
             summary=_merge_summaries(all_records, summaries, min_valid_fraction=self.settings.scoring_min_valid_fraction),
@@ -121,19 +120,16 @@ class WebSocketScoringClient:
         challenger_results: list[GenerationResult],
         category_prep_id: str | None = None,
     ) -> ScoringResult:
-        all_records: list[dict[str, Any]] = []
-        summaries: list[dict[str, Any]] = []
-        for payload in _score_batch_payloads(
+        payloads = _score_batch_payloads(
             request, samples, king_results, challenger_results, category_prep_id=category_prep_id
-        ):
-            body = score_bridge_hub.request(payload, timeout_seconds=self.settings.scoring_timeout_seconds)
-            records = body.get("scoring_records", [])
-            if not isinstance(records, list):
-                raise ValueError("score bridge returned non-list scoring_records")
-            all_records.extend(records)
-            summary = body.get("summary", {})
-            if isinstance(summary, dict):
-                summaries.append(summary)
+        )
+
+        def send(payload: dict[str, Any]) -> dict[str, Any]:
+            return score_bridge_hub.request(payload, timeout_seconds=self.settings.scoring_timeout_seconds)
+
+        all_records, summaries = _collect_score_batches(
+            payloads, send, max_concurrency=self.settings.scoring_batch_concurrency
+        )
         return ScoringResult(
             records=all_records,
             summary=_merge_summaries(all_records, summaries, min_valid_fraction=self.settings.scoring_min_valid_fraction),
@@ -266,6 +262,35 @@ def _score_batch_payloads(
             }
         )
     return payloads
+
+
+def _collect_score_batches(
+    payloads: list[dict[str, Any]],
+    send: Callable[[dict[str, Any]], dict[str, Any]],
+    *,
+    max_concurrency: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Send score batches concurrently; records/summaries keep the payload order.
+
+    Keep max_concurrency * scoring_batch_size * 2 within ~2x the judge API's
+    per-model semaphore, or per-batch latency can exceed the scoring timeout.
+    """
+    all_records: list[dict[str, Any]] = []
+    summaries: list[dict[str, Any]] = []
+    if not payloads:
+        return all_records, summaries
+    workers = max(1, min(max_concurrency, len(payloads)))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        bodies = list(executor.map(send, payloads))
+    for body in bodies:
+        records = body.get("scoring_records", [])
+        if not isinstance(records, list):
+            raise ValueError("scoring backend returned non-list scoring_records")
+        all_records.extend(records)
+        summary = body.get("summary", {})
+        if isinstance(summary, dict):
+            summaries.append(summary)
+    return all_records, summaries
 
 
 def _merge_summaries(

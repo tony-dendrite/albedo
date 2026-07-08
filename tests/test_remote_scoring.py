@@ -1,11 +1,22 @@
 from __future__ import annotations
 
+import threading
+import time
 import types
 from uuid import uuid4
 
+import pytest
+
+import albedo_eval_service.remote_scoring as remote_scoring_module
+from albedo_eval_service.remote_config import RemoteSettings
 from albedo_eval_service.remote_dataset import EvalSample
 from albedo_eval_service.remote_generation import GenerationResult
-from albedo_eval_service.remote_scoring import _category_prep_payload, _score_batch_payloads
+from albedo_eval_service.remote_scoring import (
+    WebSocketScoringClient,
+    _category_prep_payload,
+    _collect_score_batches,
+    _score_batch_payloads,
+)
 
 
 def _samples(counts: dict[str, int]) -> list[EvalSample]:
@@ -41,6 +52,81 @@ def test_score_batch_payload_carries_both_outputs_no_index():
     assert payloads[0]["category_prep_id"] == "prep-1"
     for entry in payloads[0]["samples"]:
         assert set(entry) == {"sample_id", "prompt", "previous_king_output", "challenger_output"}
+
+
+def test_collect_score_batches_preserves_payload_order():
+    payloads = [{"batch_id": f"score-{i:04d}"} for i in range(1, 7)]
+    delays = {payload["batch_id"]: (6 - i) * 0.01 for i, payload in enumerate(payloads)}
+
+    def send(payload):
+        time.sleep(delays[payload["batch_id"]])  # earlier batches finish later
+        return {
+            "scoring_records": [{"sample_id": f"{payload['batch_id']}-r"}],
+            "summary": {"batch_id": payload["batch_id"]},
+        }
+
+    records, summaries = _collect_score_batches(payloads, send, max_concurrency=4)
+
+    assert [r["sample_id"] for r in records] == [f"score-{i:04d}-r" for i in range(1, 7)]
+    assert [s["batch_id"] for s in summaries] == [f"score-{i:04d}" for i in range(1, 7)]
+
+
+def test_collect_score_batches_propagates_batch_failure():
+    payloads = [{"batch_id": "score-0001"}, {"batch_id": "score-0002"}]
+
+    def send(payload):
+        if payload["batch_id"] == "score-0002":
+            raise RuntimeError("boom")
+        return {"scoring_records": [], "summary": {}}
+
+    with pytest.raises(RuntimeError, match="boom"):
+        _collect_score_batches(payloads, send, max_concurrency=2)
+
+
+def test_websocket_scoring_client_sends_batches_concurrently(monkeypatch):
+    samples = _samples({"swe-zero": 6})
+    king = [GenerationResult(sample_id=s.sample_id, text="king") for s in samples]
+    challenger = [GenerationResult(sample_id=s.sample_id, text="challenger") for s in samples]
+    request = types.SimpleNamespace(
+        eval_run_id=uuid4(),
+        scoring=types.SimpleNamespace(judge_count=3),
+        dataset=types.SimpleNamespace(scoring_batch_size=2),
+    )
+    # 3 batches must be in flight at once or the barrier breaks and the test fails.
+    barrier = threading.Barrier(3, timeout=5)
+
+    class StubHub:
+        def request(self, payload, *, timeout_seconds, endpoint="/score-batch"):
+            barrier.wait()
+            return {
+                "scoring_records": [
+                    {
+                        "sample_id": entry["sample_id"],
+                        "scored": True,
+                        "king_score": 0.5,
+                        "challenger_score": 0.5,
+                        "judge_results": [],
+                    }
+                    for entry in payload["samples"]
+                ],
+                "summary": {"batch_id": payload["batch_id"]},
+            }
+
+    monkeypatch.setattr(remote_scoring_module, "score_bridge_hub", StubHub())
+    client = WebSocketScoringClient(
+        RemoteSettings(scoring_backend="websocket", scoring_batch_concurrency=3)
+    )
+
+    result = client.score(
+        request=request, samples=samples, king_results=king, challenger_results=challenger
+    )
+
+    assert [r["sample_id"] for r in result.records] == [s.sample_id for s in samples]
+    assert [s["batch_id"] for s in result.summary["batch_summaries"]] == [
+        "score-0001",
+        "score-0002",
+        "score-0003",
+    ]
 
 
 def test_score_batch_payload_skips_errored_generations():

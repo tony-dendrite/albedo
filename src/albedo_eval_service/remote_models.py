@@ -23,6 +23,14 @@ _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _DEFAULT_OCI_REGISTRY = "registry.hippius.com"
 _HEARTBEAT_INTERVAL_S = 10.0
 
+_RESOLVE_LOCKS: dict[str, threading.Lock] = {}
+_RESOLVE_LOCKS_GUARD = threading.Lock()
+
+
+def _resolve_lock(model_ref: str) -> threading.Lock:
+    with _RESOLVE_LOCKS_GUARD:
+        return _RESOLVE_LOCKS.setdefault(model_ref, threading.Lock())
+
 
 @contextmanager
 def _download_heartbeat(label: str):
@@ -77,6 +85,12 @@ class ModelArtifactResolver:
         self.cache_root = Path(settings.model_cache_dir)
 
     def resolve(self, model_ref: str) -> ResolvedModel:
+        # Serialize concurrent resolves of the same ref (e.g. a background prefetch
+        # racing the eval worker) so they never write the same cache dir at once.
+        with _resolve_lock(model_ref):
+            return self._resolve_unlocked(model_ref)
+
+    def _resolve_unlocked(self, model_ref: str) -> ResolvedModel:
         if not self.settings.resolve_model_artifacts:
             return ResolvedModel(
                 original_ref=model_ref,

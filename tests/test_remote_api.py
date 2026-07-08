@@ -1,8 +1,10 @@
+import types
 from threading import Thread
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
+import albedo_eval_service.remote_api as remote_api_module
 from albedo_eval_service.models import Challenger, DatasetConfig, EvalRequest, PreviousKing, ScoringConfig
 from albedo_eval_service.remote_api import app, store
 from albedo_eval_service.remote_config import RemoteSettings, get_remote_settings
@@ -81,6 +83,45 @@ def test_remote_api_capacity_reports_active_runs():
     assert response.status_code == 200
     assert response.json()["gpu_count"] == 8
     assert response.json()["active_runs"] == 0
+
+
+def test_remote_api_model_prefetch_resolves_in_background(monkeypatch):
+    calls = []
+
+    class StubResolver:
+        def __init__(self, settings):
+            pass
+
+        def resolve(self, model_uri):
+            calls.append(model_uri)
+            return types.SimpleNamespace(cache_hit=False)
+
+    monkeypatch.setattr(remote_api_module, "ModelArtifactResolver", StubResolver)
+    client = TestClient(app)
+    headers = {"Authorization": "Bearer secret"}
+    model_uri = "oci://registry.hippius.com/miner/model@sha256:" + "0" * 64
+
+    response = client.post("/model-prefetch", json={"model_uri": model_uri}, headers=headers)
+
+    assert response.status_code == 200
+    assert response.json() == {"model_uri": model_uri, "state": "started"}
+    # TestClient runs background tasks before returning, so the resolve already happened
+    # and the in-flight marker was cleared again.
+    assert calls == [model_uri]
+    assert model_uri not in remote_api_module._prefetch_inflight
+
+
+def test_remote_api_model_prefetch_dedupes_inflight_ref():
+    client = TestClient(app)
+    headers = {"Authorization": "Bearer secret"}
+    model_uri = "oci://registry.hippius.com/miner/busy@sha256:" + "1" * 64
+    remote_api_module._prefetch_inflight.add(model_uri)
+    try:
+        response = client.post("/model-prefetch", json={"model_uri": model_uri}, headers=headers)
+        assert response.status_code == 200
+        assert response.json() == {"model_uri": model_uri, "state": "in_progress"}
+    finally:
+        remote_api_module._prefetch_inflight.discard(model_uri)
 
 
 def test_remote_api_score_bridge_round_trips_backend_initiated_socket():

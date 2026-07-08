@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     remote_event_timeout_seconds: float = 30.0
     remote_event_poll_seconds: float = 5.0
     max_retry_count: int = 3
+    prefetch_next_challenger: bool = True
 
 
 @lru_cache

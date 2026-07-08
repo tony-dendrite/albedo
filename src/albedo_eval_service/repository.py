@@ -242,6 +242,24 @@ class EvalRepository:
                 request=request,
             )
 
+    def peek_next_challenger_model_uri(self) -> str | None:
+        """Best-effort look at the model the eval queue will most likely claim next.
+
+        Used to warm the remote model cache while the current eval runs; includes
+        PRE_EVAL_PASSED because the requeuer promotes those within a minute.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT ms.model_uri
+                FROM model_submissions ms
+                WHERE ms.state IN ('EVAL_QUEUED', 'PRE_EVAL_PASSED')
+                ORDER BY ms.priority ASC, ms.created_at ASC
+                LIMIT 1
+                """
+            ).fetchone()
+            return row["model_uri"] if row else None
+
     def record_remote_event(
         self, *, submission_id: UUID, attempt_id: UUID, event: dict[str, Any]
     ) -> None:

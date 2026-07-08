@@ -34,6 +34,11 @@ class RemoteEvalClient:
         response.raise_for_status()
         return response.json()
 
+    async def prefetch_model(self, model_uri: str) -> dict[str, Any]:
+        response = await self._client.post("/model-prefetch", json={"model_uri": model_uri})
+        response.raise_for_status()
+        return response.json()
+
     async def get_eval(self, remote_run_id: str) -> dict[str, Any]:
         response = await self._client.get(f"/eval-runs/{remote_run_id}")
         response.raise_for_status()
