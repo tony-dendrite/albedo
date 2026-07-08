@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "albedo-simple"
+version = "0.1.0"
+description = "Albedo SN97 single-package rewrite"
+requires-python = ">=3.11"
+dependencies = [
+    "asyncpg>=0.29",
+    "httpx>=0.27",
+    "loguru>=0.7",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "fastapi>=0.111",
+    "uvicorn>=0.30",
+    "websockets>=12.0",
+    "boto3>=1.34",
+    "numpy>=1.26",
+    "safetensors>=0.4",
+    "opensearch-py>=2.5",
+    "bittensor>=9.0",
+    "pyarrow>=16.0",
+    "huggingface-hub>=0.23",
+    "hippius-hub",
+]
+
+[project.optional-dependencies]
+dev = ["ruff>=0.4", "pytest>=8.0", "pytest-asyncio>=0.23"]
+# GPU hosts additionally need: vllm==0.23.0 torch==2.11.* (installed per-box, not pinned here)
+
+[project.scripts]
+albedo = "albedo.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["albedo"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# Verbatim judge prompts are long-form prose inside string literals; keep them byte-identical.
+"albedo/judges.py" = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
