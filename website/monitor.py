@@ -111,6 +111,54 @@ def _eval_artifact_tail(uri: str | None) -> tuple[str, str] | None:
     return (eval_run_id, name) if eval_run_id and name else None
 
 
+# --------------------------------------------------------------------------- king per-judge backfill
+
+# The verdict's score_breakdown.by_judge is challenger-only (judge_core.aggregate_scores);
+# the king's per-judge yes-rates only exist in the SCORING_RESULTS artifact. Compute them
+# once per run from the artifact and cache to disk so each tick stays cheap.
+KING_CACHE_PATH = DATA_DIR / "king_by_judge_cache.json"
+
+
+def _load_king_cache() -> dict[str, dict[str, float]]:
+    try:
+        return json.loads(KING_CACHE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_king_cache(cache: dict[str, dict[str, float]]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    KING_CACHE_PATH.write_text(json.dumps(cache, indent=2), encoding="utf-8")
+
+
+def _king_by_judge_from_artifact(url: str) -> dict[str, float] | None:
+    """Mirror judge_core.aggregate_scores for the king side: per-judge mean yes_rate over
+    scored records (side == previous_king, parse_ok). None on fetch failure (retried next tick)."""
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(url, timeout=60) as resp:
+            text = resp.read().decode("utf-8", errors="replace")
+    except Exception as exc:
+        log.warning("king by_judge fetch failed for %s: %s", url, exc)
+        return None
+    rates: dict[str, list[float]] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not record.get("scored"):
+            continue
+        for result in record.get("judge_results", []):
+            if result.get("side") == "previous_king" and result.get("parse_ok") and result.get("yes_rate") is not None:
+                rates.setdefault(result["judge_model"], []).append(float(result["yes_rate"]))
+    return {model: round(sum(v) / len(v), 6) for model, v in rates.items()}
+
+
 # --------------------------------------------------------------------------- dashboard.json
 
 
@@ -223,14 +271,28 @@ def _eval_runs(conn, *, limit: int, base: str, model_filter: str, version_map: d
 
     artifacts = _artifacts_for(conn, [row["submission_id"] for row in rows], base)
 
+    king_cache = _load_king_cache()
+    king_cache_dirty = False
     runs: list[dict[str, Any]] = []
     for row in rows:
         verdict = row["result_summary"] if isinstance(row["result_summary"], dict) else {}
         breakdown = verdict.get("score_breakdown") if isinstance(verdict, dict) else None
         breakdown = breakdown if isinstance(breakdown, dict) else {}
+        run_id = str(row["eval_run_id"])
+        run_artifacts = artifacts.get(run_id, artifacts.get(str(row["submission_id"]), {}))
+        by_judge_king: dict[str, float] = {}
+        if verdict.get("scoring_mode") == "binary":
+            if run_id in king_cache:
+                by_judge_king = king_cache[run_id]
+            elif run_artifacts.get("SCORING_RESULTS"):
+                computed = _king_by_judge_from_artifact(run_artifacts["SCORING_RESULTS"])
+                if computed is not None:
+                    log.info("computed king by_judge for %s", run_id)
+                    king_cache[run_id] = by_judge_king = computed
+                    king_cache_dirty = True
         runs.append(
             {
-                "eval_run_id": str(row["eval_run_id"]),
+                "eval_run_id": run_id,
                 "challenger_won": row["challenger_won"],
                 "coronated": row["crowned_king_version"] is not None,
                 "king_version": version_map.get(row["crowned_king_version"]),
@@ -251,6 +313,7 @@ def _eval_runs(conn, *, limit: int, base: str, model_filter: str, version_map: d
                 "scoring_mode": verdict.get("scoring_mode"),
                 "score_breakdown": {
                     "by_judge": breakdown.get("by_judge", {}),
+                    "by_judge_king": by_judge_king,
                     "by_metric": breakdown.get("by_metric", {}),
                     "by_category": breakdown.get("by_category", {}),
                 },
@@ -260,9 +323,11 @@ def _eval_runs(conn, *, limit: int, base: str, model_filter: str, version_map: d
                     "uid": row["king_uid"],
                     "hotkey": row["king_hotkey"],
                 },
-                "artifacts": artifacts.get(str(row["eval_run_id"]), artifacts.get(str(row["submission_id"]), {})),
+                "artifacts": run_artifacts,
             }
         )
+    if king_cache_dirty:
+        _save_king_cache(king_cache)
     return runs
 
 

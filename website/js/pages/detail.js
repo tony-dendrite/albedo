@@ -47,6 +47,20 @@ function pivotBinary(record) {
   return { judges, king: bySide.previous_king || {}, chal: bySide.challenger || {} };
 }
 
+// mirrors judge_core.aggregate_scores: per-judge mean yes_rate for the king side,
+// over scored records with parse_ok judge results
+function kingByJudge(records) {
+  const rates = {};
+  for (const record of records.filter(x => x.scored)) {
+    for (const j of record.judge_results || []) {
+      if (j.side === "previous_king" && j.parse_ok && j.yes_rate != null) {
+        (rates[j.judge_model] ||= []).push(Number(j.yes_rate));
+      }
+    }
+  }
+  return Object.fromEntries(Object.entries(rates).map(([m, v]) => [m, mean(v)]));
+}
+
 function lazyDetails(props, summaryChildren, buildBody, bodyClass) {
   const body = el("div", { class: bodyClass });
   const d = el("details", props, el("summary", {}, ...summaryChildren), body);
@@ -100,13 +114,11 @@ function renderArtifacts(map, zipName) {
     el("div", { class: "artifact-list" }, rows));
 }
 
-async function renderSampleScores(r, section) {
-  const url = r.artifacts?.SCORING_RESULTS;
+async function renderSampleScores(r, section, recordsP) {
   mount(section, el("h2", {}, "samples"), el("div", { class: "note" }, "Loading sample scores..."));
-  if (!url) return mount(section, el("h2", {}, "samples"), el("div", { class: "note" }, "No scoring artifact recorded."));
+  if (!r.artifacts?.SCORING_RESULTS) return mount(section, el("h2", {}, "samples"), el("div", { class: "note" }, "No scoring artifact recorded."));
 
-  const text = await fetchText(url);
-  const records = text ? parseJsonl(text) : [];
+  const records = await recordsP;
   if (!records.length) {
     return mount(section, el("h2", {}, "samples"), el("div", { class: "note" }, "No sample scores found."));
   }
@@ -262,33 +274,53 @@ function renderEval(r, netuid) {
        v.winMargin != null
          ? `${Number(v.winMargin) * 100 >= 0 ? "+" : ""}${(Number(v.winMargin) * 100).toFixed(5)}%`
          : "—",
-       v.winMargin != null ? (Number(v.winMargin) >= 0 ? "ok" : "bad") : undefined),
+       v.winMargin != null ? (v.won ? "ok" : "bad") : undefined),
+    r.required_win_margin != null
+      ? kv("required margin", `≥ +${(Number(r.required_win_margin) * 100).toFixed(2)}%`)
+      : false,
     kv("turns", r.total_turns != null ? `${r.valid_turns ?? r.total_turns}/${r.total_turns}` : "—"),
     kv("vllm errors", `${r.chal_vllm_errors ?? 0}c / ${r.king_vllm_errors ?? 0}k`),
     kv("scoring", r.scoring_mode || "fixed_metrics"),
     kv("judge errors", r.judge_errors ?? "—"),
     kv("finished", fmtDateTime(r.finished_at)));
 
+  const recordsP = r.artifacts?.SCORING_RESULTS
+    ? fetchText(r.artifacts.SCORING_RESULTS).then(t => t ? parseJsonl(t) : [])
+    : Promise.resolve([]);
+
   const byJudge = Object.entries(r.score_breakdown?.by_judge || {});
   // binary mode: by_judge is the challenger's independent mean yes-rate per judge —
-  // king score is NOT 1 - chal, and it isn't in the summary, so show challenger only.
+  // king is NOT 1 - chal and isn't in the summary, so fill the king column from
+  // the SCORING_RESULTS artifact once it loads.
   const binary = r.scoring_mode === "binary";
+  const summaryKing = r.score_breakdown?.by_judge_king || {};
+  const kingCells = {};
   const judgeTable = byJudge.length
     ? el("table", { class: "data-table judges-table" },
         el("thead", {}, el("tr", {},
           el("th", {}, "judge"),
           el("th", { class: "r" }, binary ? "challenger yes-rate" : "challenger"),
-          binary ? false : el("th", { class: "r" }, "king"),
+          el("th", { class: "r" }, binary ? "king yes-rate" : "king"),
           binary ? false : el("th", { class: "center" }, "outcome"))),
         el("tbody", {}, byJudge.map(([model, chal]) => {
           const o = chal > 0.5 ? "win" : chal < 0.5 ? "lose" : "tie";
           return el("tr", {},
             el("td", { class: "judge", title: model }, judgeMeta(model).label),
             el("td", { class: "r" }, pct(chal)),
-            binary ? false : el("td", { class: "r" }, pct(1 - chal)),
+            binary
+              ? (kingCells[model] = el("td", { class: "r" }, summaryKing[model] != null ? pct(summaryKing[model]) : "…"))
+              : el("td", { class: "r" }, pct(1 - chal)),
             binary ? false : el("td", { class: "center " + o }, o));
         })))
     : el("div", { class: "empty" }, "no judge breakdown.");
+  if (binary && byJudge.some(([model]) => summaryKing[model] == null)) {
+    recordsP.then(records => {
+      const king = kingByJudge(records);
+      for (const [model, cell] of Object.entries(kingCells)) {
+        if (summaryKing[model] == null) cell.textContent = pct(king[model]);
+      }
+    });
+  }
 
   const byMetric = Object.keys(r.score_breakdown?.by_category || {}).length
     ? r.score_breakdown.by_category
@@ -313,7 +345,7 @@ function renderEval(r, netuid) {
         kv("king model", modelName(king)),
         kv("king uid", tao ? link(tao, String(king.uid ?? "—")) : (king.uid ?? "—")))));
 
-  renderSampleScores(r, samplesSection);
+  renderSampleScores(r, samplesSection, recordsP);
   renderArtifacts(r.artifacts, `eval-${r.eval_run_id}`);
 }
 

@@ -5,13 +5,15 @@ import { verdictInfo, faultCategory, faultCodeLabel } from "../data.js";
 
 const stop = e => e.stopPropagation();
 
-// binary scoring mode: by_judge is the challenger's independent yes-rate — king is not 1 - chal.
-function judgeCell(chal, binary) {
+// binary scoring mode: by_judge is the challenger's independent yes-rate — king is not 1 - chal;
+// the king's per-judge yes-rate arrives separately as by_judge_king (monitor.py backfills it
+// from the SCORING_RESULTS artifact), missing on runs not yet backfilled.
+function judgeCell(chal, king, binary) {
   if (chal == null) return el("span", { class: "muted-dash" }, "—");
-  if (binary) return el("span", { class: "judge-scores" }, pct(chal));
+  if (binary && king == null) return el("span", { class: "judge-scores" }, pct(chal));
   return el("span", { class: "judge-scores" },
     pct(chal), el("span", { class: "sep" }, " / "),
-    el("span", { class: "king-score" }, pct(1 - chal)));
+    el("span", { class: "king-score" }, pct(binary ? king : 1 - chal)));
 }
 
 const evalHref = r => `detail.html?eval_run_id=${encodeURIComponent(r.eval_run_id || "")}`;
@@ -38,6 +40,7 @@ export function renderHistory(container, rows, judgeModels, netuid, currentKingE
     const v = verdictInfo(r);
     const isCurrentKing = currentKingEvalRunId != null && r.eval_run_id === currentKingEvalRunId;
     const bj = r.score_breakdown?.by_judge || {};
+    const bjk = r.score_breakdown?.by_judge_king || {};
     const repo = modelRepo(r.model_uri);
     const repoUrl = hubRepoUrl(r.model_uri);
     const tao = taoMinerUrl(netuid, r.hotkey);
@@ -50,7 +53,7 @@ export function renderHistory(container, rows, judgeModels, netuid, currentKingE
       el("td", { class: "uid" }, tao ? link(tao, String(r.uid ?? "—"), { onClick: stop }) : String(r.uid ?? "—")),
       el("td", { class: "model" }, repoUrl ? link(repoUrl, modelName(r), { class: "model-cell", title: repo, onClick: stop }) : el("span", { class: "model-cell", title: repo }, modelName(r))),
       el("td", { class: "model vs" }, kingUrl ? link(kingUrl, kingName, { class: "model-cell", title: kingTitle, onClick: stop }) : el("span", { class: "model-cell", title: kingTitle }, kingName)),
-      ...judges.map(m => el("td", { class: "center" }, judgeCell(bj[m], r.scoring_mode === "binary"))),
+      ...judges.map(m => el("td", { class: "center" }, judgeCell(bj[m], bjk[m], r.scoring_mode === "binary"))),
       el("td", { class: "r" }, el("span", { class: `verdict-badge ${v.badge}` }, v.badge)));
   });
 

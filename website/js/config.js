@@ -22,10 +22,10 @@ export const BENCHMARK_ENDPOINTS = [
 ];
 
 export const MANIFEST_ENDPOINTS = [
-  "https://s3.hippius.com/albedo/datasets/manifest.json",
-  "https://us-east-1.hippius.com/albedo/datasets/manifest.json",
-  "https://eu-central-1.hippius.com/albedo/datasets/manifest.json",
-  "./data/manifest.json",
+  "https://s3.hippius.com/albedo/datasets/manifest.meta.json",
+  "https://us-east-1.hippius.com/albedo/datasets/manifest.meta.json",
+  "https://eu-central-1.hippius.com/albedo/datasets/manifest.meta.json",
+  "./data/manifest.meta.json",
 ];
 
 export const LLMS_URLS = [
