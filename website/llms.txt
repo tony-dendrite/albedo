@@ -8,7 +8,7 @@
 > mini-coder (400k) — sampled 70/30 across the two. An evaluator (GLM 5.2) writes yes/no checklist
 > questions about a good next step for each task; an ensemble of LLM judges answers them 1/0 for the
 > king and challenger responses independently, and the mean yes-rate is each side's score.
-> A challenger must beat the king by a **6% margin** to win. Winners are crowned into a
+> A challenger must beat the king by a **3% margin** to win. Winners are crowned into a
 > rolling 5-king chain and earn emissions.
 >
 > This codebase is the **production backend + miner CLI** — a set of independent,
@@ -95,7 +95,7 @@ albedo/
 │   │   ├── judge_openrouter.py         OpenRouter client: per-model semaphore, retry+backoff, forced json_schema (fp8)
 │   │   ├── judge_config.py             JudgeSettings (ALBEDO_JUDGE_*): evaluator + judge models, num_questions, margin
 │   │   ├── score_bridge_client.py      backend side of WS bridge → forwards score requests to judge_api
-│   │   ├── remote_api.py               GPU-host control plane :8090 (/eval-runs, WS /score-bridge)
+│   │   ├── remote_api.py               GPU-host control plane :8090 (/eval-runs, /model-prefetch, WS /score-bridge)
 │   │   ├── remote_worker.py            run eval: load samples → vLLM king+chal → score over bridge → verdict
 │   │   ├── remote_generation.py        one vLLM subprocess per model, CUDA_VISIBLE_DEVICES per side
 │   │   ├── remote_scoring.py           build score batches, request judging back over the WS bridge
@@ -237,7 +237,7 @@ similarity_threshold = 0.95                           # fingerprint cosine ≥ t
 ## Mining (the `albedo` CLI)
 
 Albedo is king-of-the-hill for Qwen3.6-35B-A3B. Fine-tune → upload to Hippius → commit a v7 reveal on-chain.
-A model that passes validation **and** beats the king by the **6% win margin** earns emissions. Full guide: [docs/MINING.md](../docs/MINING.md).
+A model that passes validation **and** beats the king by the **3% win margin** earns emissions. Full guide: [docs/MINING.md](../docs/MINING.md).
 
 ### Install
 
@@ -348,6 +348,7 @@ albedo-eval-dispatcher (loop, every dispatch_poll_seconds)
     dataset_manifest_hash, judge_config_hash
   POST /eval-runs on the GPU host  → remote_run_id
   follow GET /eval-runs/{id}/events until a "verdict" event
+    ~1/min: peek next EVAL_QUEUED → POST /model-prefetch (GPU host pre-downloads the next challenger)
   record verdict → EVAL_WIN | COMPLETE_LOSS | EVAL_RETRYABLE (faults.classify_failure_verdict)
 
 albedo-remote-eval-api  (GPU host)
@@ -357,7 +358,7 @@ albedo-remote-eval-api  (GPU host)
     GPU split: king = ALBEDO_REMOTE_PREVIOUS_KING_GPU_IDS (0,1,2,3)
                challenger = ALBEDO_REMOTE_CHALLENGER_GPU_IDS (4,5,6,7)  (no overlap, 4 each)
     one vLLM subprocess per side (tensor_parallel_size = #gpus), generate king+chal in parallel
-    score: build batches → request judging (king & challenger vs the per-sample questions) back over the WebSocket /score-bridge
+    score: build batches → send up to ALBEDO_REMOTE_SCORING_BATCH_CONCURRENCY (4) batches concurrently over the WebSocket /score-bridge (multiplexed by request_id)
     emit "verdict" event (scores, win_margin, challenger_won, vllm/judge error counts, artifact URIs)
     upload JSONL transcripts + verdict.json to S3
 
@@ -379,9 +380,9 @@ fp8), seeing only the questions + one response — never the trajectory or the o
 challenger are scored **independently** against the same questions: per judge, the mean of its 1/0
 answers; then the mean across judges → an absolute score in `[0,1]` per side (`score_king` and
 `score_challenger` are independent — they do NOT sum to 1). The challenger wins (`EVAL_WIN`) only if
-`score_challenger − score_king ≥ CHALLENGER_WIN_MARGIN` (`0.06`, margin-only); otherwise
-`COMPLETE_LOSS`. Per-model concurrency is capped by a semaphore
-(`ALBEDO_JUDGE_MAX_CONCURRENCY_PER_MODEL`, default 128) with retry + backoff; an eval needs
+`score_challenger − score_king ≥ CHALLENGER_WIN_MARGIN` (`0.03`, margin-only); otherwise
+`COMPLETE_LOSS`. Per-model concurrency is capped by a semaphore shared across concurrent
+score batches (`ALBEDO_JUDGE_MAX_CONCURRENCY_PER_MODEL`, 32 in prod) with retry + backoff; an eval needs
 `min_valid_fraction` (0.8) of samples scored on both sides or it's a provider fault.
 
 **Deterministic sampling:** `sampling.py` (`multi_source_manifest_sample_ids`) draws `sample_count`
@@ -552,6 +553,7 @@ Full reference in [.env.example](../.env.example) (backend + GPU host) and [.env
 | `ALBEDO_EVAL_REMOTE_AUTH_TOKEN` | shared bearer for backend↔remote eval API |
 | `ALBEDO_EVAL_DATASET_MANIFEST_HASH` | sha256 pin of the combined swe-zero+mini-coder shard manifest |
 | `ALBEDO_EVAL_SAMPLE_COUNT` / `_MAX_TURNS_PER_SAMPLE` | duel size (default 128 / 10) |
+| `ALBEDO_EVAL_PREFETCH_NEXT_CHALLENGER` | pre-download the next queued challenger during the running eval (default true) |
 
 ### GPU eval host
 | Variable | Purpose |
@@ -560,6 +562,7 @@ Full reference in [.env.example](../.env.example) (backend + GPU host) and [.env
 | `ALBEDO_REMOTE_PREVIOUS_KING_GPU_IDS` / `_CHALLENGER_GPU_IDS` | `0,1,2,3` / `4,5,6,7` |
 | `ALBEDO_REMOTE_GENERATION_BACKEND` | `vllm` |
 | `ALBEDO_REMOTE_SCORING_BACKEND` | `websocket` (score bridge) or `http` |
+| `ALBEDO_REMOTE_SCORING_BATCH_CONCURRENCY` | concurrent /score-batch requests per eval (default 4) |
 | `ALBEDO_REMOTE_MOCK_AUTO_VERDICT` | smoke mode — verdict without GPUs |
 | `ALBEDO_REMOTE_S3_*` | artifact upload credentials |
 
@@ -567,7 +570,7 @@ Full reference in [.env.example](../.env.example) (backend + GPU host) and [.env
 | Variable | Purpose |
 |---|---|
 | `ALBEDO_JUDGE_OPENROUTER_API_KEY` | OpenRouter key for judge models (+ GLM 5.2 fallback) |
-| `ALBEDO_JUDGE_MAX_CONCURRENCY_PER_MODEL` | per-model semaphore (default 8) |
+| `ALBEDO_JUDGE_MAX_CONCURRENCY_PER_MODEL` | per-model semaphore, shared across concurrent batches (default 32) |
 | `ALBEDO_JUDGE_MIN_VALID_FRACTION` | min judges that must resolve (default 0.5) |
 | `ALBEDO_JUDGE_CHUTES_API_KEY` | Chutes key for GLM 5.2 category generation (primary provider) |
 | `ALBEDO_JUDGE_GLM52_MODEL` | GLM 5.2 category model on Chutes (default `zai-org/GLM-5.2-TEE`) |
