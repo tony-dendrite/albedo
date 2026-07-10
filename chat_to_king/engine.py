@@ -145,6 +145,8 @@ class KingVllmEngine:
             "--kv-cache-dtype", s.kv_cache_dtype,
             "--chat-template", template_path,
             "--generation-config", "vllm",
+            "--enable-auto-tool-choice",
+            "--tool-call-parser", "hermes",
         ]
         if s.tensor_parallel_size > 1:
             cmd += ["--tensor-parallel-size", str(s.tensor_parallel_size)]
