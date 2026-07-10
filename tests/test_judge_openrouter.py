@@ -13,7 +13,7 @@ def test_openrouter_payload_respects_provider_structured_output_support():
     payloads = asyncio.run(_capture_payloads())
 
     glm_payload = payloads[0]
-    assert glm_payload["model"] == "z-ai/glm-5.1"
+    assert glm_payload["model"] == "z-ai/glm-5.2"
     assert "order" not in glm_payload["provider"]
     assert glm_payload["provider"]["quantizations"] == ["fp8"]
     assert glm_payload["provider"]["allow_fallbacks"] is True
@@ -45,7 +45,7 @@ async def _capture_payloads():
         transport=httpx.MockTransport(handler),
     )
     try:
-        await client.score(model="z-ai/glm-5.1", messages=[{"role": "user", "content": "x"}])
+        await client.score(model="z-ai/glm-5.2", messages=[{"role": "user", "content": "x"}])
         await client.score(
             model="qwen/qwen3.5-397b-a17b",
             messages=[{"role": "user", "content": "x"}],

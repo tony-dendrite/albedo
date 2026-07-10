@@ -26,7 +26,7 @@ export function renderHistory(container, rows, judgeModels, netuid, currentKingE
     mount(container, el("div", { class: "empty" }, "no completed duels match."));
     return;
   }
-  const judges = judgeModels?.length ? judgeModels : ["z-ai/glm-5.1", "qwen/qwen3.5-397b-a17b", "deepseek/deepseek-v3.2"];
+  const judges = judgeModels?.length ? judgeModels : ["z-ai/glm-5.2", "qwen/qwen3.5-397b-a17b", "deepseek/deepseek-v3.2"];
 
   const head = el("tr", {},
     el("th", {}, "when"),

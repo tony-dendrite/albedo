@@ -17,7 +17,7 @@ used, run
 the **same validation checks you can run locally** (file manifest + architecture lock +
 near-duplicate dedup), and finally **evaluate** the model. A model that beats the current
 king earns weight/emissions. So your job is: produce a model that (a) passes validation and
-(b) scores higher than the incumbent by at least the **6% win margin**.
+(b) scores higher than the incumbent by at least the **2% win margin**.
 
 The whole publish flow is one pipeline:
 

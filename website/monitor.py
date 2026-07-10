@@ -33,7 +33,7 @@ DATA_DIR = WEBSITE_DIR / "data"
 log = logging.getLogger("monitor")
 
 # Mirrors albedo_eval_service.judge_core.JUDGE_MODELS (kept inline so this script stays standalone).
-JUDGE_MODELS = ["z-ai/glm-5.1", "qwen/qwen3.5-397b-a17b", "deepseek/deepseek-v3.2"]
+JUDGE_MODELS = ["z-ai/glm-5.2", "qwen/qwen3.5-397b-a17b", "deepseek/deepseek-v3.2"]
 
 # Artifact types the website knows how to render (website/js/config.js ARTIFACT_TYPES).
 DASHBOARD_ARTIFACT_TYPES = [

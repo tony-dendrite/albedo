@@ -1,6 +1,7 @@
 import { toRoman } from "./format.js";
 
 export const JUDGE_META = {
+  "z-ai/glm-5.2":            { letter: "G", label: "GLM" },
   "z-ai/glm-5.1":            { letter: "G", label: "GLM" },
   "qwen/qwen3.5-397b-a17b":  { letter: "Q", label: "QWEN" },
   "deepseek/deepseek-v3.2":  { letter: "D", label: "DEEPSEEK" },

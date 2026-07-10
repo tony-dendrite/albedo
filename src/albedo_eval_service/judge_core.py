@@ -13,10 +13,10 @@ from statistics import mean
 from typing import Any
 
 # Crown iff (challenger_mean - king_mean) >= this, on the 0-1 absolute scale (margin-only, no LCB).
-CHALLENGER_WIN_MARGIN = 0.015
+CHALLENGER_WIN_MARGIN = 0.02
 
 JUDGE_MODELS: tuple[str, ...] = (
-    "z-ai/glm-5.1",
+    "z-ai/glm-5.2",
     "qwen/qwen3.5-397b-a17b",
     "deepseek/deepseek-v3.2",
 )

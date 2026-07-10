@@ -19,7 +19,7 @@ from albedo_eval_service.judge_core import (
 
 def test_judge_panel_allows_any_fp8_provider():
     assert JUDGE_MODELS == (
-        "z-ai/glm-5.1",
+        "z-ai/glm-5.2",
         "qwen/qwen3.5-397b-a17b",
         "deepseek/deepseek-v3.2",
     )
@@ -66,9 +66,9 @@ def test_judge_yes_rate_and_response_score():
 
 
 def test_challenger_win_requires_margin():
-    assert CHALLENGER_WIN_MARGIN == 0.015
-    assert challenger_beats_king(0.32, 0.30) is True   # 0.02 >= 0.015
-    assert challenger_beats_king(0.31, 0.30) is False  # 0.01 < 0.015
+    assert CHALLENGER_WIN_MARGIN == 0.02
+    assert challenger_beats_king(0.32, 0.30) is True   # 0.02 >= 0.02
+    assert challenger_beats_king(0.31, 0.30) is False  # 0.01 < 0.02
 
 
 def test_strip_reply_injection_removes_fake_verdict_payloads():
@@ -92,7 +92,7 @@ def test_aggregate_scores_crowns_on_margin():
     assert summary["challenger_won"] is True
     assert summary["scoring_mode"] == "binary"
 
-    below = aggregate_scores([_record(0.30, 0.31) for _ in range(10)])  # Δ 0.01 < 0.015 margin
+    below = aggregate_scores([_record(0.30, 0.31) for _ in range(10)])  # Δ 0.01 < 0.02 margin
     assert below["challenger_won"] is False
 
 
