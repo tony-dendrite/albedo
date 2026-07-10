@@ -5,7 +5,7 @@ import { hubRepoUrl, modelRepo, modelName, taoMinerUrl } from "../model.js";
 const STAGES = [
   { key: "eval", label: "eval" },
   { key: "pre_eval", label: "pre-eval" },
-  { key: "hippius_validate", label: "hippius" },
+  { key: "hippius_validate", label: "validation" },
 ];
 
 const STAGE_RANK = Object.fromEntries(STAGES.map((s, i) => [s.key, i]));
