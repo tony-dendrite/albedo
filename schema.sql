@@ -24,13 +24,18 @@ CREATE TABLE IF NOT EXISTS miners (
     coldkey TEXT,
     uid INT,
     netuid INT,
+    -- BlockAtRegistration[netuid, uid] while this hotkey occupied the uid. A later occupant with
+    -- a DIFFERENT hotkey but the SAME registration block got there via swap_hotkey (no re-reg).
+    registration_block BIGINT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- chain_guard ledger: hotkeys that may NOT enter eval. Seeded at chain_reader startup with
--- every hotkey that committed before CHAIN_START_BLOCK (source='backfill'), and added to after
--- a submission finishes eval (source='eval'). A hotkey appears at most once.
+-- every hotkey that committed before CHAIN_START_BLOCK (source='backfill'), added to after
+-- a submission finishes eval (source='eval'), and by hotkey-swap detection (source='swap',
+-- raw_payload = JSON {uid, old_hotkey, new_hotkey, registration_block}). A hotkey appears at
+-- most once.
 CREATE TABLE IF NOT EXISTS used_hotkeys (
     hotkey        TEXT PRIMARY KEY,
     netuid        INT,

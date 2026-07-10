@@ -7,6 +7,7 @@ from loguru import logger as log
 
 from chain_reader import chain, config, db
 from chain_guard import db as guard_db, scan as guard_scan
+from chain_guard import swap as guard_swap
 
 
 async def run() -> None:
@@ -37,7 +38,18 @@ async def run() -> None:
             try:
                 cur = await asyncio.to_thread(subtensor.get_current_block)
                 if cur != last_block:
-                    commits = await asyncio.to_thread(chain.scan_commitments, subtensor, config.NETUID, config.START_BLOCK)
+                    snapshot = await asyncio.to_thread(chain.metagraph_snapshot, subtensor, config.NETUID)
+
+                    # hotkey-swap guard: ledger swapped-in hotkeys BEFORE ingesting commits, so a
+                    # same-tick commit from one is rejected by the per-commit used_hotkeys check.
+                    swaps = guard_swap.find_swaps(await guard_db.load_uid_state(pool), snapshot)
+                    if swaps:
+                        n_ledgered = await guard_db.record_swaps(pool, swaps, config.NETUID, cur)
+                        log.warning("hotkey swaps detected={} newly_ledgered={}", len(swaps), n_ledgered)
+                    await guard_db.refresh_registration_blocks(pool, snapshot)
+
+                    uid_map = {hotkey: uid for uid, hotkey, _reg in snapshot}
+                    commits = await asyncio.to_thread(chain.scan_commitments, subtensor, config.NETUID, config.START_BLOCK, uid_map)
                     n_new = await db.insert_new_commits(pool, commits)
                     log.info("block={} scanned={} new={}", cur, len(commits), n_new)
                     last_block = cur

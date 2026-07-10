@@ -95,6 +95,21 @@ def _uid_map(subtensor: Any, netuid: int) -> dict[str, int]:
         return {}
 
 
+def metagraph_snapshot(subtensor: Any, netuid: int) -> list[tuple[int, str, int]]:
+    """(uid, hotkey, BlockAtRegistration) for every registered neuron.
+
+    BlockAtRegistration is keyed per uid and only changes on an actual registration —
+    swap_hotkey replaces the hotkey at a uid but leaves it untouched, which is the
+    swap-detection fingerprint (see chain_guard.swap).
+    """
+    meta = subtensor.metagraph(netuid)
+    reg_blocks: dict[int, int] = {}
+    qm = subtensor.query_map(module="SubtensorModule", name="BlockAtRegistration", params=[netuid])
+    for k, v in qm:
+        reg_blocks[int(getattr(k, "value", k))] = int(getattr(v, "value", v))
+    return [(int(n.uid), str(n.hotkey), reg_blocks.get(int(n.uid), 0)) for n in meta.neurons]
+
+
 def _block_hash(subtensor: Any, block: int) -> str | None:
     if block in _BLOCK_HASH_CACHE:
         return _BLOCK_HASH_CACHE[block]
@@ -131,13 +146,16 @@ def _payload_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
-def scan_commitments(subtensor: Any, netuid: int, start_block: int = 0) -> list[Commit]:
+def scan_commitments(subtensor: Any, netuid: int, start_block: int = 0,
+                     uids: dict[str, int] | None = None) -> list[Commit]:
     """Read all revealed commitments on ``netuid`` and return v7 Commit records.
 
     Commits before ``start_block`` are skipped — they are not eval candidates (the chain_guard
-    ledger covers them instead).
+    ledger covers them instead). Pass ``uids`` (hotkey -> uid) to reuse an already-fetched
+    metagraph instead of fetching it again.
     """
-    uids = _uid_map(subtensor, netuid)
+    if uids is None:
+        uids = _uid_map(subtensor, netuid)
 
     commits: list[Commit] = []
     n_total = n_skipped = 0

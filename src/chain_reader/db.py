@@ -9,6 +9,7 @@ import asyncpg
 from chain_reader.chain import Commit
 from chain_guard import db as guard
 from chain_guard import uploads as guard_s3
+from chain_guard import swap as guard_swap
 
 
 async def connect(db_url: str) -> asyncpg.Pool:
@@ -143,9 +144,16 @@ async def _reject_reused_commit(
 ) -> None:
     """Record a reused-hotkey commit as a TERMINAL_INVALID submission and publish it to S3."""
     prior = await conn.fetchrow(
-        "SELECT submission_id, source, block_number FROM used_hotkeys WHERE hotkey = $1",
+        "SELECT submission_id, source, block_number, raw_payload FROM used_hotkeys WHERE hotkey = $1",
         c.hotkey,
     )
+    fault_code = "hotkey_reused"
+    fault_message = "hotkey already used — reuse blocked by chain_guard"
+    swap_detail = None
+    if prior and prior["source"] == "swap" and prior["raw_payload"]:
+        swap_detail = json.loads(prior["raw_payload"])
+        fault_code = "hotkey_swap"
+        fault_message = guard_swap.describe(swap_detail) + " — blocked by chain_guard"
     submission_id = await conn.fetchval(
         """
         INSERT INTO model_submissions (
@@ -153,7 +161,7 @@ async def _reject_reused_commit(
             state, fault_class, fault_code, fault_message, idempotency_key, finished_at
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7,
-                'TERMINAL_INVALID', 'MINER_FAULT', 'hotkey_reused', $8, $9, now())
+                'TERMINAL_INVALID', 'MINER_FAULT', $8, $9, $10, now())
         ON CONFLICT (idempotency_key) DO UPDATE SET
             chain_commit_id = EXCLUDED.chain_commit_id,
             model_uri = EXCLUDED.model_uri,
@@ -167,7 +175,8 @@ async def _reject_reused_commit(
         c.hotkey,
         c.model_uri,
         c.commit_payload.get("digest"),
-        "hotkey already used — reuse blocked by chain_guard",
+        fault_code,
+        fault_message,
         idempotency_key,
     )
     await conn.execute(
@@ -187,6 +196,7 @@ async def _reject_reused_commit(
         "prior_submission_id": str(prior["submission_id"]) if prior and prior["submission_id"] else None,
         "prior_source": prior["source"] if prior else None,
         "prior_block_number": prior["block_number"] if prior else None,
+        "swap": swap_detail,
     }
     await conn.execute(
         """
@@ -194,9 +204,9 @@ async def _reject_reused_commit(
         VALUES ($1, $2, $3, $4, $5::jsonb)
         """,
         submission_id,
-        "hotkey_rejected_reused",
-        "WARN",
-        "chain_guard rejected commit: hotkey already used",
+        "hotkey_rejected_swap" if swap_detail else "hotkey_rejected_reused",
+        "ERROR" if swap_detail else "WARN",
+        fault_message,
         json.dumps(detail),
     )
     uri = await asyncio.to_thread(guard_s3.put_detection, c.hotkey, c.block_number, detail)
