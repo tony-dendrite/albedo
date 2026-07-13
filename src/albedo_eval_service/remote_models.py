@@ -21,6 +21,7 @@ from .remote_config import RemoteSettings
 
 
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_HF_GIT_REVISION_RE = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")  # HF git commit (sha1 or sha256 era)
 _DEFAULT_OCI_REGISTRY = "registry.hippius.com"
 _HEARTBEAT_INTERVAL_S = 10.0
 
@@ -120,6 +121,9 @@ class ModelArtifactResolver:
             return self._resolve_oci(
                 registry=registry, repository=repository, digest=digest, original_ref=model_ref
             )
+        repo, sep, revision = model_ref.rpartition("@")
+        if sep and "/" in repo and _HF_GIT_REVISION_RE.match(revision):
+            return self._resolve_hf(model_ref)
         return ResolvedModel(
             original_ref=model_ref,
             local_path=model_ref,
