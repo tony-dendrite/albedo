@@ -9,6 +9,7 @@ import { renderBenchmarks } from "../render/benchmarks.js";
 import { renderPipeline } from "../render/pipeline.js";
 import { renderHistory, renderFails } from "../render/history.js";
 import { renderDatasets } from "../render/datasets.js";
+import { renderHeroChart } from "../render/heroChart.js";
 
 const $ = id => document.getElementById(id);
 
@@ -54,6 +55,7 @@ function render(d) {
   netuid = d.chain.netuid;
   renderHero(d);
   renderStats(d);
+  renderHeroChart($("hero-chart"), d.history);
   renderReign($("reign-wrap"), d.reign, netuid);
   renderTables(d);
   if (d.updatedAt) $("updated").textContent = "updated " + fmtRelative(d.updatedAt);
@@ -151,6 +153,12 @@ function wireFilter() {
     if (state) renderTables(state);
   });
 }
+
+let resizeTimer = null;
+window.addEventListener("resize", () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => { if (state) renderHeroChart($("hero-chart"), state.history); }, 150);
+});
 
 wireFilter();
 $("hero-llms-btn")?.addEventListener("click", copyLlmsTxt);
