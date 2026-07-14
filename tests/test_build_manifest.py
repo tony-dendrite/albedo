@@ -73,3 +73,25 @@ def test_built_manifest_is_sampler_compatible(tmp_path):
     assert len(ids) == _BUCKET_TOTAL
     assert sum(1 for i in ids if i.startswith("swe-zero/")) == 90
     assert sum(1 for i in ids if i.startswith("mini-coder/")) == 38
+
+
+def test_row_meta_reads_trajectory_column(tmp_path):
+    bm = _load_build_manifest()
+    data_dir = tmp_path / "swe-zero-tools" / "data"
+    data_dir.mkdir(parents=True)
+    trajectory = [{"role": "system", "content": "s", "tool_calls": None}] + [
+        {"role": role, "content": "c", "tool_calls": None}
+        for _ in range(12)
+        for role in ("user", "assistant")
+    ]
+    table = pa.table(
+        {
+            "instance_id": ["inst-0", "inst-1"],
+            "trajectory": [trajectory, trajectory],
+        }
+    )
+    pq.write_table(table, data_dir / "train-00000-of-00064.parquet")
+
+    metas = bm._row_meta(data_dir / "train-00000-of-00064.parquet")
+
+    assert metas == [{"iid": "inst-0", "asst": 12}, {"iid": "inst-1", "asst": 12}]

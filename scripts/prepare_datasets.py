@@ -18,6 +18,13 @@ log = logging.getLogger("prepare_datasets")
 SOURCES: dict[str, dict[str, str]] = {
     "swe-zero": {"repo": "AlienKevin/SWE-ZERO-12M-trajectories", "shard_glob": "data/train-*.parquet"},
     "mini-coder": {"repo": "ricdomolm/mini-coder-trajs-400k", "shard_glob": "data/train-*.parquet"},
+    # Tool-call probe source (OpenHands trajectories, structured tool_calls). Revision pinned so
+    # every validator downloads identical bytes; the manifest additionally pins per-shard sha256.
+    "swe-zero-tools": {
+        "repo": "nvidia/SWE-Zero-openhands-trajectories",
+        "shard_glob": "data/train-*.parquet",
+        "revision": "7b3cd106d00f60918e722d33a1d74bc67072a7ea",
+    },
 }
 
 
@@ -28,12 +35,12 @@ def _enable_fast_transfer() -> None:
         os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
 
 
-def _expected_parquet_shards(repo_id: str, shard_glob: str) -> set[str]:
+def _expected_parquet_shards(repo_id: str, shard_glob: str, revision: str | None = None) -> set[str]:
     """Repo-relative paths of every shard matching shard_glob (one metadata call, no
     file content) so we can fetch only what is missing."""
     from huggingface_hub import HfApi
 
-    files = HfApi().list_repo_files(repo_id, repo_type="dataset")
+    files = HfApi().list_repo_files(repo_id, repo_type="dataset", revision=revision)
     return {f for f in files if fnmatch.fnmatch(f, shard_glob)}
 
 
@@ -47,12 +54,21 @@ def _local_parquet_shards(dest: Path, shard_glob: str) -> set[str]:
     return {f"{prefix}{p.name}" for p in data_dir.glob(name_pat)}
 
 
-def download_source(name: str, repo_id: str, shard_glob: str, root: Path, *, force: bool, max_workers: int) -> Path:
+def download_source(
+    name: str,
+    repo_id: str,
+    shard_glob: str,
+    root: Path,
+    *,
+    force: bool,
+    max_workers: int,
+    revision: str | None = None,
+) -> Path:
     from huggingface_hub import hf_hub_download
 
     dest = root / name
 
-    expected = _expected_parquet_shards(repo_id, shard_glob)
+    expected = _expected_parquet_shards(repo_id, shard_glob, revision)
     if not expected:
         raise RuntimeError(f"{name}: no shards in repo {repo_id} matching {shard_glob!r}")
     present = _local_parquet_shards(dest, shard_glob)
@@ -71,7 +87,7 @@ def download_source(name: str, repo_id: str, shard_glob: str, root: Path, *, for
         # HF_TOKEN (if set) is picked up from the env automatically.
         hf_hub_download(
             repo_id, rel, repo_type="dataset", local_dir=str(dest),
-            force_download=force, token=os.environ.get("HF_TOKEN"),
+            force_download=force, token=os.environ.get("HF_TOKEN"), revision=revision,
         )
 
     done = 0
@@ -144,8 +160,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--weights",
-        default="swe-zero=0.7,mini-coder=0.3",
-        help="Per-source manifest weights (default: swe-zero=0.7,mini-coder=0.3).",
+        default="swe-zero=0.65,mini-coder=0.25,swe-zero-tools=0.1",
+        help="Per-source manifest weights (default: swe-zero=0.65,mini-coder=0.25,swe-zero-tools=0.1).",
     )
     parser.add_argument("--force", action="store_true", help="Re-download even if shards already exist.")
     parser.add_argument(
@@ -179,7 +195,8 @@ def main() -> None:
     for name in names:
         meta = SOURCES[name]
         download_source(
-            name, meta["repo"], meta["shard_glob"], root, force=args.force, max_workers=args.max_workers
+            name, meta["repo"], meta["shard_glob"], root,
+            force=args.force, max_workers=args.max_workers, revision=meta.get("revision"),
         )
 
     out_path = Path(args.out) if args.out else root / "manifest.json"

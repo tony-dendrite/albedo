@@ -203,3 +203,25 @@ def test_parse_questions_accepts_slightly_short_and_truncates_extra():
     q19 = json.dumps({"questions": [{"text": f"q{i}", "example_bad": "b"} for i in range(19)]})
     _, ok3 = parse_questions(q19, 50)
     assert ok3 is False                                            # < floor -> not ok (retry/fail)
+
+
+def test_build_question_messages_selects_tool_variant():
+    from albedo_eval_service.judge_core import (
+        QUESTION_SYSTEM_TOOL,
+        build_question_messages,
+        is_tool_sample,
+        question_floor,
+    )
+
+    assert is_tool_sample("swe-zero-tools/data/train-00000-of-00064.parquet:5:2")
+    assert not is_tool_sample("swe-zero/data/train-00000.parquet:5:2")
+    assert not is_tool_sample("mini-coder/data/train-00001.parquet:0:0")
+
+    tool_messages = build_question_messages(task="TASK", n=50, tool_sample=True)
+    assert tool_messages[0]["content"] == QUESTION_SYSTEM_TOOL.format(n=50, floor=question_floor(50))
+    assert "<tool_call>" in tool_messages[0]["content"]
+    assert "execute_bash" in tool_messages[0]["content"]
+
+    code_messages = build_question_messages(task="TASK", n=50)
+    assert "MANDATORY COMMAND DISCIPLINE" in code_messages[0]["content"]
+    assert "<function=" not in code_messages[0]["content"]

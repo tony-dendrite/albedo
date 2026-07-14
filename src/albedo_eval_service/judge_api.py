@@ -18,6 +18,7 @@ from .judge_core import (
     answer_schema,
     build_judge_messages,
     build_question_messages,
+    is_tool_sample,
     judge_yes_rate,
     parse_answers,
     parse_questions,
@@ -111,7 +112,9 @@ class QuestionService:
         n = self.settings.num_questions
         response = await self.client.complete(
             model=self.settings.evaluator_model,
-            messages=build_question_messages(task=sample.prompt, n=n),
+            messages=build_question_messages(
+                task=sample.prompt, n=n, tool_sample=is_tool_sample(sample.sample_id)
+            ),
             temperature=self.settings.temperature,
             max_tokens=self.settings.question_max_tokens,
             provider=_evaluator_provider(self.settings),

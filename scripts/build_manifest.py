@@ -18,7 +18,7 @@ from albedo_eval_service.sampling import _SHARD_RE  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from prepare_datasets import SOURCES  # noqa: E402
 
-DEFAULT_VERSION = "swe-zero+mini-coder-v1"
+DEFAULT_VERSION = "swe-zero+mini-coder+tools-v1"
 
 
 def _parse_weights(raw: str) -> dict[str, float]:
@@ -45,9 +45,13 @@ def _sha256(path: Path) -> str:
 def _row_meta(path: Path) -> list[dict]:
     metas: list[dict] = []
     parquet_file = pq.ParquetFile(path)
-    for batch in parquet_file.iter_batches(batch_size=1024, columns=["instance_id", "messages"]):
+    columns = set(parquet_file.schema_arrow.names)
+    conv_col = next((c for c in ("messages", "trajectory") if c in columns), None)
+    if conv_col is None:
+        raise SystemExit(f"{path}: no 'messages' or 'trajectory' column (found: {sorted(columns)})")
+    for batch in parquet_file.iter_batches(batch_size=1024, columns=["instance_id", conv_col]):
         iids = batch.column("instance_id").to_pylist()
-        conversations = batch.column("messages").to_pylist()
+        conversations = batch.column(conv_col).to_pylist()
         for iid, messages in zip(iids, conversations):
             asst = sum(
                 1

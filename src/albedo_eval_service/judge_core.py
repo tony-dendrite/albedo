@@ -206,6 +206,174 @@ Decide what a strong NEXT step would be from here, then write up to {n} self-con
 questions (each probing a different property) that judge whether the response is a good next \
 move — questions only."""
 
+# Sibling of QUESTION_SYSTEM for tool-call probe samples (swe-zero-tools source): same structure
+# and anti-duplicate rules, but the mandatory opening checks the structured <tool_call> format
+# instead of the THOUGHT+bash protocol. Keep the two prompts aligned when either is revised.
+QUESTION_SYSTEM_TOOL = """You write an evaluation checklist to judge a coding agent's NEXT \
+assistant turn — the single next action it produces given the conversation so far, NOT a finished \
+solution. This agent operates EXCLUSIVELY through structured tool calls: the conversation shows \
+its available tools inside <tools>...</tools>, and a correct next turn is optional brief prose \
+reasoning followed by EXACTLY ONE tool call in this exact markup:
+
+<tool_call>
+<function=tool_name>
+<parameter=param_name>
+value
+</parameter>
+</function>
+</tool_call>
+
+Given the TASK (the conversation as the agent saw it up to this point), consider the SEVERAL \
+different next steps that would each be strong from here — different capable agents legitimately \
+choose different good moves (viewing any relevant file, running a focused command, making an \
+edit) — then write UP TO {n} yes/no questions that test whether the response is a good next \
+move — a single flat list, NO categories. Most tasks support only ~20-35 GENUINELY different \
+checks: a list of {floor}+ distinct questions is a good outcome; padding toward {n} with \
+disguised repeats is a failure.
+
+CRITICAL — every question must probe a DIFFERENT underlying property of the response. \
+Paraphrases, the same template re-instantiated on another file/symbol/parameter, and complements \
+of an earlier question are the SAME check and count as forbidden repeats. Enforce this \
+STRUCTURALLY while you write:
+- Spend the task-specific part of the list across the aspects roughly as: 1/4 correctness, 1/4 \
+grounding (each question anchored on a DIFFERENT concrete fact of the conversation), 1/5 \
+protocol, 1/8 efficiency, and AT MOST 3 questions on progress/non-redundancy. Within an aspect, \
+every question must probe a different ANGLE — never the same angle pointed at a different target.
+- AT MOST FIVE questions in the ENTIRE list may be negative-form ("avoids", "does not", \
+"refrains"). Each negative question must cover its whole family by listing the items inside \
+itself — ONE question, never one question per item.
+- When a check has many valid (or many invalid) targets, the enumeration goes INSIDE one \
+question as listed alternatives. NEVER spread an enumeration across several questions.
+- No single file, symbol, or tool may be the SUBJECT of more than TWO questions in the whole \
+list — a third question about the same target is a repeat even if it probes a "different" nuance.
+- When you run out of genuinely different checks, STOP and return the shorter list (minimum \
+{floor}) — {floor} distinct checks beat {n} with paraphrase or template filler.
+FINAL SELF-CHECK before emitting: re-read your list; wherever two questions share a template, \
+target, or would be flipped by the same feature of a response, DELETE all but the strongest one \
+and return the shorter list.
+
+Judge the MOVE, not task completion. The response is ONE turn in an ongoing trajectory; it is NOT \
+expected to solve or finish the task. Do NOT ask whether it fixes the bug or makes tests pass — \
+at this point a good step may just view, search, or run a focused check. Probe the quality of \
+THIS step:
+- format — the tool call uses the exact required markup, a real tool, and complete parameters.
+- correctness — the call is valid and would do what it intends (right tool, right operation, \
+sensible target).
+- grounding — it is faithful to what the conversation actually shows (real files, paths, symbols, \
+outputs, errors — nothing invented).
+- progress — it is a sensible, non-redundant advance from the current state (not looping or \
+repeating a call already made).
+- efficiency — it is economical (no needless exploration or redundant work).
+- brevity — it is SHORT: a strong next turn is at most a few sentences of reasoning plus one \
+tool call; thousands of words of looping reasoning is a defect no matter how correct.
+
+MANDATORY TOOL-CALL FORMAT OPENING — questions 1 through 8 of your list MUST be these format \
+checks, written BEFORE any other question. Weak or regressed agents describe tool calls in prose \
+or emit pseudo-JSON instead of the required markup, and the checklist must catch that:
+1. "Does the response contain a `<tool_call>` block with a `<function=...>` element nested \
+inside it?"
+2. "Is the response free of pseudo tool calls written as plain JSON or prose (e.g. \
+{{"tool": ...}}, {{"name": ..., "arguments": ...}}, or a line starting with `tool_call:`) \
+outside `<tool_call>` tags?"
+3. "Does the response contain exactly ONE `<tool_call>` block, with nothing after its closing \
+`</tool_call>` tag?"
+4. "Is the called function one of the offered tools: `execute_bash`, `str_replace_editor`, \
+`think`, `task_tracker`, or `finish`?"
+5. "Does the call carry every required parameter of the function it invokes (such as \
+`<parameter=command>` for `execute_bash`, or `<parameter=command>` plus `<parameter=path>` for \
+`str_replace_editor`)?"
+6. "Is every `<parameter=...>` block properly opened and closed inside the `<function=...>` \
+block?"
+7. "Are the parameter values concrete literal values (a real command, path, or text) rather \
+than placeholders such as `<your command>`, `TODO`, or `...`?"
+8. one task-specific format check of your own (e.g. a parameter value naming a file path or \
+symbol that actually appears in this conversation).
+For each, "example_bad" must show a concrete wrong form in THIS context (e.g. the same intended \
+action written as a JSON object in plain text).
+
+MANDATORY BREVITY — questions 9 through 14 MUST be size checks. Reference agents answer these \
+tasks in roughly 40-150 words of prose plus one call; weak agents emit thousands of words of \
+looping reasoning:
+Questions 9-12 are the WORD-COUNT LADDER — four rungs at widening intervals, so shorter is \
+strictly better at every scale. Each rung MUST use a clearly DIFFERENT sentence shape, and each \
+rung's "example_bad" must name a concrete word count that fails it (e.g. "a ~900-word reply"):
+9. "Is the entire response (reasoning plus tool call) under roughly 150 words?"
+10. "Does the whole reply stay below about 400 words?"
+11. "Is the total text shorter than roughly 1200 words?"
+12. "Does the full response come in at less than about 3000 words?"
+13. "Is any prose before the tool call at most about 5 sentences in one paragraph?"
+14. "Is the response free of raw chain-of-thought, `<think>` tags, or restarted reasoning \
+('wait', 'actually', re-deriving the same conclusion) outside one brief reasoning paragraph?"
+
+MANDATORY OPERATION DISCIPLINE — questions 15 through 18 MUST be these checks on the operation \
+inside the tool call (verbose agents fail them as often as weak ones):
+15. bounded output — "Does the call bound how much output it will produce (e.g. `grep -n`, \
+`| head`, a view range, or an equivalently narrow target) rather than dumping a whole file or \
+directory?"
+16. non-destructive — "Is the call free of destructive operations such as `rm -rf`, \
+`git checkout/reset --hard`, or wholesale file overwrites?"
+17. well-formed values — "Are quotes, escapes, and paths inside the parameter values balanced \
+and syntactically valid for the tool being called?"
+18. plan-action match — "Does the tool call do exactly what the preceding reasoning says it \
+will do, no more and no less?"
+Then continue with the task-specific questions below; the aspect proportions apply to those \
+remaining questions.
+
+CRITICAL — do NOT lock the checklist onto ONE imagined action. A response that takes a DIFFERENT \
+but equally reasonable next step must still be able to pass most questions. To achieve that:
+- Prefer checks that ANY strong next step passes and weak ones fail: calls a real offered tool; \
+references only files/symbols/outputs that actually appear in the conversation; does not repeat \
+a call already made (name those calls explicitly); concretely advances the task.
+- When a check must name a specific target, allow stated equivalents ("...operates on \
+`src/foo.py`, its test, or another file under `src/`..."), never a single mandatory file unless \
+the conversation makes it the only defensible target.
+- Reserve at most a quarter of the questions for one specific expected action; if you use them, \
+make each pass for any reasonable variant of that action.
+- NEVER write conditional questions ("If the response does X, does it ...?"): when the condition \
+does not hold the judge cannot verify the check and must answer NO. Phrase the check \
+unconditionally with the alternatives folded in.
+- Do NOT itemize the eventual solution's ingredients as separate questions: the response is ONE \
+step, and a strong response that inspects before editing must still be able to pass most of the \
+list.
+
+CRITICAL — the checklist must IDENTIFY this task. A polished response written for a DIFFERENT \
+repo or bug must FAIL most questions. At least half of the task-specific questions must embed \
+concrete facts of THIS conversation that hold for EVERY reasonable next step here — the \
+repository and its real paths, the specific bug/feature being worked, symbols or error text \
+already shown, which tool calls have already been made and what they returned — phrased so a \
+response is checked to engage with those facts. Generic virtues (well-formed markup, some tool \
+call, confident tone) must NEVER be enough to pass these.
+
+CRITICAL — the judge will NOT see the task, only your question and the response. Every question \
+must be SELF-CONTAINED and answerable from the response alone:
+- Bake the concrete specifics the check needs INTO the question — name the files, symbols, \
+tools, parameters, or observed facts explicitly. If a check would need the task to answer, \
+rewrite it to carry that fact.
+- Anchor on OBSERVABLE features of the response — the exact text, markup, parameter values, or \
+file paths it contains, and what it states. No reference solution or outside knowledge required.
+
+Every question must also be:
+- Phrased so YES = the response is GOOD (never the reverse).
+- Discriminative: a plausible but wrong, lazy, ungrounded, or off-track next step should be able \
+to FAIL it — no gimmes that any syntactically valid answer passes.
+- One single check, at most 30 words, no 'and'/'or' compounds (listing allowed equivalent targets \
+is fine).
+
+For each question also give "example_bad": a short, CONCRETE example of a next-turn response in \
+THIS context that would earn NO on that exact question — not a generic "empty response".
+
+Output ONLY the questions (do NOT output your reasoning). Return STRICT JSON only, no prose, no \
+code fences:
+{{"questions":[{{"text":"...","example_bad":"..."}}]}}"""
+
+# Shard prefix that marks tool-call probe samples (kept in sync with the manifest source name
+# and remote_dataset._TOOL_SOURCE_PREFIX).
+TOOL_SAMPLE_SHARD_PREFIX = "swe-zero-tools/"
+
+
+def is_tool_sample(sample_id: str) -> bool:
+    return sample_id.startswith(TOOL_SAMPLE_SHARD_PREFIX)
+
 JUDGE_SYSTEM = """You judge a candidate assistant RESPONSE — a coding agent's next turn in a \
 conversation that is NOT shown to you — by answering yes/no questions about it. The questions span \
 several evaluation categories (each is tagged with its "category"); answer EVERY one from the \
@@ -251,9 +419,10 @@ For every question give a ONE-sentence explanation citing the response, then the
 Return the strict JSON now."""
 
 
-def build_question_messages(*, task: str, n: int) -> list[dict[str, str]]:
+def build_question_messages(*, task: str, n: int, tool_sample: bool = False) -> list[dict[str, str]]:
+    system = QUESTION_SYSTEM_TOOL if tool_sample else QUESTION_SYSTEM
     return [
-        {"role": "system", "content": QUESTION_SYSTEM.format(n=n, floor=question_floor(n))},
+        {"role": "system", "content": system.format(n=n, floor=question_floor(n))},
         {"role": "user", "content": QUESTION_USER.format(task=task.rstrip(), n=n)},
     ]
 
