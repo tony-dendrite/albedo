@@ -221,6 +221,8 @@ def test_build_question_messages_selects_tool_variant():
     assert tool_messages[0]["content"] == QUESTION_SYSTEM_TOOL.format(n=50, floor=question_floor(50))
     assert "<tool_call>" in tool_messages[0]["content"]
     assert "execute_bash" in tool_messages[0]["content"]
+    assert "TOOL HYGIENE GUIDANCE" in tool_messages[0]["content"]
+    assert "benchmark-specific tool names" in tool_messages[0]["content"]
 
     code_messages = build_question_messages(task="TASK", n=50)
     assert "MANDATORY COMMAND DISCIPLINE" in code_messages[0]["content"]

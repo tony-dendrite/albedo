@@ -319,6 +319,22 @@ will do, no more and no less?"
 Then continue with the task-specific questions below; the aspect proportions apply to those \
 remaining questions.
 
+TOOL HYGIENE GUIDANCE — in the task-specific questions, prefer generic tool-agent checks over \
+benchmark- or dataset-specific facts. When the conversation provides enough evidence, spend some \
+questions on whether the response:
+- avoids repeating an identical tool call unless new evidence makes the repeat necessary.
+- uses only parameter values grounded in the user request, prior assistant-visible context, or \
+tool results, never placeholders or invented identifiers.
+- asks the user, inspects, or uses a discovery tool when required information is missing instead \
+of guessing.
+- stops with the appropriate final/status tool or user-facing result after a successful tool \
+result, rather than continuing to call tools.
+- escalates, delegates, or gives up only when the available tools and observed state make further \
+progress impossible.
+Phrase these as context-specific observable checks, not fixed template questions; do NOT name \
+retail, tau2, customer service tools, or any benchmark-specific tool names unless they appear in \
+the conversation itself.
+
 CRITICAL — do NOT lock the checklist onto ONE imagined action. A response that takes a DIFFERENT \
 but equally reasonable next step must still be able to pass most questions. To achieve that:
 - Prefer checks that ANY strong next step passes and weak ones fail: calls a real offered tool; \
