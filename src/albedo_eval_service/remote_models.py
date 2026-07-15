@@ -6,6 +6,9 @@ import json
 import os
 import re
 import shutil
+import signal
+import subprocess
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -25,6 +28,22 @@ _HF_GIT_REVISION_RE = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")  # HF git com
 _DEFAULT_OCI_REGISTRY = "registry.hippius.com"
 _HEARTBEAT_INTERVAL_S = 10.0
 
+# hippius chunked-v2 layout markers (hippius-hub >= 0.6.0 writes these by default for
+# files >= 256 MiB): a titled pointer.v2 layer maps a file's bytes onto shared pack blobs.
+_POINTER_MEDIA_TYPE_V2 = "application/vnd.hippius.pointer.v2"
+_LAYOUT_ANNOTATION_KEY = "com.hippius.layout"
+
+
+def _manifest_is_chunked(manifest: dict[str, Any]) -> bool:
+    if (manifest.get("annotations") or {}).get(_LAYOUT_ANNOTATION_KEY):
+        return True
+    for layer in manifest.get("layers", []):
+        if layer.get("mediaType") == _POINTER_MEDIA_TYPE_V2:
+            return True
+        if (layer.get("annotations") or {}).get(_LAYOUT_ANNOTATION_KEY):
+            return True
+    return False
+
 _RESOLVE_LOCKS: dict[str, threading.Lock] = {}
 _RESOLVE_LOCKS_GUARD = threading.Lock()
 
@@ -35,19 +54,26 @@ def _resolve_lock(model_ref: str) -> threading.Lock:
 
 
 @contextmanager
-def _download_heartbeat(label: str):
+def _download_heartbeat(label: str, watch_dir: Path | None = None):
     """Print every ``_HEARTBEAT_INTERVAL_S`` seconds that ``label`` is still downloading.
 
     Model fetches block with no progress output, so a daemon thread emits a periodic
-    heartbeat until the download finishes.
+    heartbeat until the download finishes. When ``watch_dir`` is given, the current
+    on-disk byte total is included so a stalled transfer is visible in the logs.
     """
     stop = threading.Event()
     start = time.monotonic()
 
     def _beat() -> None:
         while not stop.wait(_HEARTBEAT_INTERVAL_S):
+            suffix = ""
+            if watch_dir is not None:
+                try:
+                    suffix = f" bytes={_dir_written_bytes(watch_dir)}"
+                except OSError:
+                    suffix = ""
             print(
-                f"model_download_progress ref={label} elapsed_s={time.monotonic() - start:.0f}",
+                f"model_download_progress ref={label} elapsed_s={time.monotonic() - start:.0f}{suffix}",
                 flush=True,
             )
 
@@ -178,7 +204,7 @@ class ModelArtifactResolver:
 
         paginator = client.get_paginator("list_objects_v2")
         found = False
-        with _download_heartbeat(model_ref):
+        with _download_heartbeat(model_ref, watch_dir=cache_dir):
             for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
                 for item in page.get("Contents", []):
                     key = item["Key"]
@@ -216,22 +242,11 @@ class ModelArtifactResolver:
             print(f"model_cache_invalid source=hf path={cache_dir} reason=missing_model_files", flush=True)
             shutil.rmtree(cache_dir, ignore_errors=True)
 
-        # Xet is the live HF fast-transfer path; set before huggingface_hub is imported.
-        os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
-        from huggingface_hub import snapshot_download
-
         temp_dir = cache_dir.with_suffix(".partial")
         # Resume an interrupted download: snapshot_download skips files already complete
         # in the target dir, so keep .partial instead of wiping it on each retry.
         temp_dir.mkdir(parents=True, exist_ok=True)
-        with _download_heartbeat(model_ref):
-            snapshot_download(
-                repo_id=repo,
-                revision=revision,
-                local_dir=str(temp_dir),
-                max_workers=max(1, self.settings.model_download_concurrency),
-                token=os.environ.get("HF_TOKEN") or None,
-            )
+        self._download_hf_snapshot(repo=repo, revision=revision, temp_dir=temp_dir, label=model_ref)
         _require_loadable_model_files(temp_dir, source="hf")
         (temp_dir / ".albedo-model-cache.json").write_text(
             json.dumps({"source": model_ref, "repo": repo, "revision": revision}, sort_keys=True)
@@ -243,6 +258,77 @@ class ModelArtifactResolver:
         self._apply_canonical_config(cache_dir)
         file_count, total_size_bytes = _tree_stats(cache_dir)
         return ResolvedModel(model_ref, str(cache_dir), "hf", False, file_count, total_size_bytes)
+
+    def _download_hf_snapshot(
+        self, *, repo: str, revision: str, temp_dir: Path, label: str
+    ) -> None:
+        if not self.settings.model_download_out_of_process:
+            # In-process fetch — used by tests that monkeypatch snapshot_download, and
+            # any environment where spawning a child interpreter is undesirable.
+            os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
+            from huggingface_hub import snapshot_download
+
+            with _download_heartbeat(label, watch_dir=temp_dir):
+                snapshot_download(
+                    repo_id=repo,
+                    revision=revision,
+                    local_dir=str(temp_dir),
+                    max_workers=max(1, self.settings.model_download_concurrency),
+                    token=os.environ.get("HF_TOKEN") or None,
+                )
+            return
+
+        _run_hf_download_supervised(
+            repo=repo,
+            revision=revision,
+            temp_dir=temp_dir,
+            label=label,
+            concurrency=self.settings.model_download_concurrency,
+            stall_seconds=self.settings.model_download_stall_seconds,
+            max_attempts=max(1, self.settings.model_download_stall_retries),
+        )
+
+    def _download_hippius_snapshot(
+        self, *, registry: str, repository: str, digest: str, temp_dir: Path, label: str
+    ) -> None:
+        """Download a chunked-v2 hippius artifact by delegating to hippius_hub, which
+        owns the pointer→pack reassembly (and digest-verifies the reassembled files)."""
+        if registry != _DEFAULT_OCI_REGISTRY:
+            raise RuntimeError(
+                f"chunked OCI manifest served by unsupported registry {registry!r}; "
+                f"hippius_hub only targets {_DEFAULT_OCI_REGISTRY}"
+            )
+        try:
+            from hippius_hub._oci import group_files  # noqa: F401 — chunked-capable marker
+        except ImportError as exc:
+            raise RuntimeError(
+                "chunked hippius artifact requires hippius-hub>=0.6.0 on this host; "
+                "older readers silently save the pointer blob as the model file"
+            ) from exc
+
+        if not self.settings.model_download_out_of_process:
+            import hippius_hub
+
+            with _download_heartbeat(label, watch_dir=temp_dir):
+                hippius_hub.snapshot_download(
+                    repository,
+                    revision=digest,
+                    local_dir=str(temp_dir),
+                    max_workers=max(1, self.settings.model_download_concurrency),
+                    token=os.environ.get("HIPPIUS_HUB_TOKEN") or None,
+                )
+            return
+
+        _run_hf_download_supervised(
+            repo=repository,
+            revision=digest,
+            temp_dir=temp_dir,
+            label=label,
+            concurrency=self.settings.model_download_concurrency,
+            stall_seconds=self.settings.hippius_download_stall_seconds,
+            max_attempts=max(1, self.settings.model_download_stall_retries),
+            child_entry="_hippius_download_child",
+        )
 
     def _resolve_oci(
         self, *, registry: str, repository: str, digest: str, original_ref: str
@@ -271,7 +357,16 @@ class ModelArtifactResolver:
         # appears after it is fully streamed and digest-verified, so anything present is complete.
         temp_dir.mkdir(parents=True, exist_ok=True)
 
-        with httpx.Client(timeout=None, follow_redirects=True) as client:
+        # A finite read timeout so a dead CDN socket raises (retryable) instead of
+        # blocking a blob stream forever. Only the per-read wait is bounded; a healthy
+        # multi-GB blob keeps resetting it as chunks arrive.
+        oci_timeout = httpx.Timeout(
+            connect=30.0,
+            read=self.settings.model_download_read_timeout_seconds,
+            write=30.0,
+            pool=30.0,
+        )
+        with httpx.Client(timeout=oci_timeout, follow_redirects=True) as client:
             manifest_url = f"https://{registry}/v2/{repository}/manifests/{digest}"
             headers = {
                 "Accept": "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"
@@ -285,11 +380,16 @@ class ModelArtifactResolver:
             response.raise_for_status()
             _verify_digest(response.content, digest, label="manifest")
             manifest = response.json()
+            chunked = _manifest_is_chunked(manifest)
             token = None
             if response.request.headers.get("Authorization", "").startswith("Bearer "):
                 token = response.request.headers["Authorization"].removeprefix("Bearer ")
             pending: list[tuple[str, str]] = []
-            for index, layer in enumerate(manifest.get("layers", [])):
+            # Chunked-v2 manifests are delegated to hippius_hub below: the per-layer
+            # streamer would write the ~200-byte pointer blob AS the model file (its
+            # digest check passes — the pointer blob matches its own digest).
+            layers = [] if chunked else manifest.get("layers", [])
+            for index, layer in enumerate(layers):
                 layer_digest = layer.get("digest")
                 if not isinstance(layer_digest, str) or not _DIGEST_RE.match(layer_digest):
                     raise ValueError(f"OCI layer {index} is missing a sha256 digest")
@@ -341,6 +441,14 @@ class ModelArtifactResolver:
                         except Exception:
                             executor.shutdown(wait=False, cancel_futures=True)
                             raise
+        if chunked:
+            self._download_hippius_snapshot(
+                registry=registry,
+                repository=repository,
+                digest=digest,
+                temp_dir=temp_dir,
+                label=original_ref,
+            )
         _require_loadable_model_files(temp_dir, source="oci")
         done_marker_payload = {
             "source": original_ref,
@@ -382,7 +490,7 @@ def _stream_blob_to_file(
         if response.status_code == 401:
             return response
         response.raise_for_status()
-        with _download_heartbeat(label), temp_destination.open("wb") as handle:
+        with _download_heartbeat(label, watch_dir=destination.parent), temp_destination.open("wb") as handle:
             for chunk in response.iter_bytes(chunk_size=1024 * 1024):
                 if not chunk:
                     continue
@@ -394,6 +502,161 @@ def _stream_blob_to_file(
         raise ValueError(f"{label} digest mismatch: expected {expected_digest}, got {actual}")
     temp_destination.replace(destination)
     return None
+
+
+def _hf_download_child() -> None:
+    repo, revision, local_dir, max_workers = (
+        sys.argv[1],
+        sys.argv[2],
+        sys.argv[3],
+        sys.argv[4],
+    )
+    os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
+    from huggingface_hub import snapshot_download
+
+    snapshot_download(
+        repo_id=repo,
+        revision=revision,
+        local_dir=local_dir,
+        max_workers=max(1, int(max_workers)),
+        token=os.environ.get("HF_TOKEN") or None,
+    )
+
+
+def _hippius_download_child() -> None:
+    repo, revision, local_dir, max_workers = (
+        sys.argv[1],
+        sys.argv[2],
+        sys.argv[3],
+        sys.argv[4],
+    )
+    import hippius_hub
+
+    hippius_hub.snapshot_download(
+        repo,
+        revision=revision,
+        local_dir=local_dir,
+        max_workers=max(1, int(max_workers)),
+        token=os.environ.get("HIPPIUS_HUB_TOKEN") or None,
+    )
+
+
+def _spawn_hf_download(
+    repo: str,
+    revision: str,
+    temp_dir: Path,
+    concurrency: int,
+    log_path: Path,
+    child_entry: str = "_hf_download_child",
+) -> subprocess.Popen:
+    log_handle = log_path.open("w", encoding="utf-8")
+    try:
+        return subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                f"from albedo_eval_service.remote_models import {child_entry}; {child_entry}()",
+                repo,
+                revision,
+                str(temp_dir),
+                str(max(1, concurrency)),
+            ],
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    finally:
+        # Popen holds its own dup of the fd; the parent's copy is no longer needed.
+        log_handle.close()
+
+
+def _terminate_process_group(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        proc.terminate()
+    try:
+        proc.wait(timeout=15)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        proc.kill()
+    try:
+        proc.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def _tail_file(path: Path, max_bytes: int) -> str:
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - max_bytes))
+            data = handle.read()
+    except OSError:
+        return "(download log unavailable)"
+    text = data.decode("utf-8", errors="replace").strip()
+    return text or "(no output captured)"
+
+
+def _run_hf_download_supervised(
+    *,
+    repo: str,
+    revision: str,
+    temp_dir: Path,
+    label: str,
+    concurrency: int,
+    stall_seconds: float,
+    max_attempts: int,
+    child_entry: str = "_hf_download_child",
+) -> None:
+    log_path = temp_dir.parent / f"{temp_dir.name}.download.log"
+    for attempt in range(1, max_attempts + 1):
+        proc = _spawn_hf_download(repo, revision, temp_dir, concurrency, log_path, child_entry)
+        start = time.monotonic()
+        last_bytes = -1
+        last_progress = start
+        stalled = False
+        while proc.poll() is None:
+            time.sleep(_HEARTBEAT_INTERVAL_S)
+            current = _dir_written_bytes(temp_dir)
+            now = time.monotonic()
+            print(
+                f"model_download_progress ref={label} attempt={attempt}/{max_attempts} "
+                f"elapsed_s={now - start:.0f} bytes={current}",
+                flush=True,
+            )
+            if current > last_bytes:
+                last_bytes = current
+                last_progress = now
+            elif now - last_progress >= stall_seconds:
+                print(
+                    f"model_download_stalled ref={label} attempt={attempt}/{max_attempts} "
+                    f"bytes={current} no_progress_s={now - last_progress:.0f}",
+                    flush=True,
+                )
+                _terminate_process_group(proc)
+                stalled = True
+                break
+        if stalled:
+            continue
+        if proc.returncode == 0:
+            log_path.unlink(missing_ok=True)
+            return
+        detail = _tail_file(log_path, 4000)
+        raise RuntimeError(
+            f"snapshot_download exited {proc.returncode} for {repo}@{revision}: {detail}"
+        )
+    raise TimeoutError(
+        f"snapshot_download for {repo}@{revision} made no progress for "
+        f"{stall_seconds:.0f}s across {max_attempts} attempts"
+    )
 
 
 def parse_oci_ref(model_ref: str) -> tuple[str, str, str] | None:
@@ -501,3 +764,22 @@ def _tree_stats(path: Path) -> tuple[int, int]:
             file_count += 1
             total_size += item.stat().st_size
     return file_count, total_size
+
+
+def _dir_written_bytes(path: Path) -> int:
+    """Bytes *actually written* under ``path`` (allocated blocks, not apparent size).
+
+    The download watchdog needs a signal that reflects real transfer progress. Some
+    backends (e.g. xet) preallocate a file to its full size before streaming into it,
+    so ``st_size`` sits flat during a healthy download and would trip a false stall;
+    ``st_blocks`` counts blocks actually allocated, which climbs as data lands.
+    """
+    total = 0
+    for item in path.rglob("*"):
+        try:
+            st = item.stat()
+        except OSError:
+            continue
+        if item.is_file():
+            total += st.st_blocks * 512
+    return total
