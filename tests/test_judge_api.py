@@ -5,6 +5,7 @@ import json
 
 from albedo_eval_service.judge_api import (
     JudgeSample,
+    QuestionScoringUnavailable,
     QuestionPrepStore,
     QuestionService,
     ScoreBatchRequest,
@@ -34,9 +35,9 @@ class FakeClient:
         return JudgeRawResponse(model=model, provider="fake", raw=raw)
 
 
-class ToolFallbackClient(FakeClient):
+class ToolRetryClient(FakeClient):
     def __init__(self):
-        super().__init__(n_questions=20)
+        super().__init__(n_questions=50)
         self.calls: list[str] = []
 
     async def complete(self, *, model, messages, temperature=None, max_tokens=None, provider=None, response_schema=None, accept=None):
@@ -44,7 +45,12 @@ class ToolFallbackClient(FakeClient):
         is_tool_prompt = "<tool_call>" in content
         self.calls.append("tool" if is_tool_prompt else "generic")
         if is_tool_prompt:
-            return JudgeRawResponse(model=model, provider="fake", raw="not json")
+            if self.calls.count("tool") == 1:
+                return JudgeRawResponse(model=model, provider="fake", raw="not json")
+            return await super().complete(
+                model=model, messages=messages, temperature=temperature, max_tokens=max_tokens,
+                provider=provider, response_schema=response_schema, accept=accept,
+            )
         return await super().complete(
             model=model, messages=messages, temperature=temperature, max_tokens=max_tokens,
             provider=provider, response_schema=response_schema, accept=accept,
@@ -61,16 +67,22 @@ def test_evaluator_provider_is_always_fp8():
     assert bare == {"allow_fallbacks": True, "quantizations": ["fp8"]}
 
 
-def test_tool_samples_use_smaller_question_budget():
+def test_tool_samples_default_to_full_question_budget_and_allow_override():
+    settings = JudgeSettings(num_questions=50)
+
+    assert settings.tool_num_questions == 50
+    assert _question_count(settings, "swe-zero-tools/data/train-00000-of-00064.parquet:5:2") == 50
+    assert _question_count(settings, "swe-zero/data/train-00000.parquet:5:2") == 50
+
     settings = JudgeSettings(num_questions=50, tool_num_questions=20)
 
     assert _question_count(settings, "swe-zero-tools/data/train-00000-of-00064.parquet:5:2") == 20
     assert _question_count(settings, "swe-zero/data/train-00000.parquet:5:2") == 50
 
 
-def test_tool_question_generation_falls_back_to_generic_prompt():
-    settings = JudgeSettings(num_questions=50, tool_num_questions=20)
-    fake = ToolFallbackClient()
+def test_tool_question_generation_retries_tool_prompt_without_generic_fallback():
+    settings = JudgeSettings(num_questions=50)
+    fake = ToolRetryClient()
     service = QuestionService(settings, fake)
     result = asyncio.run(
         service.prepare(
@@ -83,8 +95,38 @@ def test_tool_question_generation_falls_back_to_generic_prompt():
         )
     )
 
-    assert fake.calls == ["tool", "generic"]
-    assert len(result.questions) == 20
+    assert fake.calls == ["tool", "tool"]
+    assert len(result.questions) == 50
+
+
+def test_tool_question_generation_does_not_use_generic_prompt_after_retry():
+    settings = JudgeSettings(num_questions=50, tool_num_questions=20)
+    fake = ToolRetryClient()
+
+    async def always_bad_tool(**kwargs):
+        content = kwargs["messages"][0]["content"]
+        fake.calls.append("tool" if "<tool_call>" in content else "generic")
+        return JudgeRawResponse(model=kwargs["model"], provider="fake", raw="not json")
+
+    fake.complete = always_bad_tool
+    service = QuestionService(settings, fake)
+    try:
+        asyncio.run(
+            service.prepare(
+                JudgeSample(
+                    sample_id="swe-zero-tools/data/train-00000-of-00064.parquet:5:2",
+                    prompt="task",
+                    previous_king_output="KING",
+                    challenger_output="CHAL",
+                )
+            )
+        )
+    except QuestionScoringUnavailable:
+        pass
+    else:
+        raise AssertionError("expected tool question generation to fail")
+
+    assert fake.calls == ["tool", "tool"]
 
 
 def test_scoring_scores_both_sides_independently():

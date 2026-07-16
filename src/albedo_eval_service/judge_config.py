@@ -28,7 +28,7 @@ class JudgeSettings(BaseSettings):
     evaluator_model: str = "z-ai/glm-5.2"
     evaluator_providers: str = "z-ai,novita,siliconflow,streamlake"
     num_questions: int = 50
-    tool_num_questions: int = 20
+    tool_num_questions: int = 50
     question_max_tokens: int = 16000
     answer_max_tokens: int = 8000
     min_parsed_judges_per_side: int = 2

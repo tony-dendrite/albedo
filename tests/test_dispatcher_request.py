@@ -8,6 +8,14 @@ from albedo_eval_service.config import Settings
 from albedo_eval_service.dispatcher import build_eval_request
 
 
+def _shard(source: str, rows: int) -> dict:
+    return {
+        "name": f"{source}/data/train-00000.parquet",
+        "rows": rows,
+        "rows_meta": [{"iid": f"{source}-{i}", "asst": 12} for i in range(rows)],
+    }
+
+
 def test_build_eval_request_rejects_single_source_manifest(tmp_path):
     # No fallback to one dataset: a legacy single-source manifest must be rejected
     # when the dispatcher computes sample_ids from a local manifest.
@@ -49,10 +57,10 @@ def test_build_eval_request_samples_multi_source_manifest(tmp_path):
     manifest = {
         "version": "swe-zero+mini-coder-v1",
         "sources": [
-            {"name": "swe-zero", "weight": 0.7, "shards": [{"name": "swe-zero/data/train-00000.parquet", "rows": 50}], "total_rows": 50},
-            {"name": "mini-coder", "weight": 0.3, "shards": [{"name": "mini-coder/data/train-00000-of-00060.parquet", "rows": 50}], "total_rows": 50},
+            {"name": "swe-zero", "weight": 0.7, "shards": [_shard("swe-zero", 300)], "total_rows": 300},
+            {"name": "mini-coder", "weight": 0.3, "shards": [_shard("mini-coder", 300)], "total_rows": 300},
         ],
-        "total_rows": 100,
+        "total_rows": 600,
     }
     payload = json.dumps(manifest, sort_keys=True).encode("utf-8")
     manifest_path = tmp_path / "manifest.json"
@@ -64,7 +72,7 @@ def test_build_eval_request_samples_multi_source_manifest(tmp_path):
         dataset_manifest_uri="s3://albedo-artifacts/datasets/swe-zero/manifest.json",
         dataset_manifest_hash=manifest_hash,
         dataset_manifest_path=str(manifest_path),
-        sample_count=10,
+        sample_count=128,
         max_turns_per_sample=2,
         judge_config_hash="sha256:judge",
     )
@@ -81,6 +89,6 @@ def test_build_eval_request_samples_multi_source_manifest(tmp_path):
         uuid4(),
     )
 
-    assert len(request.dataset.sample_ids) == 10
+    assert len(request.dataset.sample_ids) == 128
     prefixes = {sid.split("/", 1)[0] for sid in request.dataset.sample_ids}
     assert prefixes == {"swe-zero", "mini-coder"}

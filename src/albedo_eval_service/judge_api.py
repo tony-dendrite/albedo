@@ -120,7 +120,7 @@ class QuestionService:
         response = await self._complete(sample.prompt, n=n, tool_sample=tool_sample)
         questions, ok = parse_questions(response.raw, n)
         if not ok and tool_sample:
-            response = await self._complete(sample.prompt, n=n, tool_sample=False)
+            response = await self._complete(sample.prompt, n=n, tool_sample=True)
             questions, ok = parse_questions(response.raw, n)
         if response.error:
             raise QuestionScoringUnavailable(response.error)

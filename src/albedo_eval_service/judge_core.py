@@ -229,7 +229,10 @@ choose different good moves (viewing any relevant file, running a focused comman
 edit) — then write UP TO {n} yes/no questions that test whether the response is a good next \
 move — a single flat list, NO categories. Most tasks support only ~20-35 GENUINELY different \
 checks: a list of {floor}+ distinct questions is a good outcome; padding toward {n} with \
-disguised repeats is a failure.
+disguised repeats is a failure. Prefer filling toward {n} with distinct tool-contract fields, \
+preconditions, grounding facts, coding checks, prior tool results, and failure-mode checks, but a \
+shorter {floor}+ list is valid when it avoids repeats. Always return strict JSON even when you \
+stop short.
 
 CRITICAL — every question must probe a DIFFERENT underlying property of the response. \
 Paraphrases, the same template re-instantiated on another file/symbol/parameter, and complements \
@@ -259,6 +262,8 @@ THIS step:
 - format — the tool call uses the exact required markup, a real tool, and complete parameters.
 - correctness — the call is valid and would do what it intends (right tool, right operation, \
 sensible target).
+- tool contract — the call matches the offered tool's description, required parameters, and \
+parameter meanings shown in the task's <tools> block.
 - grounding — it is faithful to what the conversation actually shows (real files, paths, symbols, \
 outputs, errors — nothing invented).
 - progress — it is a sensible, non-redundant advance from the current state (not looping or \
@@ -267,66 +272,53 @@ repeating a call already made).
 - brevity — it is SHORT: a strong next turn is at most a few sentences of reasoning plus one \
 tool call; thousands of words of looping reasoning is a defect no matter how correct.
 
-MANDATORY TOOL-CALL FORMAT OPENING — questions 1 through 8 of your list MUST be these format \
-checks, written BEFORE any other question. Weak or regressed agents describe tool calls in prose \
-or emit pseudo-JSON instead of the required markup, and the checklist must catch that:
-1. "Does the response contain a `<tool_call>` block with a `<function=...>` element nested \
-inside it?"
-2. "Is the response free of pseudo tool calls written as plain JSON or prose (e.g. \
-{{"tool": ...}}, {{"name": ..., "arguments": ...}}, or a line starting with `tool_call:`) \
-outside `<tool_call>` tags?"
-3. "Does the response contain exactly ONE `<tool_call>` block, with nothing after its closing \
-`</tool_call>` tag?"
-4. "Is the called function one of the offered tools: `execute_bash`, `str_replace_editor`, \
-`think`, `task_tracker`, or `finish`?"
-5. "Does the call carry every required parameter of the function it invokes (such as \
-`<parameter=command>` for `execute_bash`, or `<parameter=command>` plus `<parameter=path>` for \
-`str_replace_editor`)?"
-6. "Is every `<parameter=...>` block properly opened and closed inside the `<function=...>` \
-block?"
-7. "Are the parameter values concrete literal values (a real command, path, or text) rather \
-than placeholders such as `<your command>`, `TODO`, or `...`?"
-8. one task-specific format check of your own (e.g. a parameter value naming a file path or \
-symbol that actually appears in this conversation).
+MANDATORY TOOL-CALL FORMAT OPENING — questions 1 through 5 of your list MUST be these format \
+checks, written BEFORE any other question. These checks catch malformed tool syntax without \
+letting format dominate the score:
+1. "Does the response contain exactly ONE `<tool_call>` block with one nested `<function=...>` \
+element and no pseudo tool call outside it?"
+2. "Is the called function one of the offered tools shown in this conversation?"
+3. "Does the call carry every required parameter of the selected tool?"
+4. "Are all `<parameter=...>` blocks properly nested and closed inside the selected function?"
+5. "Are parameter values concrete literal values from the task context, not placeholders such as \
+`<your command>`, `TODO`, or `...`?"
 For each, "example_bad" must show a concrete wrong form in THIS context (e.g. the same intended \
 action written as a JSON object in plain text).
 
-MANDATORY BREVITY — questions 9 through 14 MUST be size checks. Reference agents answer these \
-tasks in roughly 40-150 words of prose plus one call; weak agents emit thousands of words of \
-looping reasoning:
-Questions 9-12 are the WORD-COUNT LADDER — four rungs at widening intervals, so shorter is \
-strictly better at every scale. Each rung MUST use a clearly DIFFERENT sentence shape, and each \
-rung's "example_bad" must name a concrete word count that fails it (e.g. "a ~900-word reply"):
-9. "Is the entire response (reasoning plus tool call) under roughly 150 words?"
-10. "Does the whole reply stay below about 400 words?"
-11. "Is the total text shorter than roughly 1200 words?"
-12. "Does the full response come in at less than about 3000 words?"
-13. "Is any prose before the tool call at most about 5 sentences in one paragraph?"
-14. "Is the response free of raw chain-of-thought, `<think>` tags, or restarted reasoning \
+MANDATORY BREVITY — questions 6 through 7 MUST be these size checks, and NO MORE than these two \
+brevity-only checks may appear. Brevity is useful, but must not dominate tool correctness:
+6. "Does the whole response stay below about 400 words?"
+7. "Is the response free of raw chain-of-thought, `<think>` tags, or restarted reasoning \
 ('wait', 'actually', re-deriving the same conclusion) outside one brief reasoning paragraph?"
 
-MANDATORY OPERATION DISCIPLINE — questions 15 through 18 MUST be these checks on the operation \
-inside the tool call (verbose agents fail them as often as weak ones):
-15. bounded output — "Does the call bound how much output it will produce (e.g. `grep -n`, \
-`| head`, a view range, or an equivalently narrow target) rather than dumping a whole file or \
-directory?"
-16. non-destructive — "Is the call free of destructive operations such as `rm -rf`, \
-`git checkout/reset --hard`, or wholesale file overwrites?"
-17. well-formed values — "Are quotes, escapes, and paths inside the parameter values balanced \
-and syntactically valid for the tool being called?"
-18. plan-action match — "Does the tool call do exactly what the preceding reasoning says it \
-will do, no more and no less?"
-Then continue with the task-specific questions below; the aspect proportions apply to those \
-remaining questions.
+TOOL-CONTRACT MAJORITY — after question 7, at least 60% of the emitted checklist must be \
+task-grounded tool correctness questions. Prefer checks about the selected tool's purpose, \
+argument meanings, required/optional fields, allowed enum values, context-grounded IDs/paths, \
+prior tool results, repeated calls, and whether the call is the right next operation. Generic \
+format, brevity, and style checks beyond questions 1-7 are forbidden unless they are also tied to \
+a concrete tool contract or observed task fact. A question that only asks for well-formed markup \
+or "a real tool" is not a tool-correctness question; it must name the relevant tool purpose, \
+parameter contract, context value, prior result, or required next operation.
 
 TOOL HYGIENE GUIDANCE — in the task-specific questions, prefer generic tool-agent checks over \
 benchmark- or dataset-specific facts. When the conversation provides enough evidence, spend some \
 questions on whether the response:
+- uses the selected tool for the purpose described in the <tools> block, not merely a tool with \
+the right name.
+- supplies arguments whose meaning matches that tool's schema and description (for example, an \
+ID parameter must be a real ID from context, not a guessed name or placeholder).
+- respects tool-specific constraints, such as required fields, mutually dependent fields, \
+allowed enum values, output limits, and when a tool should be used instead of asking the user.
 - avoids repeating an identical tool call unless new evidence makes the repeat necessary.
+- avoids looping on transfer/escalation/calculation/lookup tools when the prior result already \
+settled the next step, and does not keep calling tools until max steps.
 - uses only parameter values grounded in the user request, prior assistant-visible context, or \
 tool results, never placeholders or invented identifiers.
 - asks the user, inspects, or uses a discovery tool when required information is missing instead \
 of guessing.
+- chooses item variants, order/account/customer records, and workflow branches from the observed \
+data instead of a plausible but unverified option.
+- calls the required final state-changing tool once prerequisites are satisfied.
 - stops with the appropriate final/status tool or user-facing result after a successful tool \
 result, rather than continuing to call tools.
 - escalates, delegates, or gives up only when the available tools and observed state make further \
@@ -334,6 +326,17 @@ progress impossible.
 Phrase these as context-specific observable checks, not fixed template questions; do NOT name \
 retail, tau2, customer service tools, or any benchmark-specific tool names unless they appear in \
 the conversation itself.
+
+CODING TOOL COVERAGE — for coding tasks, also spend questions on whether the tool call:
+- uses the correct coding tool for the next step, such as inspect/read/search, shell/test, or \
+edit/write, based on the offered tools.
+- references real files, paths, symbols, errors, commands, or test names already visible in the \
+conversation.
+- chooses a focused command or file operation that advances the stated coding task.
+- bounds command output and avoids destructive git/filesystem operations unless explicitly asked.
+- edits the narrow relevant code or test target instead of unrelated files.
+- verifies a completed edit with an appropriate test, grep, import, typecheck, or focused command.
+- avoids inventing repository structure, package names, function names, flags, or test commands.
 
 CRITICAL — do NOT lock the checklist onto ONE imagined action. A response that takes a DIFFERENT \
 but equally reasonable next step must still be able to pass most questions. To achieve that:
@@ -365,6 +368,10 @@ must be SELF-CONTAINED and answerable from the response alone:
 - Bake the concrete specifics the check needs INTO the question — name the files, symbols, \
 tools, parameters, or observed facts explicitly. If a check would need the task to answer, \
 rewrite it to carry that fact.
+- For tool correctness checks, bake the relevant tool contract INTO the question: tool purpose, \
+required parameter names, parameter meanings, enum/options, and any context values the argument \
+must come from. The judge must be able to verify the call from the response plus the question, \
+without seeing the <tools> block.
 - Anchor on OBSERVABLE features of the response — the exact text, markup, parameter values, or \
 file paths it contains, and what it states. No reference solution or outside knowledge required.
 
@@ -372,8 +379,7 @@ Every question must also be:
 - Phrased so YES = the response is GOOD (never the reverse).
 - Discriminative: a plausible but wrong, lazy, ungrounded, or off-track next step should be able \
 to FAIL it — no gimmes that any syntactically valid answer passes.
-- One single check, at most 30 words, no 'and'/'or' compounds (listing allowed equivalent targets \
-is fine).
+- One single check, ideally under 40 words; listed equivalent targets or required fields are fine.
 
 For each question also give "example_bad": a short, CONCRETE example of a next-turn response in \
 THIS context that would earn NO on that exact question — not a generic "empty response".

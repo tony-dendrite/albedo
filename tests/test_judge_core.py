@@ -220,10 +220,23 @@ def test_build_question_messages_selects_tool_variant():
     tool_messages = build_question_messages(task="TASK", n=50, tool_sample=True)
     assert tool_messages[0]["content"] == QUESTION_SYSTEM_TOOL.format(n=50, floor=question_floor(50))
     assert "<tool_call>" in tool_messages[0]["content"]
-    assert "execute_bash" in tool_messages[0]["content"]
+    assert "offered tools shown in this conversation" in tool_messages[0]["content"]
     assert "TOOL HYGIENE GUIDANCE" in tool_messages[0]["content"]
+    assert "tool contract" in tool_messages[0]["content"]
+    assert "questions 1 through 5" in tool_messages[0]["content"]
+    assert "questions 6 through 7" in tool_messages[0]["content"]
+    assert "Prefer filling toward 50" in tool_messages[0]["content"]
+    assert "Always return strict JSON even when you stop short" in tool_messages[0]["content"]
+    assert "at least 60% of the emitted checklist" in tool_messages[0]["content"]
+    assert "tool purpose, required parameter names, parameter meanings" in tool_messages[0]["content"]
     assert "benchmark-specific tool names" in tool_messages[0]["content"]
+    assert "avoids looping on transfer/escalation/calculation/lookup tools" in tool_messages[0]["content"]
+    assert "calls the required final state-changing tool" in tool_messages[0]["content"]
+    assert "does not keep calling tools until max steps" in tool_messages[0]["content"]
+    assert "CODING TOOL COVERAGE" in tool_messages[0]["content"]
+    assert "verifies a completed edit" in tool_messages[0]["content"]
 
     code_messages = build_question_messages(task="TASK", n=50)
+    assert "MANDATORY BREVITY OPENING" in code_messages[0]["content"]
     assert "MANDATORY COMMAND DISCIPLINE" in code_messages[0]["content"]
     assert "<function=" not in code_messages[0]["content"]
