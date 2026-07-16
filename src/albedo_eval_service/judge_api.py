@@ -89,6 +89,12 @@ class QuestionScoringUnavailable(RuntimeError):
     pass
 
 
+def _question_count(settings: JudgeSettings, sample_id: str) -> int:
+    if is_tool_sample(sample_id):
+        return max(1, min(settings.num_questions, settings.tool_num_questions))
+    return settings.num_questions
+
+
 def _evaluator_provider(settings: JudgeSettings) -> dict[str, Any]:
     """Evaluator provider block: always fp8. With an `order` list, fallbacks are disabled — failover
     happens by rotating the order across retries (deterministic provenance, ~3x less draw-to-draw
@@ -109,21 +115,15 @@ class QuestionService:
         self.client = client
 
     async def prepare(self, sample: QuestionPrepSample | JudgeSample) -> QuestionPrepResult:
-        n = self.settings.num_questions
-        response = await self.client.complete(
-            model=self.settings.evaluator_model,
-            messages=build_question_messages(
-                task=sample.prompt, n=n, tool_sample=is_tool_sample(sample.sample_id)
-            ),
-            temperature=self.settings.temperature,
-            max_tokens=self.settings.question_max_tokens,
-            provider=_evaluator_provider(self.settings),
-            response_schema=question_schema(n),
-            accept=lambda raw: parse_questions(raw, n)[1],
-        )
+        n = _question_count(self.settings, sample.sample_id)
+        tool_sample = is_tool_sample(sample.sample_id)
+        response = await self._complete(sample.prompt, n=n, tool_sample=tool_sample)
+        questions, ok = parse_questions(response.raw, n)
+        if not ok and tool_sample:
+            response = await self._complete(sample.prompt, n=n, tool_sample=False)
+            questions, ok = parse_questions(response.raw, n)
         if response.error:
             raise QuestionScoringUnavailable(response.error)
-        questions, ok = parse_questions(response.raw, n)
         if not ok:
             raise QuestionScoringUnavailable(
                 f"evaluator returned {len(questions)}/{n} well-formed questions"
@@ -136,6 +136,20 @@ class QuestionService:
                 "n_questions": len(questions),
             },
         )
+
+    async def _complete(self, task: str, *, n: int, tool_sample: bool) -> Any:
+        response = await self.client.complete(
+            model=self.settings.evaluator_model,
+            messages=build_question_messages(
+                task=task, n=n, tool_sample=tool_sample
+            ),
+            temperature=self.settings.temperature,
+            max_tokens=self.settings.question_max_tokens,
+            provider=_evaluator_provider(self.settings),
+            response_schema=question_schema(n),
+            accept=lambda raw: parse_questions(raw, n)[1],
+        )
+        return response
 
 
 class QuestionPrepStore:
@@ -349,6 +363,10 @@ async def _judge_side(
     return per_judge_answers, records
 
 
+def _side_ok(records: list[dict[str, Any]], score: float | None, min_parsed: int) -> bool:
+    return score is not None and sum(1 for record in records if record["parse_ok"]) >= min_parsed
+
+
 async def _score_samples(
     *,
     client: OpenRouterJudgeClient,
@@ -408,8 +426,8 @@ async def _score_samples(
         )
         king_score = response_score(king_answers)
         chal_score = response_score(chal_answers)
-        king_ok = all(r["parse_ok"] for r in king_recs) and king_score is not None
-        chal_ok = all(r["parse_ok"] for r in chal_recs) and chal_score is not None
+        king_ok = _side_ok(king_recs, king_score, settings.min_parsed_judges_per_side)
+        chal_ok = _side_ok(chal_recs, chal_score, settings.min_parsed_judges_per_side)
         scored = king_ok and chal_ok
         async with progress_lock:
             completed += 1

@@ -9,6 +9,7 @@ from albedo_eval_service.judge_api import (
     QuestionService,
     ScoreBatchRequest,
     _evaluator_provider,
+    _question_count,
     _score_samples,
 )
 from albedo_eval_service.judge_config import JudgeSettings
@@ -33,6 +34,23 @@ class FakeClient:
         return JudgeRawResponse(model=model, provider="fake", raw=raw)
 
 
+class ToolFallbackClient(FakeClient):
+    def __init__(self):
+        super().__init__(n_questions=20)
+        self.calls: list[str] = []
+
+    async def complete(self, *, model, messages, temperature=None, max_tokens=None, provider=None, response_schema=None, accept=None):
+        content = messages[0]["content"]
+        is_tool_prompt = "<tool_call>" in content
+        self.calls.append("tool" if is_tool_prompt else "generic")
+        if is_tool_prompt:
+            return JudgeRawResponse(model=model, provider="fake", raw="not json")
+        return await super().complete(
+            model=model, messages=messages, temperature=temperature, max_tokens=max_tokens,
+            provider=provider, response_schema=response_schema, accept=accept,
+        )
+
+
 def test_evaluator_provider_is_always_fp8():
     # order list -> fallbacks off; failover is the retry-rotation over the list.
     settings = JudgeSettings(evaluator_providers="prov-a, prov-b")
@@ -41,6 +59,32 @@ def test_evaluator_provider_is_always_fp8():
     # no providers listed -> still fp8 + allow_fallbacks (OpenRouter fails over across fp8 providers)
     bare = _evaluator_provider(JudgeSettings(evaluator_providers=""))
     assert bare == {"allow_fallbacks": True, "quantizations": ["fp8"]}
+
+
+def test_tool_samples_use_smaller_question_budget():
+    settings = JudgeSettings(num_questions=50, tool_num_questions=20)
+
+    assert _question_count(settings, "swe-zero-tools/data/train-00000-of-00064.parquet:5:2") == 20
+    assert _question_count(settings, "swe-zero/data/train-00000.parquet:5:2") == 50
+
+
+def test_tool_question_generation_falls_back_to_generic_prompt():
+    settings = JudgeSettings(num_questions=50, tool_num_questions=20)
+    fake = ToolFallbackClient()
+    service = QuestionService(settings, fake)
+    result = asyncio.run(
+        service.prepare(
+            JudgeSample(
+                sample_id="swe-zero-tools/data/train-00000-of-00064.parquet:5:2",
+                prompt="task",
+                previous_king_output="KING",
+                challenger_output="CHAL",
+            )
+        )
+    )
+
+    assert fake.calls == ["tool", "generic"]
+    assert len(result.questions) == 20
 
 
 def test_scoring_scores_both_sides_independently():
@@ -136,7 +180,7 @@ class OneJudgeBrokenClient:
         return JudgeRawResponse(model=model, provider="fake", raw=raw)
 
 
-def test_sample_unscored_if_a_judge_never_parses():
+def test_sample_scored_if_one_judge_never_parses():
     settings = JudgeSettings(num_questions=3)
     fake = OneJudgeBrokenClient(n_questions=3)
     store = QuestionPrepStore(settings, QuestionService(settings, fake))
@@ -145,5 +189,17 @@ def test_sample_unscored_if_a_judge_never_parses():
         samples=[JudgeSample(sample_id="s1", prompt="task", previous_king_output="KING", challenger_output="CHAL")],
     )
     records = asyncio.run(_score_samples(client=fake, request=request, settings=settings, prep_store=store))
-    # one judge never parsed -> sample invalid (all 3 judges required per side)
+    # one judge never parsed -> sample remains valid with the 2-of-3 judge quorum
+    assert records[0]["scored"] is True
+
+
+def test_sample_unscored_below_judge_parse_quorum():
+    settings = JudgeSettings(num_questions=3, min_parsed_judges_per_side=3)
+    fake = OneJudgeBrokenClient(n_questions=3)
+    store = QuestionPrepStore(settings, QuestionService(settings, fake))
+    request = ScoreBatchRequest(
+        eval_run_id="r", batch_id="b", total_sample_count=1, judge_models=list(JUDGE_MODELS[:3]),
+        samples=[JudgeSample(sample_id="s1", prompt="task", previous_king_output="KING", challenger_output="CHAL")],
+    )
+    records = asyncio.run(_score_samples(client=fake, request=request, settings=settings, prep_store=store))
     assert records[0]["scored"] is False
