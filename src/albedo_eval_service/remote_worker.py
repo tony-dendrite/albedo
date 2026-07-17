@@ -132,7 +132,7 @@ class RemoteEvalWorker:
             "challenger", topology.challenger, challenger_model.local_path
         )
         _cleanup_stale_vllm_resources()
-        king_results, challenger_results = self._generate_two_turn_trajectories(
+        king_results, challenger_results = self._generate_trajectories(
             request=request,
             samples=samples,
             king_generator=king_generator,
@@ -282,7 +282,7 @@ class RemoteEvalWorker:
             kv_cache_dtype=self.settings.kv_cache_dtype,
         )
 
-    def _generate_two_turn_trajectories(
+    def _generate_trajectories(
         self,
         *,
         request: EvalRequest,
@@ -290,35 +290,50 @@ class RemoteEvalWorker:
         king_generator: Generator,
         challenger_generator: Generator,
     ) -> tuple[list[GenerationResult], list[GenerationResult]]:
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            king_future = executor.submit(king_generator.generate, samples)
-            challenger_future = executor.submit(challenger_generator.generate, samples)
-            king_first = king_future.result()
-            challenger_first = challenger_future.result()
+        turn_count = max(1, int(self.settings.trajectory_assistant_turns))
+        generators = {"previous_king": king_generator, "challenger": challenger_generator}
+        current_samples = {"previous_king": samples, "challenger": samples}
+        all_results: dict[str, list[list[GenerationResult]]] = {
+            "previous_king": [],
+            "challenger": [],
+        }
+        all_observations: dict[str, list[dict[tuple[str, str], ObservationResult]]] = {
+            "previous_king": [],
+            "challenger": [],
+        }
 
-        observations = self._simulate_observations(
-            request=request,
-            samples=samples,
-            first_results={"previous_king": king_first, "challenger": challenger_first},
-        )
-        king_second_samples = _second_turn_samples(
-            samples, king_first, observations, side="previous_king"
-        )
-        challenger_second_samples = _second_turn_samples(
-            samples, challenger_first, observations, side="challenger"
-        )
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            king_future = executor.submit(king_generator.generate, king_second_samples)
-            challenger_future = executor.submit(challenger_generator.generate, challenger_second_samples)
-            king_second = king_future.result()
-            challenger_second = challenger_future.result()
+        for turn_index in range(turn_count):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = {
+                    side: executor.submit(generators[side].generate, side_samples)
+                    for side, side_samples in current_samples.items()
+                }
+                turn_results = {side: future.result() for side, future in futures.items()}
+            for side, results in turn_results.items():
+                all_results[side].append(results)
+
+            if turn_index == turn_count - 1:
+                break
+
+            observations = self._simulate_observations(
+                request=request,
+                samples_by_side=current_samples,
+                results_by_side=turn_results,
+            )
+            for side in generators:
+                all_observations[side].append(observations)
+                current_samples[side] = _next_turn_samples(
+                    current_samples[side], turn_results[side], observations, side=side
+                )
 
         return (
-            _merge_two_turn_results(
-                samples, king_first, king_second, observations, side="previous_king"
+            _merge_trajectory_results(
+                samples, all_results["previous_king"], all_observations["previous_king"],
+                side="previous_king",
             ),
-            _merge_two_turn_results(
-                samples, challenger_first, challenger_second, observations, side="challenger"
+            _merge_trajectory_results(
+                samples, all_results["challenger"], all_observations["challenger"],
+                side="challenger",
             ),
         )
 
@@ -326,13 +341,13 @@ class RemoteEvalWorker:
         self,
         *,
         request: EvalRequest,
-        samples: list[EvalSample],
-        first_results: dict[str, list[GenerationResult]],
+        samples_by_side: dict[str, list[EvalSample]],
+        results_by_side: dict[str, list[GenerationResult]],
     ) -> dict[tuple[str, str], ObservationResult]:
-        sample_by_id = {sample.sample_id: sample for sample in samples}
         jobs: list[tuple[str, EvalSample, GenerationResult]] = []
         observations: dict[tuple[str, str], ObservationResult] = {}
-        for side, results in first_results.items():
+        for side, results in results_by_side.items():
+            sample_by_id = {sample.sample_id: sample for sample in samples_by_side[side]}
             for result in results:
                 key = (side, result.sample_id)
                 sample = sample_by_id.get(result.sample_id)
@@ -714,22 +729,22 @@ def _valid_generated_pair_count(
     )
 
 
-def _second_turn_samples(
+def _next_turn_samples(
     samples: list[EvalSample],
-    first_results: list[GenerationResult],
+    results: list[GenerationResult],
     observations: dict[tuple[str, str], ObservationResult],
     *,
     side: str,
 ) -> list[EvalSample]:
-    first_by_id = {result.sample_id: result for result in first_results}
+    result_by_id = {result.sample_id: result for result in results}
     out: list[EvalSample] = []
     for sample in samples:
-        first = first_by_id.get(sample.sample_id)
+        result = result_by_id.get(sample.sample_id)
         observation = observations.get((side, sample.sample_id))
-        if first is None or first.error or observation is None or observation.error:
+        if result is None or result.error or observation is None or observation.error:
             continue
         messages = _base_messages(sample) + [
-            {"role": "assistant", "content": first.text},
+            {"role": "assistant", "content": result.text},
             {"role": "user", "content": observation.observation},
         ]
         out.append(
@@ -745,51 +760,43 @@ def _second_turn_samples(
     return out
 
 
-def _merge_two_turn_results(
+def _merge_trajectory_results(
     samples: list[EvalSample],
-    first_results: list[GenerationResult],
-    second_results: list[GenerationResult],
-    observations: dict[tuple[str, str], ObservationResult],
+    turn_results: list[list[GenerationResult]],
+    turn_observations: list[dict[tuple[str, str], ObservationResult]],
     *,
     side: str,
 ) -> list[GenerationResult]:
-    first_by_id = {result.sample_id: result for result in first_results}
-    second_by_id = {result.sample_id: result for result in second_results}
+    result_maps = [{result.sample_id: result for result in results} for results in turn_results]
     merged = []
     for sample in samples:
-        first = first_by_id.get(sample.sample_id)
-        observation = observations.get((side, sample.sample_id))
-        second = second_by_id.get(sample.sample_id)
-        if first is None:
-            merged.append(GenerationResult(sample.sample_id, "", "missing_first_generation"))
-            continue
-        if first.error:
-            merged.append(GenerationResult(sample.sample_id, "", first.error))
-            continue
-        if observation is None or observation.error:
-            merged.append(
-                GenerationResult(
-                    sample.sample_id,
-                    "",
-                    observation.error if observation else "missing_observation",
-                )
+        turns = _context_turns(sample)
+        error = None
+        for index, result_map in enumerate(result_maps):
+            result = result_map.get(sample.sample_id)
+            if result is None:
+                error = f"missing_generation_turn_{index + 1}"
+                break
+            if result.error:
+                error = result.error
+                break
+            turns.append({"role": "assistant", "content": result.text, "score_target": True})
+            if index >= len(turn_observations):
+                continue
+            observation = turn_observations[index].get((side, sample.sample_id))
+            if observation is None or observation.error:
+                error = observation.error if observation else f"missing_observation_turn_{index + 1}"
+                break
+            turns.append(
+                {
+                    "role": "user",
+                    "content": observation.observation,
+                    "environment_observation": True,
+                }
             )
+        if error:
+            merged.append(GenerationResult(sample.sample_id, "", error))
             continue
-        if second is None:
-            merged.append(GenerationResult(sample.sample_id, "", "missing_second_generation"))
-            continue
-        if second.error:
-            merged.append(GenerationResult(sample.sample_id, "", second.error))
-            continue
-        turns = _context_turns(sample) + [
-            {"role": "assistant", "content": first.text, "score_target": True},
-            {
-                "role": "user",
-                "content": observation.observation,
-                "environment_observation": True,
-            },
-            {"role": "assistant", "content": second.text, "score_target": True},
-        ]
         merged.append(
             GenerationResult(
                 sample_id=sample.sample_id,

@@ -99,13 +99,17 @@ def test_scored_trajectory_marks_only_candidate_outputs():
             {"role": "assistant", "content": "first", "score_target": True},
             {"role": "user", "content": "Observation: ok", "environment_observation": True},
             {"role": "assistant", "content": "second", "score_target": True},
+            {"role": "user", "content": "Observation: still ok", "environment_observation": True},
+            {"role": "assistant", "content": "third", "score_target": True},
         ]
     )
 
+    assert "Score ONLY CANDIDATE OUTPUT 1 through CANDIDATE OUTPUT 3" in text
     assert "CONTEXT USER (do not score)" in text
     assert "CANDIDATE OUTPUT 1" in text
     assert "ENVIRONMENT OBSERVATION (context only, do not score)" in text
     assert "CANDIDATE OUTPUT 2" in text
+    assert "CANDIDATE OUTPUT 3" in text
 
 
 def test_remote_worker_loads_parquet_and_runs_paired_generation(tmp_path, monkeypatch):
@@ -154,8 +158,8 @@ def test_remote_worker_loads_parquet_and_runs_paired_generation(tmp_path, monkey
     assert [event["batch_id"] for event in scoring_events] == ["score-0001", "score-0002"]
     assert {call["side"] for call in calls if "gpu_ids" in call} == {"previous_king", "challenger"}
     generate_calls = [call for call in calls if "sample_ids" in call]
-    assert [call["side"] for call in generate_calls].count("previous_king") == 2
-    assert [call["side"] for call in generate_calls].count("challenger") == 2
+    assert [call["side"] for call in generate_calls].count("previous_king") == 3
+    assert [call["side"] for call in generate_calls].count("challenger") == 3
 
 
 class RecordingModelResolver:

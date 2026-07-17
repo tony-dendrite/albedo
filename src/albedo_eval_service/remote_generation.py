@@ -26,14 +26,18 @@ class Generator(Protocol):
 
 
 def format_scored_trajectory(turns: list[dict[str, Any]]) -> str:
-    labels = {
-        ("assistant", True, 1): "CANDIDATE OUTPUT 1",
-        ("assistant", True, 2): "CANDIDATE OUTPUT 2",
-    }
+    target_count = sum(
+        1 for turn in turns if turn.get("role") == "assistant" and turn.get("score_target")
+    )
+    target_label = (
+        "CANDIDATE OUTPUT"
+        if target_count == 1
+        else f"CANDIDATE OUTPUT 1 through CANDIDATE OUTPUT {target_count}"
+    )
     assistant_index = 0
     parts = [
         "FULL CANDIDATE TRAJECTORY",
-        "Score ONLY CANDIDATE OUTPUT 1 and CANDIDATE OUTPUT 2. "
+        f"Score ONLY {target_label}. "
         "The ENVIRONMENT OBSERVATION is context only.",
     ]
     for turn in turns:
@@ -41,7 +45,7 @@ def format_scored_trajectory(turns: list[dict[str, Any]]) -> str:
         content = str(turn.get("content") or "").rstrip()
         if role == "assistant" and turn.get("score_target"):
             assistant_index += 1
-            label = labels.get((role, True, assistant_index), f"CANDIDATE OUTPUT {assistant_index}")
+            label = f"CANDIDATE OUTPUT {assistant_index}"
         elif role == "user" and turn.get("environment_observation"):
             label = "ENVIRONMENT OBSERVATION (context only, do not score)"
         else:
