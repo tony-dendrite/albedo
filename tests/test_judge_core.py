@@ -42,6 +42,20 @@ def test_question_prompt_requires_trajectory_coverage():
     assert "correct SWE-agent workflow" in prompt
 
 
+def test_question_prompt_prioritizes_observed_failure_modes():
+    prompt = build_question_messages(task="Fix bug", n=50)[0]["content"]
+
+    assert "Make outcome-critical checks dominate the list" in prompt
+    assert "Do NOT reward mere activity" in prompt
+    assert "command/edit correctness" in prompt
+    assert "unconditional trajectory-level checks" in prompt
+    assert "Do-no-harm outcome" in prompt
+    assert "Stop after success" in prompt
+    assert 'without "if the response..." wording' in prompt
+    assert "repository damage" in prompt
+    assert "Invented IDs, paths, symbols, or tool arguments should fail" in prompt
+
+
 def test_question_prompt_limits_easy_hygiene_checks():
     prompt = build_question_messages(task="Fix bug", n=50)[0]["content"]
 
@@ -61,6 +75,21 @@ def test_judge_prompt_scores_only_candidate_outputs():
     assert "Score ONLY the CANDIDATE OUTPUT blocks" in messages[0]["content"]
     assert "ENVIRONMENT OBSERVATION" in messages[0]["content"]
     assert "CANDIDATE TRAJECTORY" in messages[1]["content"]
+
+
+def test_judge_prompt_is_strict_on_workflow_and_grounding_failures():
+    messages = build_judge_messages(
+        response="FULL CANDIDATE TRAJECTORY\nCANDIDATE OUTPUT 1:\nls",
+        questions=[{"id": "q_01", "text": "Does it inspect?", "example_bad": "no"}],
+    )
+    prompt = messages[0]["content"]
+
+    assert "be strict" in prompt
+    assert "Plausible intent" in prompt
+    assert "recognizing the bug" in prompt
+    assert "running a broken edit" in prompt
+    assert "inventing an unseen path/ID/parameter" in prompt
+    assert "continuing to explore after success" in prompt
 
 
 def test_parse_questions_assigns_ids_and_category():

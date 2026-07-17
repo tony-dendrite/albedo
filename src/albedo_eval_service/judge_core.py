@@ -59,10 +59,18 @@ on another file/symbol/command ("avoids editing <file A>?", "avoids editing <fil
 question are the SAME check and count as forbidden repeats — checklists that enumerate task \
 concepts through one template reward keyword-stuffing, not quality. Enforce this STRUCTURALLY \
 while you write:
-- Spend the list across the aspects roughly as: 1/3 correctness, 1/4 grounding (each question \
-anchored on a DIFFERENT concrete fact of the conversation), 1/6 protocol, 1/8 efficiency, and AT \
-MOST 4 questions on progress/non-redundancy. Within an aspect, every question must probe a \
-different ANGLE — never the same angle pointed at a different target.
+- Make outcome-critical checks dominate the list. At least half the questions should fail a \
+trajectory that makes the repository worse, uses a broken command/edit, invents state, submits too \
+early, loops, ignores an observation, or continues after success. The remaining questions may cover \
+useful investigation/progress, but only when that investigation is grounded and stage-appropriate.
+- Do NOT reward mere activity. Avoid checks that pass because the candidate "tries", "recognizes", \
+"mentions", or "keeps working" unless the same output also takes a valid grounded action that \
+improves or verifies the current repository state. A candidate that keeps probing after enough \
+evidence, rewrites unrelated files, or runs failed edits should not win credit for being busy.
+- Spend the list across these failure-mode families, not generic style: grounding/invented inputs, \
+command/edit correctness, workflow stage, reaction to observations, looping/non-redundancy, and \
+stop-after-success. Within a family, every question must probe a different ANGLE — never the same \
+angle pointed at a different target.
 - AT MOST FIVE questions in the ENTIRE list may be negative-form ("avoids", "does not", \
 "refrains"). Each negative question must cover its whole family by listing the items inside \
 itself — ONE question like "Does the response avoid re-running commands already executed above, \
@@ -107,6 +115,36 @@ should not be reprinted.
 
 The remaining questions must emphasize task-specific correctness, grounding, reaction to \
 environment observations, and real progress between candidate outputs.
+
+MANDATORY FAILURE-MODE COVERAGE — include concrete, self-contained questions for these problems \
+as unconditional trajectory-level checks. The evaluator only sees the original conversation, but \
+the judge will later see CANDIDATE OUTPUT and ENVIRONMENT OBSERVATION blocks, so phrase checks to \
+cover both resolved and unresolved states without "if the response..." wording:
+- Do-no-harm outcome: ask whether the trajectory preserves or improves the relevant files/state, \
+rather than deleting needed files, moving edits into temporary files, duplicating lines, corrupting \
+syntax, or leaving a failed command as the final state.
+- Looping/redundancy: compare adjacent CANDIDATE OUTPUT blocks and ask whether the later output \
+uses new evidence instead of repeating the same command/tool, target, search, plan, or edit after \
+the previous observation already answered it.
+- Invented inputs: ask whether every file path, symbol, command flag, ID, tool name, parameter, \
+and value used by the candidate is grounded in the task, earlier candidate output, or ENVIRONMENT \
+OBSERVATION. Invented IDs, paths, symbols, or tool arguments should fail.
+- Command/edit correctness: ask whether commands and edits are syntactically valid for the shell, \
+target the current observed state, and are checked after they run; failed sed/patch/heredoc/edit \
+commands should fail even when the THOUGHT correctly describes the bug.
+- Workflow stage: ask whether the trajectory follows the appropriate lifecycle for the current \
+state — inspect before editing unknown code, edit only after enough evidence, verify after edits, \
+and submit/finish only after verification.
+- Stop after success: ask whether the trajectory stops/submits once observations show the \
+requirement is satisfied, tests/checks pass, the diff is verified, or the required final signal is \
+produced, while continuing only when the task remains unresolved.
+- Observation reaction: ask whether each later candidate output changes course based on the \
+immediately preceding ENVIRONMENT OBSERVATION, especially after errors, empty output, successful \
+commands, or failed commands.
+
+Do NOT treat these as optional niceties. A fluent response with invented inputs, broken edits, a \
+repeated action, the wrong workflow stage, premature submission, repository damage, or continuing \
+exploration after success must fail several questions even if it is concise and well formatted.
 
 CRITICAL — do NOT lock the checklist onto ONE imagined action. A response that takes a DIFFERENT \
 but equally reasonable next step must still be able to pass most questions. To achieve that:
@@ -195,6 +233,15 @@ When unsure, answer 0: a response that does not clearly demonstrate the check ha
 Judge each question independently on its own merits. Every question includes an "example_bad" — \
 ONE example of a response that should get 0. It is illustrative, NOT the only way to fail: do not \
 assume a response is good merely because it differs from example_bad; judge the actual check.
+
+For grounding/invented-input, workflow-stage, looping/non-redundancy, observation-reaction, and \
+stop-after-success questions, be strict: answer 0 unless the CANDIDATE OUTPUT blocks explicitly \
+demonstrate the behavior. Plausible intent, confident prose, recognizing the bug, trying another \
+command, or a syntactically valid command is not enough. Repeating a command/tool/target after its \
+observation already answered it, inventing an unseen path/ID/parameter, running a broken edit, \
+moving required changes into a temporary file, corrupting syntax, skipping verification after an \
+edit, submitting before verification, or continuing to explore after success must earn 0 on the \
+relevant question.
 
 MEASUREMENTS — the user message lists counts computed PROGRAMMATICALLY from the trajectory (total \
 words, total characters, THOUGHT/prose words, code-block lines and characters). For any question \
