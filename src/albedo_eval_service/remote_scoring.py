@@ -27,6 +27,11 @@ class Scorer(Protocol):
     ) -> str | None:
         ...
 
+    def simulate_observation(
+        self, *, request: EvalRequest, sample: EvalSample, assistant_output: str
+    ) -> str:
+        ...
+
     def score(
         self,
         *,
@@ -63,6 +68,25 @@ class HttpScoringClient:
             body = response.json()
             value = body.get("category_prep_id")
             return value if isinstance(value, str) and value else None
+
+    def simulate_observation(
+        self, *, request: EvalRequest, sample: EvalSample, assistant_output: str
+    ) -> str:
+        with httpx.Client(
+            base_url=self.settings.scoring_base_url.rstrip("/"),
+            headers={"Authorization": f"Bearer {self.settings.scoring_auth_token}"},
+            timeout=httpx.Timeout(self.settings.scoring_timeout_seconds),
+        ) as client:
+            response = client.post(
+                "/simulate-observation",
+                json=_simulate_observation_payload(request, sample, assistant_output),
+            )
+            response.raise_for_status()
+            body = response.json()
+            value = body.get("observation")
+            if not isinstance(value, str):
+                raise ValueError("simulation backend returned non-string observation")
+            return value
 
     def score(
         self,
@@ -111,6 +135,19 @@ class WebSocketScoringClient:
         value = body.get("category_prep_id")
         return value if isinstance(value, str) and value else None
 
+    def simulate_observation(
+        self, *, request: EvalRequest, sample: EvalSample, assistant_output: str
+    ) -> str:
+        body = score_bridge_hub.request(
+            _simulate_observation_payload(request, sample, assistant_output),
+            timeout_seconds=self.settings.scoring_timeout_seconds,
+            endpoint="/simulate-observation",
+        )
+        value = body.get("observation")
+        if not isinstance(value, str):
+            raise ValueError("simulation backend returned non-string observation")
+        return value
+
     def score(
         self,
         *,
@@ -146,6 +183,11 @@ class MockScoringClient:
         self, *, request: EvalRequest, samples: list[EvalSample]
     ) -> str | None:
         return None
+
+    def simulate_observation(
+        self, *, request: EvalRequest, sample: EvalSample, assistant_output: str
+    ) -> str:
+        return "Observation:"
 
     def score(
         self,
@@ -220,6 +262,18 @@ def _category_prep_payload(request: EvalRequest, samples: list[EvalSample]) -> d
         "samples": [
             {"sample_id": sample.sample_id, "prompt": sample.prompt} for sample in samples
         ],
+    }
+
+
+def _simulate_observation_payload(
+    request: EvalRequest, sample: EvalSample, assistant_output: str
+) -> dict[str, Any]:
+    return {
+        "eval_run_id": str(request.eval_run_id),
+        "sample_id": sample.sample_id,
+        "prompt": sample.prompt,
+        "messages": sample.messages,
+        "assistant_output": assistant_output,
     }
 
 

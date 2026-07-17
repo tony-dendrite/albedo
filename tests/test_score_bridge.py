@@ -83,6 +83,29 @@ def test_websocket_scorer_starts_category_prep_over_bridge(monkeypatch):
     assert calls[0]["endpoint"] == "/category-prep"
     assert calls[0]["timeout_seconds"] == 7
     assert calls[0]["payload"]["samples"] == [
-        {"sample_id": "data/train-00000.parquet:0:0", "prompt": "Prompt", "sample_index": 0}
+        {"sample_id": "data/train-00000.parquet:0:0", "prompt": "Prompt"}
     ]
 
+
+def test_websocket_scorer_simulates_observation_over_bridge(monkeypatch):
+    calls = []
+
+    def fake_request(payload, *, timeout_seconds, endpoint="/score-batch"):
+        calls.append({"payload": payload, "timeout_seconds": timeout_seconds, "endpoint": endpoint})
+        return {"observation": "Observation: ok"}
+
+    monkeypatch.setattr("albedo_eval_service.remote_scoring.score_bridge_hub.request", fake_request)
+    scorer = build_scorer(RemoteSettings(scoring_backend="websocket", scoring_timeout_seconds=7))
+    sample = EvalSample(
+        sample_id="data/train-00000.parquet:0:0",
+        prompt="Prompt",
+        messages=[{"role": "user", "content": "Prompt"}],
+    )
+
+    observation = scorer.simulate_observation(
+        request=_eval_request(), sample=sample, assistant_output="```bash\nls\n```"
+    )
+
+    assert observation == "Observation: ok"
+    assert calls[0]["endpoint"] == "/simulate-observation"
+    assert calls[0]["payload"]["assistant_output"] == "```bash\nls\n```"

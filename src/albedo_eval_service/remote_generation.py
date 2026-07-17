@@ -4,7 +4,7 @@ import multiprocessing as mp
 import os
 import queue as queue_module
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from loguru import logger
 
@@ -18,10 +18,36 @@ class GenerationResult:
     sample_id: str
     text: str
     error: str | None = None
+    turns: list[dict[str, Any]] | None = None
 
 
 class Generator(Protocol):
     def generate(self, samples: list[EvalSample]) -> list[GenerationResult]: ...
+
+
+def format_scored_trajectory(turns: list[dict[str, Any]]) -> str:
+    labels = {
+        ("assistant", True, 1): "CANDIDATE OUTPUT 1",
+        ("assistant", True, 2): "CANDIDATE OUTPUT 2",
+    }
+    assistant_index = 0
+    parts = [
+        "FULL CANDIDATE TRAJECTORY",
+        "Score ONLY CANDIDATE OUTPUT 1 and CANDIDATE OUTPUT 2. "
+        "The ENVIRONMENT OBSERVATION is context only.",
+    ]
+    for turn in turns:
+        role = str(turn.get("role") or "")
+        content = str(turn.get("content") or "").rstrip()
+        if role == "assistant" and turn.get("score_target"):
+            assistant_index += 1
+            label = labels.get((role, True, assistant_index), f"CANDIDATE OUTPUT {assistant_index}")
+        elif role == "user" and turn.get("environment_observation"):
+            label = "ENVIRONMENT OBSERVATION (context only, do not score)"
+        else:
+            label = f"CONTEXT {role.upper()} (do not score)" if role else "CONTEXT TURN (do not score)"
+        parts.append(f"\n{label}:\n------\n{content}\n------")
+    return "\n".join(parts).strip()
 
 
 class VllmProcessGenerator:

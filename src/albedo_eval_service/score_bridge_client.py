@@ -82,7 +82,7 @@ async def _handle_score_request(websocket: Any, judge_client: httpx.AsyncClient,
     try:
         if not isinstance(payload, dict):
             raise ValueError("score_request payload must be an object")
-        if endpoint not in {"/score-batch", "/category-prep"}:
+        if endpoint not in {"/score-batch", "/category-prep", "/simulate-observation"}:
             raise ValueError(f"unsupported score bridge endpoint: {endpoint}")
         response = await judge_client.post(endpoint, json=payload)
         response.raise_for_status()

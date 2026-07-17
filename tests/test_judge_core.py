@@ -7,6 +7,8 @@ from albedo_eval_service.judge_core import (
     JUDGE_MODELS,
     JUDGE_PROVIDER_PINS,
     aggregate_scores,
+    build_judge_messages,
+    build_question_messages,
     challenger_beats_king,
     judge_yes_rate,
     parse_answers,
@@ -26,6 +28,28 @@ def test_judge_panel_allows_any_fp8_provider():
     for model in JUDGE_MODELS:
         assert JUDGE_PROVIDER_PINS[model] == {"allow_fallbacks": True, "quantizations": ["fp8"]}
         assert "order" not in JUDGE_PROVIDER_PINS[model]
+
+
+def test_question_prompt_requires_two_turn_coverage():
+    prompt = build_question_messages(task="Fix bug", n=50)[0]["content"]
+
+    assert "quality of CANDIDATE OUTPUT 1" in prompt
+    assert "reaction to the" in prompt and "ENVIRONMENT OBSERVATION" in prompt
+    assert "progress from output 1 to output 2" in prompt
+    assert "no looping/repeated commands" in prompt
+    assert "grounding" in prompt
+    assert "correct SWE-agent workflow" in prompt
+
+
+def test_judge_prompt_scores_only_candidate_outputs():
+    messages = build_judge_messages(
+        response="FULL CANDIDATE TRAJECTORY\nCANDIDATE OUTPUT 1:\nls",
+        questions=[{"id": "q_01", "text": "Does it inspect?", "example_bad": "no"}],
+    )
+
+    assert "Score ONLY CANDIDATE OUTPUT 1 and CANDIDATE OUTPUT 2" in messages[0]["content"]
+    assert "ENVIRONMENT OBSERVATION" in messages[0]["content"]
+    assert "CANDIDATE TRAJECTORY" in messages[1]["content"]
 
 
 def test_parse_questions_assigns_ids_and_category():

@@ -15,6 +15,7 @@ from albedo_eval_service.remote_scoring import (
     WebSocketScoringClient,
     _category_prep_payload,
     _collect_score_batches,
+    _simulate_observation_payload,
     _score_batch_payloads,
 )
 
@@ -52,6 +53,25 @@ def test_score_batch_payload_carries_both_outputs_no_index():
     assert payloads[0]["category_prep_id"] == "prep-1"
     for entry in payloads[0]["samples"]:
         assert set(entry) == {"sample_id", "prompt", "previous_king_output", "challenger_output"}
+
+
+def test_simulate_observation_payload_carries_messages():
+    sample = EvalSample(
+        sample_id="data/train-00000.parquet:0:0",
+        prompt="formatted prompt",
+        messages=[{"role": "user", "content": "Fix it"}],
+    )
+    request = types.SimpleNamespace(eval_run_id=uuid4())
+
+    payload = _simulate_observation_payload(request, sample, "THOUGHT...\n```bash\nls\n```")
+
+    assert payload == {
+        "eval_run_id": str(request.eval_run_id),
+        "sample_id": sample.sample_id,
+        "prompt": "formatted prompt",
+        "messages": [{"role": "user", "content": "Fix it"}],
+        "assistant_output": "THOUGHT...\n```bash\nls\n```",
+    }
 
 
 def test_collect_score_batches_preserves_payload_order():

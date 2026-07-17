@@ -29,6 +29,7 @@ class JudgeSettings(BaseSettings):
     evaluator_providers: str = "z-ai,novita,siliconflow,streamlake"
     num_questions: int = 50
     question_max_tokens: int = 16000
+    simulation_max_tokens: int = 4096
     answer_max_tokens: int = 8000
     question_prep_ttl_seconds: float = 1800.0
 

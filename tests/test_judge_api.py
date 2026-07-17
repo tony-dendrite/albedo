@@ -4,11 +4,19 @@ import asyncio
 import json
 
 from albedo_eval_service.judge_api import (
+    BASE_PROMPT,
+    FORMAT_MINI_CODER,
+    FORMAT_SWE_ZERO,
     JudgeSample,
+    ObservationSimulationService,
     QuestionPrepStore,
     QuestionService,
     ScoreBatchRequest,
+    SimulateObservationRequest,
     _evaluator_provider,
+    _simulation_system_prompt,
+    _simulation_transcript,
+    _valid_simulation_output,
     _score_samples,
 )
 from albedo_eval_service.judge_config import JudgeSettings
@@ -41,6 +49,67 @@ def test_evaluator_provider_is_always_fp8():
     # no providers listed -> still fp8 + allow_fallbacks (OpenRouter fails over across fp8 providers)
     bare = _evaluator_provider(JudgeSettings(evaluator_providers=""))
     assert bare == {"allow_fallbacks": True, "quantizations": ["fp8"]}
+
+
+def test_simulation_transcript_uses_section_markers():
+    transcript = _simulation_transcript(
+        messages=[
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "task"},
+        ],
+        prompt="unused",
+        assistant_output="```bash\nls\n```",
+    )
+
+    assert transcript == "### system\nsys\n\n### user\ntask\n\n### assistant\n```bash\nls\n```"
+
+
+def test_simulation_system_prompt_selects_dataset_format():
+    swe = _simulation_system_prompt("swe-zero/data/train-00000.parquet:0:0")
+    mini = _simulation_system_prompt("mini-coder/data/train-00000.parquet:0:0")
+
+    assert BASE_PROMPT in swe and FORMAT_SWE_ZERO in swe
+    assert BASE_PROMPT in mini and FORMAT_MINI_CODER in mini
+    assert "only the FIRST block is" in swe
+    assert "Respect pipe limits exactly" in swe
+    assert "Anchor on evidence" in swe
+    assert _valid_simulation_output("Observation:", "swe-zero/x:0:0") is True
+    assert _valid_simulation_output("No observation", "swe-zero/x:0:0") is False
+    assert _valid_simulation_output(
+        "<returncode>0</returncode>\n<output>\nok\n</output>", "mini-coder/x:0:0"
+    ) is True
+    assert _valid_simulation_output("Observation: ok", "mini-coder/x:0:0") is False
+
+
+def test_observation_simulation_uses_glm_and_retries_without_observation_prefix():
+    class SimClient:
+        async def complete(self, **kwargs):
+            self.kwargs = kwargs
+            return JudgeRawResponse(
+                model=kwargs["model"], provider="fake", raw="Observation: ok"
+            )
+
+    settings = JudgeSettings(evaluator_model="z-ai/glm-5.2", simulation_max_tokens=123)
+    client = SimClient()
+    service = ObservationSimulationService(settings, client)
+    observation = asyncio.run(
+        service.simulate(
+            SimulateObservationRequest(
+                eval_run_id="run",
+                sample_id="sample",
+                prompt="task",
+                messages=[{"role": "user", "content": "task"}],
+                assistant_output="```bash\npwd\n```",
+            )
+        )
+    )
+
+    assert observation == "Observation: ok"
+    assert client.kwargs["model"] == "z-ai/glm-5.2"
+    assert client.kwargs["max_tokens"] == 123
+    assert client.kwargs["provider"]["quantizations"] == ["fp8"]
+    assert client.kwargs["accept"]("Observation: ok") is True
+    assert client.kwargs["accept"]("not an observation") is False
 
 
 def test_scoring_scores_both_sides_independently():

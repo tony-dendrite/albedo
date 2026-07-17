@@ -71,6 +71,20 @@ class ScoreBatchResponse(BaseModel):
     summary: dict[str, Any]
 
 
+class SimulateObservationRequest(BaseModel):
+    eval_run_id: str
+    sample_id: str
+    prompt: str
+    assistant_output: str
+    messages: list[dict[str, str]] | None = None
+
+
+class SimulateObservationResponse(BaseModel):
+    eval_run_id: str
+    sample_id: str
+    observation: str
+
+
 @dataclass(frozen=True)
 class QuestionPrepResult:
     questions: list[dict[str, str]]
@@ -86,6 +100,55 @@ class QuestionPrepLookup:
 
 class QuestionScoringUnavailable(RuntimeError):
     pass
+
+
+class ObservationSimulationUnavailable(RuntimeError):
+    pass
+
+
+BASE_PROMPT = """You are the ENVIRONMENT (execution harness) in a SWE-agent session. You are NOT the assistant and you must never act as the assistant.
+
+You will receive a transcript with "### system", "### user" and "### assistant" section markers.
+The transcript ends with the assistant's first message containing one command. Mentally execute
+that command against the repository state implied by the task description and reply with the
+environment's next message: the terminal output of that command.
+
+STRICT RULES:
+- Reply ONLY with the environment message in the exact format specified below — nothing else.
+- NEVER write "THOUGHT:", never write a bash command, never write "### user" or "### assistant"
+  headers, never use markdown code fences, never explain or comment. You are not solving the
+  task; you are only the terminal returning the command's output.
+- NEVER give task tips, hints, suggestions, next steps, encouragement, or any part of the
+  solution. A terminal has no opinion: it only prints what the command outputs, even if the
+  assistant is on the wrong track or asked a question.
+- Emulate realistic tool behavior: sed -i, cp, mv, mkdir, rm print nothing on success; echo
+  prints its argument; cat/sed -n print file content; grep -n prefixes matches with "NN:"
+  (context lines with "NN-"); find/ls list paths one per line; failed commands print realistic
+  error messages.
+- If the assistant message contains MORE THAN ONE bash code block, only the FIRST block is
+  executed — simulate the first command and ignore all later blocks.
+- Respect pipe limits exactly: "| head -N" outputs at most N lines, "| tail -N" the last N.
+  Count your output lines before replying.
+- Anchor on evidence: file, directory and symbol names mentioned in the task description are
+  real — build your output around them and the standard layout for the project's language.
+  When you cannot infer paths with confidence, prefer FEWER lines over invented ones; if the
+  command's filters plausibly match nothing in this project (e.g. a file extension foreign to
+  its language), the output is empty.
+"""
+
+FORMAT_SWE_ZERO = """OUTPUT FORMAT:
+- Your reply MUST begin with the literal string "Observation:" — no text may come before it.
+- After "Observation: " write exactly the stdout/stderr the command would produce — nothing else.
+- If the command would produce no output, reply with exactly "Observation:" and nothing more."""
+
+FORMAT_MINI_CODER = """OUTPUT FORMAT:
+- Your reply MUST have exactly this shape, with no text before or after:
+<returncode>RC</returncode>
+<output>
+OUTPUT
+</output>
+  where RC is the command's exit code and OUTPUT is exactly the stdout/stderr it would produce
+  (empty if the command prints nothing)."""
 
 
 def _evaluator_provider(settings: JudgeSettings) -> dict[str, Any]:
@@ -133,6 +196,38 @@ class QuestionService:
                 "n_questions": len(questions),
             },
         )
+
+
+class ObservationSimulationService:
+    def __init__(self, settings: JudgeSettings, client: OpenRouterJudgeClient):
+        self.settings = settings
+        self.client = client
+
+    async def simulate(self, request: SimulateObservationRequest) -> str:
+        response = await self.client.complete(
+            model=self.settings.evaluator_model,
+            messages=[
+                {"role": "system", "content": _simulation_system_prompt(request.sample_id)},
+                {
+                    "role": "user",
+                    "content": _simulation_transcript(
+                        messages=request.messages,
+                        prompt=request.prompt,
+                        assistant_output=request.assistant_output,
+                    ),
+                },
+            ],
+            temperature=0.0,
+            max_tokens=self.settings.simulation_max_tokens,
+            provider=_evaluator_provider(self.settings),
+            accept=lambda raw: _valid_simulation_output(raw, request.sample_id),
+        )
+        if response.error:
+            raise ObservationSimulationUnavailable(response.error)
+        observation = response.raw.strip()
+        if not _valid_simulation_output(observation, request.sample_id):
+            raise ObservationSimulationUnavailable("simulator returned invalid output format")
+        return observation
 
 
 class QuestionPrepStore:
@@ -195,6 +290,7 @@ def create_app(settings: JudgeSettings | None = None) -> FastAPI:
     async def startup() -> None:
         client = OpenRouterJudgeClient(settings)
         app.state.eval_client = client
+        app.state.observation_service = ObservationSimulationService(settings, client)
         app.state.question_service = QuestionService(settings, client)
         app.state.question_prep_store = QuestionPrepStore(settings, app.state.question_service)
 
@@ -215,6 +311,7 @@ def create_app(settings: JudgeSettings | None = None) -> FastAPI:
         if store is None:
             client = OpenRouterJudgeClient(settings)
             app.state.eval_client = client
+            app.state.observation_service = ObservationSimulationService(settings, client)
             app.state.question_service = QuestionService(settings, client)
             app.state.question_prep_store = QuestionPrepStore(settings, app.state.question_service)
         return app.state.question_prep_store
@@ -241,6 +338,18 @@ def create_app(settings: JudgeSettings | None = None) -> FastAPI:
             eval_run_id=request.eval_run_id,
             category_prep_id=prep_id,
             accepted_sample_count=len(request.samples),
+        )
+
+    @app.post("/simulate-observation", response_model=SimulateObservationResponse)
+    async def simulate_observation(
+        request: SimulateObservationRequest, _: None = Depends(require_auth)
+    ) -> SimulateObservationResponse:
+        service: ObservationSimulationService = app.state.observation_service
+        observation = await service.simulate(request)
+        return SimulateObservationResponse(
+            eval_run_id=request.eval_run_id,
+            sample_id=request.sample_id,
+            observation=observation,
         )
 
     @app.post("/score-batch", response_model=ScoreBatchResponse)
@@ -300,6 +409,42 @@ async def _questions_for(
     return await prep_store.service.prepare(sample)
 
 
+def _simulation_transcript(
+    *,
+    messages: list[dict[str, str]] | None,
+    prompt: str,
+    assistant_output: str,
+) -> str:
+    transcript_messages = messages or [{"role": "user", "content": prompt}]
+    sections = []
+    for message in transcript_messages + [{"role": "assistant", "content": assistant_output}]:
+        role = str(message.get("role") or "user").lower()
+        if role not in {"system", "user", "assistant"}:
+            role = "user"
+        sections.append(f"### {role}\n{str(message.get('content') or '').rstrip()}")
+    return "\n\n".join(sections).rstrip()
+
+
+def _simulation_system_prompt(sample_id: str) -> str:
+    return f"{BASE_PROMPT}\n{_simulation_format(sample_id)}"
+
+
+def _simulation_format(sample_id: str) -> str:
+    return FORMAT_MINI_CODER if "mini-coder" in sample_id.casefold() else FORMAT_SWE_ZERO
+
+
+def _valid_simulation_output(raw: str, sample_id: str) -> bool:
+    text = raw.strip()
+    if _simulation_format(sample_id) == FORMAT_MINI_CODER:
+        return (
+            text.startswith("<returncode>")
+            and "</returncode>" in text
+            and "<output>\n" in text
+            and text.endswith("\n</output>")
+        )
+    return text.startswith("Observation:")
+
+
 async def _judge_side(
     *,
     client: OpenRouterJudgeClient,
@@ -309,7 +454,7 @@ async def _judge_side(
     questions: list[dict[str, str]],
     judge_models: list[str],
 ) -> tuple[dict[str, dict[str, str | None]], list[dict[str, Any]]]:
-    """Score one response (king or challenger) with all judges. Returns (per_judge_answers, records)."""
+    """Score one trajectory (king or challenger) with all judges."""
     question_ids = [q["id"] for q in questions]
     schema = answer_schema(question_ids)
     messages = build_judge_messages(response=response_text, questions=questions)

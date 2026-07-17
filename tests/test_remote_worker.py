@@ -17,7 +17,11 @@ from albedo_eval_service.models import (
     ScoringConfig,
 )
 from albedo_eval_service.remote_config import RemoteSettings
-from albedo_eval_service.remote_generation import GenerationResult, _vllm_worker
+from albedo_eval_service.remote_generation import (
+    GenerationResult,
+    _vllm_worker,
+    format_scored_trajectory,
+)
 from albedo_eval_service.remote_models import ResolvedModel
 from albedo_eval_service.remote_scoring import ScoringResult
 from albedo_eval_service.remote_state import RemoteRun
@@ -88,6 +92,22 @@ def _request():
     )
 
 
+def test_scored_trajectory_marks_only_candidate_outputs():
+    text = format_scored_trajectory(
+        [
+            {"role": "user", "content": "Fix it"},
+            {"role": "assistant", "content": "first", "score_target": True},
+            {"role": "user", "content": "Observation: ok", "environment_observation": True},
+            {"role": "assistant", "content": "second", "score_target": True},
+        ]
+    )
+
+    assert "CONTEXT USER (do not score)" in text
+    assert "CANDIDATE OUTPUT 1" in text
+    assert "ENVIRONMENT OBSERVATION (context only, do not score)" in text
+    assert "CANDIDATE OUTPUT 2" in text
+
+
 def test_remote_worker_loads_parquet_and_runs_paired_generation(tmp_path, monkeypatch):
     _write_dataset(tmp_path)
     monkeypatch.setattr(
@@ -133,6 +153,9 @@ def test_remote_worker_loads_parquet_and_runs_paired_generation(tmp_path, monkey
     assert [event["batch_id"] for event in generation_events] == ["gen-0001", "gen-0002"]
     assert [event["batch_id"] for event in scoring_events] == ["score-0001", "score-0002"]
     assert {call["side"] for call in calls if "gpu_ids" in call} == {"previous_king", "challenger"}
+    generate_calls = [call for call in calls if "sample_ids" in call]
+    assert [call["side"] for call in generate_calls].count("previous_king") == 2
+    assert [call["side"] for call in generate_calls].count("challenger") == 2
 
 
 class RecordingModelResolver:
@@ -151,6 +174,10 @@ class RecordingScorer:
     def start_category_prep(self, *, request, samples):
         self.calls.append("category_prep")
         return "prep-1"
+
+    def simulate_observation(self, *, request, sample, assistant_output):
+        self.calls.append(f"simulate:{sample.sample_id}")
+        return f"Observation: saw {assistant_output[-20:]}"
 
     def score(self, *, request, samples, king_results, challenger_results, category_prep_id=None):
         self.calls.append(f"score:{category_prep_id}")
@@ -211,6 +238,7 @@ def test_remote_worker_starts_category_prep_before_model_resolution(tmp_path, mo
     ).execute(run)
 
     assert calls.index("category_prep") < calls.index("resolve:s3-or-hippius-uri/king")
+    assert any(str(call).startswith("simulate:") for call in calls)
 
 
 def test_remote_worker_rejects_overlapping_gpu_groups(tmp_path):

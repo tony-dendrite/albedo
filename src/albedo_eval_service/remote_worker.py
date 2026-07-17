@@ -16,8 +16,13 @@ from .judge_core import CHALLENGER_WIN_MARGIN, challenger_beats_king
 from .models import EvalRequest
 from .remote_artifacts import ArtifactUploader, RunArtifactSpool, build_artifact_uploader
 from .remote_config import RemoteSettings
-from .remote_dataset import EvalSample, load_swe_zero_samples
-from .remote_generation import GenerationResult, Generator, VllmProcessGenerator
+from .remote_dataset import EvalSample, format_messages, load_swe_zero_samples
+from .remote_generation import (
+    GenerationResult,
+    Generator,
+    VllmProcessGenerator,
+    format_scored_trajectory,
+)
 from .remote_models import ModelArtifactResolver, ResolvedModel
 from .remote_scoring import Scorer, build_scorer
 from .remote_state import RemoteRun
@@ -48,6 +53,13 @@ class GpuTopology:
             "challenger": self.challenger,
             "tensor_parallel_size_per_model": self.tensor_parallel_size_per_model,
         }
+
+
+@dataclass(frozen=True)
+class ObservationResult:
+    sample_id: str
+    observation: str
+    error: str | None = None
 
 
 class RemoteEvalWorker:
@@ -120,11 +132,12 @@ class RemoteEvalWorker:
             "challenger", topology.challenger, challenger_model.local_path
         )
         _cleanup_stale_vllm_resources()
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            king_future = executor.submit(king_generator.generate, samples)
-            challenger_future = executor.submit(challenger_generator.generate, samples)
-            king_results = king_future.result()
-            challenger_results = challenger_future.result()
+        king_results, challenger_results = self._generate_two_turn_trajectories(
+            request=request,
+            samples=samples,
+            king_generator=king_generator,
+            challenger_generator=challenger_generator,
+        )
 
         self._emit_generation_batches(
             run, request, samples, king_results, challenger_results, topology
@@ -268,6 +281,88 @@ class RemoteEvalWorker:
             gpu_memory_utilization=self.settings.gpu_memory_utilization,
             kv_cache_dtype=self.settings.kv_cache_dtype,
         )
+
+    def _generate_two_turn_trajectories(
+        self,
+        *,
+        request: EvalRequest,
+        samples: list[EvalSample],
+        king_generator: Generator,
+        challenger_generator: Generator,
+    ) -> tuple[list[GenerationResult], list[GenerationResult]]:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            king_future = executor.submit(king_generator.generate, samples)
+            challenger_future = executor.submit(challenger_generator.generate, samples)
+            king_first = king_future.result()
+            challenger_first = challenger_future.result()
+
+        observations = self._simulate_observations(
+            request=request,
+            samples=samples,
+            first_results={"previous_king": king_first, "challenger": challenger_first},
+        )
+        king_second_samples = _second_turn_samples(
+            samples, king_first, observations, side="previous_king"
+        )
+        challenger_second_samples = _second_turn_samples(
+            samples, challenger_first, observations, side="challenger"
+        )
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            king_future = executor.submit(king_generator.generate, king_second_samples)
+            challenger_future = executor.submit(challenger_generator.generate, challenger_second_samples)
+            king_second = king_future.result()
+            challenger_second = challenger_future.result()
+
+        return (
+            _merge_two_turn_results(
+                samples, king_first, king_second, observations, side="previous_king"
+            ),
+            _merge_two_turn_results(
+                samples, challenger_first, challenger_second, observations, side="challenger"
+            ),
+        )
+
+    def _simulate_observations(
+        self,
+        *,
+        request: EvalRequest,
+        samples: list[EvalSample],
+        first_results: dict[str, list[GenerationResult]],
+    ) -> dict[tuple[str, str], ObservationResult]:
+        sample_by_id = {sample.sample_id: sample for sample in samples}
+        jobs: list[tuple[str, EvalSample, GenerationResult]] = []
+        observations: dict[tuple[str, str], ObservationResult] = {}
+        for side, results in first_results.items():
+            for result in results:
+                key = (side, result.sample_id)
+                sample = sample_by_id.get(result.sample_id)
+                if sample is None:
+                    observations[key] = ObservationResult(
+                        result.sample_id, "", "sample_missing_for_simulation"
+                    )
+                elif result.error:
+                    observations[key] = ObservationResult(result.sample_id, "", result.error)
+                else:
+                    jobs.append((side, sample, result))
+        workers = max(1, min(self.settings.scoring_batch_concurrency, len(jobs)))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(
+                    self._scorer.simulate_observation,
+                    request=request,
+                    sample=sample,
+                    assistant_output=result.text,
+                ): (side, result.sample_id)
+                for side, sample, result in jobs
+            }
+            for future, key in futures.items():
+                try:
+                    observations[key] = ObservationResult(key[1], future.result())
+                except Exception as exc:
+                    observations[key] = ObservationResult(
+                        key[1], "", f"{type(exc).__name__}: {exc}"
+                    )
+        return observations
 
     def _effective_max_model_len(self) -> int | None:
         if self.settings.use_canonical_model_config:
@@ -525,6 +620,8 @@ class RemoteEvalWorker:
                 "prompt": sample.prompt,
                 "previous_king_output": king.text if king else "",
                 "challenger_output": challenger.text if challenger else "",
+                "previous_king_turns": king.turns if king else None,
+                "challenger_turns": challenger.turns if challenger else None,
                 "king_error": king.error if king else "missing_generation",
                 "chal_error": challenger.error if challenger else "missing_generation",
             }
@@ -615,6 +712,104 @@ def _valid_generated_pair_count(
         and not king_by_id[sample.sample_id].error
         and not challenger_by_id[sample.sample_id].error
     )
+
+
+def _second_turn_samples(
+    samples: list[EvalSample],
+    first_results: list[GenerationResult],
+    observations: dict[tuple[str, str], ObservationResult],
+    *,
+    side: str,
+) -> list[EvalSample]:
+    first_by_id = {result.sample_id: result for result in first_results}
+    out: list[EvalSample] = []
+    for sample in samples:
+        first = first_by_id.get(sample.sample_id)
+        observation = observations.get((side, sample.sample_id))
+        if first is None or first.error or observation is None or observation.error:
+            continue
+        messages = _base_messages(sample) + [
+            {"role": "assistant", "content": first.text},
+            {"role": "user", "content": observation.observation},
+        ]
+        out.append(
+            EvalSample(
+                sample_id=sample.sample_id,
+                prompt=format_messages(
+                    messages, tokenizer_path=str(_CANONICAL_TOKENIZER_PATH), enable_thinking=True
+                ),
+                target=sample.target,
+                messages=messages,
+            )
+        )
+    return out
+
+
+def _merge_two_turn_results(
+    samples: list[EvalSample],
+    first_results: list[GenerationResult],
+    second_results: list[GenerationResult],
+    observations: dict[tuple[str, str], ObservationResult],
+    *,
+    side: str,
+) -> list[GenerationResult]:
+    first_by_id = {result.sample_id: result for result in first_results}
+    second_by_id = {result.sample_id: result for result in second_results}
+    merged = []
+    for sample in samples:
+        first = first_by_id.get(sample.sample_id)
+        observation = observations.get((side, sample.sample_id))
+        second = second_by_id.get(sample.sample_id)
+        if first is None:
+            merged.append(GenerationResult(sample.sample_id, "", "missing_first_generation"))
+            continue
+        if first.error:
+            merged.append(GenerationResult(sample.sample_id, "", first.error))
+            continue
+        if observation is None or observation.error:
+            merged.append(
+                GenerationResult(
+                    sample.sample_id,
+                    "",
+                    observation.error if observation else "missing_observation",
+                )
+            )
+            continue
+        if second is None:
+            merged.append(GenerationResult(sample.sample_id, "", "missing_second_generation"))
+            continue
+        if second.error:
+            merged.append(GenerationResult(sample.sample_id, "", second.error))
+            continue
+        turns = _context_turns(sample) + [
+            {"role": "assistant", "content": first.text, "score_target": True},
+            {
+                "role": "user",
+                "content": observation.observation,
+                "environment_observation": True,
+            },
+            {"role": "assistant", "content": second.text, "score_target": True},
+        ]
+        merged.append(
+            GenerationResult(
+                sample_id=sample.sample_id,
+                text=format_scored_trajectory(turns),
+                error=None,
+                turns=turns,
+            )
+        )
+    return merged
+
+
+def _base_messages(sample: EvalSample) -> list[dict[str, str]]:
+    return list(sample.messages or [{"role": "user", "content": sample.prompt}])
+
+
+def _context_turns(sample: EvalSample) -> list[dict[str, object]]:
+    return [
+        {"role": message.get("role", "user"), "content": message.get("content", "")}
+        for message in _base_messages(sample)
+    ]
 
 
 def _cleanup_stale_vllm_resources() -> None:
