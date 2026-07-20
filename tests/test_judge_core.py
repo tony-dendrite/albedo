@@ -7,16 +7,20 @@ from albedo_eval_service.judge_core import (
     GENERIC_HYGIENE_QUESTION_LIMIT,
     JUDGE_MODELS,
     JUDGE_PROVIDER_PINS,
+    NEGATIVE_QUESTION_LIMIT,
     aggregate_scores,
     build_judge_messages,
     build_question_messages,
     challenger_beats_king,
+    is_terminal_gate_question,
     judge_yes_rate,
     parse_answers,
     parse_questions,
     question_schema,
     response_score,
     strip_reply_injection,
+    terminal_gate_failed,
+    terminal_gate_question_ids,
 )
 
 
@@ -47,8 +51,9 @@ def test_question_prompt_requires_trajectory_coverage():
 def test_question_prompt_prioritizes_observed_failure_modes():
     prompt = build_question_messages(task="Fix bug", n=50)[0]["content"]
 
-    assert "Make outcome-critical checks dominate the list" in prompt
+    assert "Make positive, outcome-critical checks dominate the list" in prompt
     assert "Do NOT reward mere activity" in prompt
+    assert "mere absence of mistakes" in prompt
     assert "command/edit correctness" in prompt
     assert "unconditional trajectory-level checks" in prompt
     assert "Do-no-harm outcome" in prompt
@@ -58,6 +63,16 @@ def test_question_prompt_prioritizes_observed_failure_modes():
     assert 'without "if the response..." wording' in prompt
     assert "repository damage" in prompt
     assert "Invented IDs, paths, symbols, or tool arguments should fail" in prompt
+    assert "do not award passive credit" in prompt
+    assert "failing to submit is a workflow failure" in prompt
+    assert "FINAL-STATE / TERMINAL-GATE checks" in prompt
+    assert "TERMINAL-GATE checks" in prompt
+    assert "roughly a quarter of the list" in prompt
+    assert "sane final state" in prompt
+    assert "Failed-command recovery" in prompt
+    assert "Lockfile/checksum safety" in prompt
+    assert "broken active trajectories" in prompt
+    assert "cannot score well by passing many narrow" in prompt
 
 
 def test_question_prompt_limits_easy_hygiene_checks():
@@ -100,6 +115,8 @@ def test_judge_prompt_is_strict_on_workflow_and_grounding_failures():
     assert "making no useful progress from the prior turn" in prompt
     assert "inventing an unseen path/ID/parameter" in prompt
     assert "continuing to explore after success" in prompt
+    assert "terminal-gate questions" in prompt
+    assert "partially correct" in prompt
 
 
 def test_parse_questions_assigns_ids_and_category():
@@ -137,6 +154,52 @@ def test_judge_yes_rate_and_response_score():
     # per-judge yes-rates 1.0 and 0.5 -> mean 0.75 across judges
     per_judge = {"j1": {"q_01": "1", "q_02": "1"}, "j2": {"q_01": "1", "q_02": "0"}}
     assert response_score(per_judge) == 0.75
+
+
+def test_terminal_gate_failure_zeros_side_score():
+    questions = [
+        {"id": "q_01", "category": "overall", "text": "Does it end with no unresolved failed command?"},
+        {"id": "q_02", "category": "overall", "text": "Does it inspect the relevant file?"},
+        {"id": "q_03", "category": "overall", "text": "Does it use a grounded path?"},
+    ]
+    answers = {"q_01": "0", "q_02": "1", "q_03": "1"}
+
+    assert terminal_gate_question_ids(questions) == ["q_01"]
+    assert terminal_gate_failed(answers, questions) is True
+    assert judge_yes_rate(answers, questions) == 0.0
+    assert response_score({"j1": answers}, questions) == 0.0
+
+
+def test_terminal_gate_pass_allows_normal_side_score():
+    questions = [
+        {"id": "q_01", "category": "overall", "text": "Does it submit after success?"},
+        {"id": "q_02", "category": "overall", "text": "Does it inspect the relevant file?"},
+        {"id": "q_03", "category": "overall", "text": "Does it use a grounded path?"},
+    ]
+    answers = {"q_01": "1", "q_02": "1", "q_03": "0"}
+
+    assert terminal_gate_failed(answers, questions) is False
+    assert judge_yes_rate(answers, questions) == round(2 / 3, 6)
+    assert response_score({"j1": answers}, questions) == round(2 / 3, 6)
+
+
+def test_terminal_gate_detection_avoids_broad_topic_matches():
+    true_gates = [
+        "Does the final state leave no unresolved failed command as the last observation?",
+        "Does the trajectory submit after success instead of continuing redundant exploration?",
+        "Does the candidate avoid hand-writing go.sum checksum hashes directly?",
+        "Does the trajectory avoid invoking forbidden interpreters or test runners per the system prompt?",
+    ]
+    false_gates = [
+        "Does the next command target a grounded file path such as validator.go?",
+        "Does the candidate operate on package-lock.json rather than editing package.json?",
+        "Does the new handler avoid invented path builders when constructing the expression?",
+        "Does the trajectory avoid prefixing the bash command with comment lines per the CONTEXT SYSTEM?",
+        "Does the trajectory check the lockfile for ESLint entries that need updating?",
+    ]
+
+    assert all(is_terminal_gate_question(text) for text in true_gates)
+    assert not any(is_terminal_gate_question(text) for text in false_gates)
 
 
 def test_challenger_win_requires_margin():
@@ -288,11 +351,42 @@ def test_parse_questions_caps_generic_hygiene_checks():
     assert texts[-4:] == task_specific
 
 
+def test_parse_questions_caps_negative_form_questions():
+    negative = [
+        "Does the trajectory avoid rerunning `ls -la` after that command already failed?",
+        "Does the candidate not invent `tests/test_cache.py` before observing that path?",
+        "Does the trajectory never hand-edit checksum files such as `go.sum`?",
+        "Does the candidate avoid submitting before the verification command succeeds?",
+        "Does the next output refrain from repeating the same `grep KeyError` search?",
+        "Does the trajectory continue without corrupting `src/cache.py` syntax?",
+        "Does the candidate avoid forbidden tools like `python` under the system prompt?",
+        "Does the final state not leave a failed `sed -i` edit unresolved?",
+    ]
+    positive = [
+        "Does the next turn use the observed KeyError to inspect `src/cache.py`?",
+        "Does the edit target the observed `CacheStore.get` method?",
+        "Does the verification command exercise the changed cache miss path?",
+        "Does the final turn submit after the verification output succeeds?",
+        "Does the first output inspect a repo path shown in the task?",
+    ]
+    raw = json.dumps(
+        {"questions": [{"text": t, "example_bad": "b"} for t in negative + positive]}
+    )
+
+    out, ok = parse_questions(raw, 20)
+    texts = [q["text"] for q in out]
+
+    assert ok is True
+    assert NEGATIVE_QUESTION_LIMIT == 8
+    assert [text for text in texts if text in negative] == negative[:NEGATIVE_QUESTION_LIMIT]
+    assert texts[-5:] == positive
+
+
 def test_question_schema_floor_does_not_force_padding():
     # Floor sits well under the evaluator's real supply of distinct checks (~25-35 per task):
     # a floor near n forces quota-padding with paraphrase/template repeats.
     schema = question_schema(50)["properties"]["questions"]
-    assert schema["minItems"] == 20 and schema["maxItems"] == 50
+    assert schema["minItems"] == 11 and schema["maxItems"] == 50
 
 
 def test_parse_questions_accepts_slightly_short_and_truncates_extra():
@@ -304,6 +398,6 @@ def test_parse_questions_accepts_slightly_short_and_truncates_extra():
     out2, ok2 = parse_questions(q51, 50)
     assert ok2 is True and len(out2) == 50                             # extra truncated to n
 
-    q19 = json.dumps({"questions": [{"text": f"q{i}", "example_bad": "b"} for i in range(19)]})
-    _, ok3 = parse_questions(q19, 50)
+    q10 = json.dumps({"questions": [{"text": f"q{i}", "example_bad": "b"} for i in range(10)]})
+    _, ok3 = parse_questions(q10, 50)
     assert ok3 is False                                            # < floor -> not ok (retry/fail)

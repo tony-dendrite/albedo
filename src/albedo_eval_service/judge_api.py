@@ -496,7 +496,7 @@ async def _judge_side(
                 "provider": raw.provider,
                 "answers": answers,
                 "explanations": explanations,
-                "yes_rate": judge_yes_rate(answers),
+                "yes_rate": judge_yes_rate(answers, questions),
                 "parse_ok": parse_ok and not raw.error,
                 "error": raw.error,
             }
@@ -561,8 +561,8 @@ async def _score_samples(
                 judge_models=request.judge_models,
             ),
         )
-        king_score = response_score(king_answers)
-        chal_score = response_score(chal_answers)
+        king_score = response_score(king_answers, questions)
+        chal_score = response_score(chal_answers, questions)
         king_ok = all(r["parse_ok"] for r in king_recs) and king_score is not None
         chal_ok = all(r["parse_ok"] for r in chal_recs) and chal_score is not None
         scored = king_ok and chal_ok

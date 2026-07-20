@@ -5,7 +5,7 @@ JUDGE_SYSTEM/USER derive from research/judge_yn (CATJUDGE_SYSTEM/USER) with one 
 the judge writes each explanation BEFORE its answer bit (prompt example + schema field order), and
 an answer may never contradict its explanation — fixes observed holistic all-0 sheets whose
 explanations said the checks passed. The QUESTION prompt is adapted from CATQ_FLAT_* to score
-next-step quality, not whole-task completion. The judge user message carries a MEASUREMENTS block 
+next-step quality, not whole-task completion. The judge user message carries a MEASUREMENTS block
 with programmatic word/character/code counts, so size questions are
 answered against computed numbers instead of the judge's own counting.
 """
@@ -20,8 +20,9 @@ from typing import Any
 
 # Crown iff (challenger_mean - king_mean) >= this, on the 0-1 absolute scale (margin-only, no LCB).
 CHALLENGER_WIN_MARGIN = 0.02
-QUESTION_FLOOR_FRACTION = 0.4
+QUESTION_FLOOR_FRACTION = 0.22
 GENERIC_HYGIENE_QUESTION_LIMIT = 3
+NEGATIVE_QUESTION_LIMIT = 8
 
 
 def question_floor(n: int) -> int:
@@ -59,19 +60,31 @@ on another file/symbol/command ("avoids editing <file A>?", "avoids editing <fil
 question are the SAME check and count as forbidden repeats — checklists that enumerate task \
 concepts through one template reward keyword-stuffing, not quality. Enforce this STRUCTURALLY \
 while you write:
-- Make outcome-critical checks dominate the list. At least half the questions should fail a \
-trajectory that makes the repository worse, uses a broken command/edit, invents state, submits too \
-early, loops, ignores an observation, or continues after success. The remaining questions may cover \
-useful investigation/progress, but only when that investigation is grounded and stage-appropriate.
-- Do NOT reward mere activity. Avoid checks that pass because the candidate "tries", "recognizes", \
-"mentions", or "keeps working" unless the same output also takes a valid grounded action that \
-improves or verifies the current repository state. A candidate that keeps probing after enough \
-evidence, rewrites unrelated files, or runs failed edits should not win credit for being busy.
+- Make positive, outcome-critical checks dominate the list. At least half the questions should ask \
+whether the trajectory DID a useful grounded thing correctly: locate the right evidence, make the \
+right edit, verify a meaningful result, react to an observation, or submit after success. A \
+candidate that merely avoids damage, avoids submitting, or keeps looking around without concrete \
+progress should not get high credit.
+- Do NOT reward mere activity or mere absence of mistakes. Avoid checks that pass because the \
+candidate "tries", "recognizes", "mentions", "keeps working", "does not edit", or "does not \
+submit" unless the same output also takes a valid grounded action that improves, verifies, or \
+correctly finishes the current repository state. A candidate that keeps probing after enough \
+evidence, rewrites unrelated files, runs failed edits, or never submits after success should not win \
+credit for being busy or passive.
+- Include many FINAL-STATE / TERMINAL-GATE checks, roughly a quarter of the list. A trajectory \
+that makes useful intermediate progress but \
+ends with an unresolved failed command/test, an unverified edit, a debug print left in source, \
+manual lockfile/checksum surgery, or no required submit after success must fail those checks. Do \
+not let earlier progress compensate for a broken final state.
+- Put the most important terminal-gate checks early: sane final state, no unresolved failed \
+commands/tests, verification after edits, required submit after success, no unsafe lockfile or \
+checksum hand-editing, no debug/temporary artifact left behind, no invented tool inputs, and \
+following the trajectory's system prompt. These are not style checks; they are core correctness.
 - Spend the list across these failure-mode families, not generic style: grounding/invented inputs, \
 command/edit correctness, system-prompt compliance, workflow stage, reaction to observations, \
 turn-to-turn progress, looping/non-redundancy, and stop-after-success. Within a family, every \
 question must probe a different ANGLE — never the same angle pointed at a different target.
-- AT MOST FIVE questions in the ENTIRE list may be negative-form ("avoids", "does not", \
+- AT MOST EIGHT questions in the ENTIRE list may be negative-form ("avoids", "does not", \
 "refrains"). Each negative question must cover its whole family by listing the items inside \
 itself — ONE question like "Does the response avoid re-running commands already executed above, \
 such as `ls -la`, `find src -type f`, or `head -50 cluster.c`?", never one question per command.
@@ -86,10 +99,11 @@ FINAL SELF-CHECK before emitting: re-read your list; wherever two questions shar
 target, or would be flipped by the same feature of a response, DELETE all but the strongest one \
 and return the shorter list.
 
-Judge the TRAJECTORY, not task completion. The response contains candidate assistant outputs in an \
-ongoing trajectory; it is NOT expected to solve or finish the task. Do NOT ask whether it fixes \
-the bug, creates the final file, or makes tests pass — at this point a good trajectory may \
-inspect, search, read, edit, or verify. Probe the quality of THESE scored outputs:
+Judge the TRAJECTORY, not an imagined final answer. The response contains candidate assistant \
+outputs in an ongoing trajectory; depending on the observed state, a good trajectory may inspect, \
+search, read, edit, verify, or submit. Ask whether THESE scored outputs follow the correct workflow \
+stage. Do not require final task completion before there is enough evidence, but if the observations \
+show the task is solved or verified, failing to submit is a workflow failure:
 - correctness — the action is valid and would do what it intends (right command/tool/edit, correct \
 syntax, sensible target).
 - grounding — it is faithful to what the conversation actually shows (real files, paths, symbols, \
@@ -133,18 +147,27 @@ OBSERVATION. Invented IDs, paths, symbols, or tool arguments should fail.
 - Command/edit correctness: ask whether commands and edits are syntactically valid for the shell, \
 target the current observed state, and are checked after they run; failed sed/patch/heredoc/edit \
 commands should fail even when the THOUGHT correctly describes the bug.
+- Failed-command recovery: ask whether observed failures are actually resolved by later outputs. A \
+trajectory should fail this check when it sees a traceback, sed error, no-such-file, zero collected \
+tests, or command-not-found output and then ends without diagnosing, correcting, or explicitly \
+accounting for that failure.
 - Workflow stage: ask whether the trajectory follows the appropriate lifecycle for the current \
 state — inspect before editing unknown code, edit only after enough evidence, verify after edits, \
-and submit/finish only after verification.
+and submit/finish after verification once success is established.
+- Lockfile/checksum safety: ask whether edits to lockfiles, checksums, generated files, or package \
+metadata are produced or verified by an appropriate tool or grounded observation; hand-written \
+hashes, integrity strings, go.sum entries, package-lock blocks, or broad dependency substitutions \
+should fail.
 - System-prompt compliance: ask whether the candidate follows the CONTEXT SYSTEM instructions for \
 this trajectory, including the required output shape, tool/command restrictions, forbidden file \
 targets, and when to submit or continue.
 - Turn-to-turn progress: ask whether each later CANDIDATE OUTPUT uses the immediately prior \
 observation to make a new useful move — narrowing the search, correcting an error, editing the \
 right target, verifying the edit, or submitting after success — instead of merely continuing.
-- Stop after success: ask whether the trajectory stops/submits once observations show the \
-requirement is satisfied, tests/checks pass, the diff is verified, or the required final signal is \
-produced, while continuing only when the task remains unresolved.
+- Stop after success: ask whether the trajectory uses the required submit/final command once \
+observations show the requirement is satisfied, tests/checks pass, or the diff is verified. A \
+candidate that never submits after success should fail this check; do not reward it for merely \
+avoiding premature submission.
 - Observation reaction: ask whether each later candidate output changes course based on the \
 immediately preceding ENVIRONMENT OBSERVATION, especially after errors, empty output, successful \
 commands, or failed commands.
@@ -153,6 +176,19 @@ Do NOT treat these as optional niceties. A fluent response with invented inputs,
 repeated action, ignored system instructions, no real progress between turns, the wrong workflow \
 stage, premature submission, repository damage, or continuing exploration after success must fail \
 several questions even if it is concise and well formatted.
+
+CRITICAL — do not award passive credit. A question should not pass a candidate merely for "not \
+doing X" unless the trajectory also demonstrates the useful positive alternative for this stage. \
+Prefer "Does the trajectory locate and use a grounded test path?" over "Does it avoid inventing a \
+test path?", and "Does the next turn materially advance after the observation?" over "Does it avoid \
+repeating the exact command?"
+
+CRITICAL — do not award high scores to broken active trajectories. A candidate that edits the \
+right file but leaves failed tests unresolved, inserts debug prints, fabricates dependency/checksum \
+data, or stops without a sane final verification/submit state should fail multiple questions even \
+if it made more visible progress than a passive candidate.
+Make this mechanically true in the checklist: include enough broad terminal-gate questions that \
+such trajectories cannot score well by passing many narrow "did some work" checks.
 
 CRITICAL — do NOT lock the checklist onto ONE imagined action. A response that takes a DIFFERENT \
 but equally reasonable next step must still be able to pass most questions. To achieve that:
@@ -252,6 +288,16 @@ an unseen path/ID/parameter, ignoring the CONTEXT SYSTEM instructions, making no
 from the prior turn, running a broken edit, moving required changes into a temporary file, \
 corrupting syntax, skipping verification after an edit, submitting before verification, or \
 continuing to explore after success must earn 0 on the relevant question.
+
+For final-state, failed-command-recovery, workflow-stage, and do-no-harm questions, earlier \
+progress does NOT satisfy the check when the trajectory ends broken. Answer 0 when the final \
+scored outputs leave an unresolved traceback/test failure, failed sed/patch/heredoc, \
+command-not-found/no-such-file dead end, debug print in source, fabricated lockfile/checksum data, \
+unverified edit, or missing submit after the observations show success.
+Treat these as terminal-gate questions: any listed unresolved terminal failure is enough for 0, \
+even when the trajectory also contains a plausible diagnosis, useful search, or partially correct \
+edit. Do not award a 1 for "progress" questions when the later output ignores a failed observation, \
+keeps looping, invents inputs, or continues instead of submitting after success.
 
 MEASUREMENTS — the user message lists counts computed PROGRAMMATICALLY from the trajectory (total \
 words, total characters, THOUGHT/prose words, code-block lines and characters). For any question \
@@ -447,6 +493,10 @@ _DUP_CHAR_MIN_LEN = 20
 _TEMPLATE_KEY_TOKENS = 5
 _TEMPLATE_MAX_PER_KEY = 2
 _CONDITIONAL_RE = re.compile(r"^\s*if\b", re.IGNORECASE)
+_NEGATIVE_QUESTION_RE = re.compile(
+    r"\b(avoid|avoids|avoided|not|never|does\s+not|do\s+not|without|refrains?)\b",
+    re.IGNORECASE,
+)
 _GENERIC_HYGIENE_RE = re.compile(
     r"\b("
     r"word|words|characters?|shorter|exceeding|less than|"
@@ -458,6 +508,26 @@ _GENERIC_HYGIENE_RE = re.compile(
     r"read-only inspection|verification step|quotes?|backslashes|regex patterns?|"
     r"plan-action match"
     r")\b",
+    re.IGNORECASE,
+)
+_TERMINAL_GATE_RE = re.compile(
+    r"("
+    r"\b(?:terminal[- ]gate|final[- ]state|sane final state|broken final state)\b|"
+    r"\b(?:final|end|ends|ending|last observed|last action|repository state|before submitting|"
+    r"before submission|after success|submit after success|stop after success)\b"
+    r".*\b(?:unresolved|failed|failure|traceback|test|sed|patch|heredoc|command-not-found|"
+    r"no-such-file|broken|syntax|debug|temporary|artifact|unverified|missing submit)\b|"
+    r"\b(?:unresolved failed|failed command|failed test|failed sed|failed patch|failed heredoc|"
+    r"traceback|command-not-found|no-such-file)\b.*\b(?:final|end|ending|last|submit)\b|"
+    r"\b(?:hand[- ](?:write|writing|edit|editing)|manual(?:ly)?(?:[- ](?:write|writing|edit|editing))?)\b"
+    r".*\b(?:lockfile|checksum|go\.sum|package-lock|yarn\.lock|integrity|hash|generated metadata|"
+    r"package metadata)\b|"
+    r"\b(?:debug print|temporary artifact|scratch script|backup file)\b.*\b(?:final|end|left|leaving)\b|"
+    r"\b(?:fabricated|invented)\b.*\b(?:checksum|hash|integrity|version string|dependency version)\b|"
+    r"\bforbidden (?:interpreter|interpreters|tool|tools|build tool|build tools|test runner|test runners)\b|"
+    r"\b(?:submit|submits|submitting|stop|stops|stopping) after success\b|"
+    r"\brequired submit\b"
+    r")",
     re.IGNORECASE,
 )
 
@@ -509,6 +579,14 @@ def _is_generic_hygiene_question(text: str) -> bool:
     return bool(_GENERIC_HYGIENE_RE.search(text))
 
 
+def _is_negative_question(text: str) -> bool:
+    return bool(_NEGATIVE_QUESTION_RE.search(text))
+
+
+def is_terminal_gate_question(text: str) -> bool:
+    return bool(_TERMINAL_GATE_RE.search(text))
+
+
 def parse_questions(raw: str, n: int) -> tuple[list[dict[str, str]], bool]:
     """Return ([{id,category,text,example_bad}], ok). ok iff >= question_floor(n) DISTINCT
     questions parsed.
@@ -524,6 +602,7 @@ def parse_questions(raw: str, n: int) -> tuple[list[dict[str, str]], bool]:
     kept_signatures: list[frozenset[str]] = []
     template_counts: dict[tuple[str, ...], int] = {}
     generic_hygiene_count = 0
+    negative_count = 0
     if isinstance(items, list):
         for item in items:
             if not isinstance(item, dict) or not str(item.get("text", "")).strip():
@@ -535,6 +614,9 @@ def parse_questions(raw: str, n: int) -> tuple[list[dict[str, str]], bool]:
             if key in seen:
                 continue
             seen.add(key)
+            is_negative = _is_negative_question(text)
+            if is_negative and negative_count >= NEGATIVE_QUESTION_LIMIT:
+                continue
             is_generic_hygiene = _is_generic_hygiene_question(text)
             if (
                 is_generic_hygiene
@@ -554,14 +636,19 @@ def parse_questions(raw: str, n: int) -> tuple[list[dict[str, str]], bool]:
             ):
                 continue
             template_counts[template] = template_counts.get(template, 0) + 1
+            if is_negative:
+                negative_count += 1
             if is_generic_hygiene:
                 generic_hygiene_count += 1
             kept_signatures.append(signature)
-            out.append({"text": text, "example_bad": str(item.get("example_bad", "")).strip()})
+            out.append({
+                "text": text,
+                "example_bad": str(item.get("example_bad", "")).strip(),
+                "category": "terminal_gate" if is_terminal_gate_question(text) else "overall",
+            })
     out = out[:n]
     for position, question in enumerate(out, start=1):
         question["id"] = f"q_{position:02d}"
-        question["category"] = "overall"
     # Accept a slightly-short set (model sometimes emits an empty item); the eval-level gate covers the rest.
     return out, len(out) >= question_floor(n)
 
@@ -591,15 +678,38 @@ def parse_answers(
 
 
 # --------------------------------------------------------------------------- scoring
-def judge_yes_rate(answers: dict[str, str | None]) -> float | None:
+def terminal_gate_question_ids(questions: list[dict[str, str]] | None) -> list[str]:
+    if not questions:
+        return []
+    return [q["id"] for q in questions if is_terminal_gate_question(q.get("text", ""))]
+
+
+def terminal_gate_failed(
+    answers: dict[str, str | None], questions: list[dict[str, str]] | None
+) -> bool:
+    gate_ids = terminal_gate_question_ids(questions)
+    return bool(gate_ids) and any(answers.get(qid) != "1" for qid in gate_ids)
+
+
+def judge_yes_rate(
+    answers: dict[str, str | None], questions: list[dict[str, str]] | None = None
+) -> float | None:
     """Mean of the 1/0 answers for one judge. None if nothing was answered."""
+    if terminal_gate_failed(answers, questions):
+        return 0.0
     bits = [_ANSWER_TO_BIT[v] for v in answers.values() if v in _ANSWER_TO_BIT]
     return round(mean(bits), 6) if bits else None
 
 
-def response_score(per_judge_answers: dict[str, dict[str, str | None]]) -> float | None:
+def response_score(
+    per_judge_answers: dict[str, dict[str, str | None]],
+    questions: list[dict[str, str]] | None = None,
+) -> float | None:
     """Per-judge yes-rate, then mean across judges. None if no judge yielded a rate."""
-    rates = [r for r in (judge_yes_rate(a) for a in per_judge_answers.values()) if r is not None]
+    rates = [
+        r for r in (judge_yes_rate(a, questions) for a in per_judge_answers.values())
+        if r is not None
+    ]
     return round(mean(rates), 6) if rates else None
 
 
