@@ -6,6 +6,35 @@ import pytest
 
 from albedo_eval_service.config import Settings
 from albedo_eval_service.dispatcher import build_eval_request
+from albedo_eval_service.models import DatasetConfig
+
+
+def _shard(source: str, rows: int):
+    return {
+        "name": f"{source}/data/train-00000.parquet",
+        "rows": rows,
+        "rows_meta": [{"iid": f"{source}-{i}", "asst": 12} for i in range(rows)],
+    }
+
+
+def test_eval_defaults_keep_64_samples_and_32_batches():
+    settings = Settings(
+        database_url="postgresql://example",
+        dataset_manifest_uri="s3://bucket/manifest.json",
+        judge_config_hash="sha256:judge",
+    )
+    dataset = DatasetConfig(
+        version="test",
+        manifest_uri="s3://bucket/manifest.json",
+        manifest_hash="sha256:manifest",
+        sample_count=settings.sample_count,
+        sample_seed="seed",
+        sampling_algo="algo",
+    )
+
+    assert settings.sample_count == 64
+    assert dataset.generation_batch_size == 32
+    assert dataset.scoring_batch_size == 32
 
 
 def test_build_eval_request_rejects_single_source_manifest(tmp_path):
@@ -49,8 +78,8 @@ def test_build_eval_request_samples_multi_source_manifest(tmp_path):
     manifest = {
         "version": "swe-zero+mini-coder-v1",
         "sources": [
-            {"name": "swe-zero", "weight": 0.7, "shards": [{"name": "swe-zero/data/train-00000.parquet", "rows": 50}], "total_rows": 50},
-            {"name": "mini-coder", "weight": 0.3, "shards": [{"name": "mini-coder/data/train-00000-of-00060.parquet", "rows": 50}], "total_rows": 50},
+            {"name": "swe-zero", "weight": 0.7, "shards": [_shard("swe-zero", 50)], "total_rows": 50},
+            {"name": "mini-coder", "weight": 0.3, "shards": [_shard("mini-coder", 50)], "total_rows": 50},
         ],
         "total_rows": 100,
     }
@@ -64,7 +93,7 @@ def test_build_eval_request_samples_multi_source_manifest(tmp_path):
         dataset_manifest_uri="s3://albedo-artifacts/datasets/swe-zero/manifest.json",
         dataset_manifest_hash=manifest_hash,
         dataset_manifest_path=str(manifest_path),
-        sample_count=10,
+        sample_count=64,
         max_turns_per_sample=2,
         judge_config_hash="sha256:judge",
     )
@@ -81,6 +110,6 @@ def test_build_eval_request_samples_multi_source_manifest(tmp_path):
         uuid4(),
     )
 
-    assert len(request.dataset.sample_ids) == 10
+    assert len(request.dataset.sample_ids) == 64
     prefixes = {sid.split("/", 1)[0] for sid in request.dataset.sample_ids}
     assert prefixes == {"swe-zero", "mini-coder"}

@@ -105,8 +105,8 @@ def test_collect_score_batches_propagates_batch_failure():
         _collect_score_batches(payloads, send, max_concurrency=2)
 
 
-def test_remote_scoring_defaults_to_128_concurrent_requests():
-    assert RemoteSettings(_env_file=None).scoring_batch_concurrency == 128
+def test_remote_scoring_defaults_to_32_concurrent_requests():
+    assert RemoteSettings(_env_file=None).scoring_batch_concurrency == 32
 
 
 def test_post_json_retries_429(monkeypatch):
