@@ -20,8 +20,12 @@ from .judge_core import (
     answer_schema,
     build_judge_messages,
     build_question_messages,
+    apply_measurement_gate,
+    candidate_turn_texts_from_merged,
+    enforce_question_labels,
     filter_reference_leaks,
     format_reference_trajectory,
+    trajectory_made_edit,
     judge_yes_rate,
     parse_answers,
     parse_questions,
@@ -203,9 +207,26 @@ class ReferenceTrajectoryService:
 
     async def generate(
         self, sample: QuestionPrepSample, *, eval_run_id: str = ""
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, bool]:
+        """Returns (reference_text, model, made_edit). A reference that never edits anchors the
+        checklist on reads (the inaction-exploit regime), so re-roll once with a longer window."""
+        reference, model, made_edit = await self._generate_once(sample, eval_run_id, extra_turns=0)
+        if not made_edit:
+            try:
+                longer = await self._generate_once(sample, eval_run_id, extra_turns=2)
+                if longer[2]:
+                    return longer
+            except QuestionScoringUnavailable:
+                pass
+        return reference, model, made_edit
+
+    async def _generate_once(
+        self, sample: QuestionPrepSample, eval_run_id: str, *, extra_turns: int
+    ) -> tuple[str, str, bool]:
         model = self._model_for(sample.sample_id)
-        turn_count = max(1, sample.assistant_turns or self.settings.sota_trajectory_turns)
+        turn_count = (
+            max(1, sample.assistant_turns or self.settings.sota_trajectory_turns) + extra_turns
+        )
         convo = [
             {"role": m.get("role", "user"), "content": m.get("content", "")}
             for m in (sample.messages or [])
@@ -258,7 +279,10 @@ class ReferenceTrajectoryService:
         reference = format_reference_trajectory(turns)
         if not reference.strip():
             raise QuestionScoringUnavailable("reference trajectory rendered empty")
-        return reference, model
+        made_edit = trajectory_made_edit(
+            [t["content"] for t in turns if t.get("score_target")]
+        )
+        return reference, model, made_edit
 
 
 class QuestionService:
@@ -280,10 +304,11 @@ class QuestionService:
     ) -> QuestionPrepResult:
         reference: str | None = None
         reference_model: str | None = None
+        reference_made_edit = False
         if self.reference_service is not None and getattr(sample, "messages", None):
             try:
-                reference, reference_model = await self.reference_service.generate(
-                    sample, eval_run_id=eval_run_id
+                reference, reference_model, reference_made_edit = (
+                    await self.reference_service.generate(sample, eval_run_id=eval_run_id)
                 )
             except Exception as exc:
                 logger.warning(
@@ -292,19 +317,22 @@ class QuestionService:
                 )
         if reference is not None:
             try:
-                return await self._prepare_once(sample, reference, reference_model)
+                return await self._prepare_once(
+                    sample, reference, reference_model, reference_made_edit
+                )
             except QuestionScoringUnavailable as exc:
                 logger.warning(
                     "anchored_questions_failed sample_id={} error={} falling_back=task_only",
                     sample.sample_id, exc,
                 )
-        return await self._prepare_once(sample, None, None)
+        return await self._prepare_once(sample, None, None, False)
 
     async def _prepare_once(
         self,
         sample: QuestionPrepSample | JudgeSample,
         reference: str | None,
         reference_model: str | None,
+        reference_made_edit: bool,
     ) -> QuestionPrepResult:
         n = self.settings.num_questions
 
@@ -312,11 +340,17 @@ class QuestionService:
             questions, ok = parse_questions(raw, n)
             if reference is not None:
                 questions = filter_reference_leaks(questions)
+                questions, _ = enforce_question_labels(
+                    questions, reference_made_edit=reference_made_edit
+                )
             return ok and len(questions) >= question_floor(n)
 
         response = await self.client.complete(
             model=self.settings.evaluator_model,
-            messages=build_question_messages(task=sample.prompt, n=n, reference=reference),
+            messages=build_question_messages(
+                task=sample.prompt, n=n, reference=reference,
+                reference_made_edit=reference_made_edit if reference is not None else None,
+            ),
             temperature=self.settings.temperature,
             max_tokens=self.settings.question_max_tokens,
             provider=_evaluator_provider(self.settings),
@@ -326,8 +360,12 @@ class QuestionService:
         if response.error:
             raise QuestionScoringUnavailable(response.error)
         questions, ok = parse_questions(response.raw, n)
+        drops: dict[str, int] = {}
         if reference is not None:
             questions = filter_reference_leaks(questions)
+            questions, drops = enforce_question_labels(
+                questions, reference_made_edit=reference_made_edit
+            )
         if not ok or len(questions) < question_floor(n):
             raise QuestionScoringUnavailable(
                 f"evaluator returned {len(questions)}/{n} well-formed questions"
@@ -337,6 +375,8 @@ class QuestionService:
             "model": self.settings.evaluator_model,
             "n_questions": len(questions),
             "question_mode": "sota_anchored" if reference is not None else "task_only",
+            "reference_made_edit": reference_made_edit if reference is not None else None,
+            "enforcement_drops": drops,
         }
         if reference_model:
             source["reference_model"] = reference_model
@@ -638,6 +678,7 @@ async def _judge_side(
     response_text: str,
     questions: list[dict[str, str]],
     judge_models: list[str],
+    reference_made_edit: bool | None = None,
 ) -> tuple[dict[str, dict[str, str | None]], list[dict[str, Any]]]:
     """Score one trajectory (king or challenger) with all judges."""
     question_ids = [q["id"] for q in questions]
@@ -658,8 +699,19 @@ async def _judge_side(
     )
     per_judge_answers: dict[str, dict[str, str | None]] = {}
     records: list[dict[str, Any]] = []
+    gate_turns = (
+        candidate_turn_texts_from_merged(response_text)
+        if reference_made_edit is not None
+        else None
+    )
     for raw, model in zip(raws, judge_models):
         answers, explanations, parse_ok = parse_answers(raw.raw, question_ids)
+        if gate_turns is not None:
+            answers = apply_measurement_gate(
+                answers, questions,
+                candidate_turn_texts=gate_turns,
+                reference_made_edit=bool(reference_made_edit),
+            )
         per_judge_answers[model] = answers
         records.append(
             {
@@ -721,16 +773,18 @@ async def _score_samples(
         if prepared.error:
             raise QuestionScoringUnavailable(prepared.error)
         questions = prepared.questions
+        gate_flag = prepared.source.get("reference_made_edit")
+        gate_flag = bool(gate_flag) if gate_flag is not None else None
         (king_answers, king_recs), (chal_answers, chal_recs) = await asyncio.gather(
             _judge_side(
                 client=client, settings=settings, side="previous_king",
                 response_text=sample.previous_king_output, questions=questions,
-                judge_models=request.judge_models,
+                judge_models=request.judge_models, reference_made_edit=gate_flag,
             ),
             _judge_side(
                 client=client, settings=settings, side="challenger",
                 response_text=sample.challenger_output, questions=questions,
-                judge_models=request.judge_models,
+                judge_models=request.judge_models, reference_made_edit=gate_flag,
             ),
         )
         king_score = response_score(king_answers, questions)

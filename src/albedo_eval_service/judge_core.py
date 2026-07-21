@@ -265,9 +265,14 @@ commands across candidate outputs, grounding, and correct SWE-agent workflow.
 For each question also give "example_bad": a short, CONCRETE example of a candidate trajectory in \
 THIS context that would earn NO on that exact question — not a generic "empty response".
 
+For each question also set "requires" — what a candidate must DO to pass it: "action" when \
+only a concrete grounded edit, a verification of one, or a justified submit can satisfy it; \
+"read" when careful reading/searching alone can satisfy it; "neutral" for size, protocol, and \
+format checks. Label honestly: mislabeled read-passable questions are dropped in post-processing.
+
 Output ONLY the questions (do NOT output your reasoning). Return STRICT JSON only, no prose, no \
 code fences:
-{{"questions":[{{"text":"...","example_bad":"..."}}]}}"""
+{{"questions":[{{"text":"...","example_bad":"...","requires":"action|read|neutral"}}]}}"""
 
 QUESTION_USER = """TASK (the conversation so far):
 ------
@@ -306,15 +311,47 @@ above still bans disguised repeats, not distinct facts. Spread the list across t
 categories (keep the output a single flat list):
   * progress milestones and convergence — roughly half the list, per the stage weighting \
 above;
-  * output economy — ~5 questions: a strong agent is compact; tie economy to concrete \
-failures (an unbounded `cat` of a large named file, re-printing file contents already shown, \
-a THOUGHT that restates the task instead of deciding). At most 3 may be bare size/word-count \
-checks, and each must state its numeric bound;
+  * output economy — the MANDATORY SIZE LADDER below plus 2-3 structural economy checks tied \
+to concrete failures (an unbounded `cat` of a large named file, re-printing file contents \
+already shown, a THOUGHT that restates the task instead of deciding);
   * grounding and correctness — ~10 questions: real paths/symbols/flags only, edits that \
 match observed file content, diagnoses consistent with observed output, reactions to error or \
 empty observations;
-  * protocol and workflow — ~5: the CONTEXT SYSTEM's response shape, forbidden tools, \
-inspect-before-edit, verify-after-edit, stop-after-success.
+  * protocol and workflow — AT MOST THREE: near-universal pass checks (response shape, \
+forbidden tools) do not discriminate; every question outside the size ladder must be failable \
+by a plausible but weak trajectory, or it is padding.
+- MANDATORY SIZE LADDER — the first FOUR questions of your list MUST be word-count rungs over \
+the candidate's own outputs, judged against the programmatic "CANDIDATE OUTPUT words" \
+measurement. Estimate the reference trajectory's total generated words (its REFERENCE STEP \
+blocks only), round UP to a clean number, and set rung 1 at roughly FIVE TIMES that (an \
+honest thorough agent may legitimately write more than the reference; only runaway verbosity \
+should fail); each further rung doubles the previous bound, so every halving of a candidate's \
+verbosity earns exactly one more YES. A compact agent like the reference passes every rung; an agent that emits thousands \
+of words of looping reasoning per turn must fail most of them. Each rung must use a clearly \
+different sentence shape and name its bound explicitly, e.g.: "Are the candidate outputs, all \
+turns combined, under roughly 900 words?" / "Do the candidate's own outputs total below about \
+1800 words?" — and each rung's example_bad names a concrete failing count (e.g. "a trajectory \
+writing ~4000 words of THOUGHT"). After the ladder, add up to TWO structural size checks: no \
+raw chain-of-thought or <think>-style deliberation outside a single decisive THOUGHT \
+paragraph; no re-quoting more than a few lines of file or observation content.
+- MANDATORY TURN-PROGRESS CORE — at least EIGHT questions must compare ADJACENT candidate \
+outputs, mined from the reference's own turn-to-turn arc (what it learned each turn, what it \
+did with that evidence next). These are the checks that separate real work from well-groomed \
+wheel-spinning, so write them concretely: does output 2 act on the specific evidence output \
+1's observation produced (name the expected evidence); does each later output change target, \
+narrow scope, or retire a hypothesis rather than re-inspect what any earlier block already \
+displayed; does the final output convert the accumulated evidence into a grounded edit, a \
+verification of one, or a stated root-cause diagnosis (name the file/symbol it should have \
+converged on); does the trajectory abandon a path once its observation shows it dead. A \
+trajectory whose turns are interchangeable — remove one and nothing is lost — must fail most \
+of these eight.
+- GRADED WORK CREDIT — include THREE requires:"action" questions that credit concrete \
+grounded work independent of the expected path, so a different-but-valid approach still earns \
+them: (a) does the trajectory make at least one syntactically valid edit to a file that \
+appears in the conversation or an observation; (b) is at least one edit followed by a \
+verification read of the changed region; (c) does the final output act on evidence produced by \
+an earlier observation rather than restarting exploration. A trajectory with zero edits must \
+fail (a) and (b).
 - "Avoids X" and do-no-harm checks MUST NOT be passable by inaction. Never write "avoids \
 editing before reading" or "avoids corrupting syntax" alone — a trajectory that never edits \
 passes those for free. Fold the protected action in: "makes a grounded edit to the implicated \
@@ -431,13 +468,15 @@ lookups whose results any earlier block already displayed is repetition and non-
 when the THOUGHT declares the command bounded, novel, or "not re-dumping" — judge the commands \
 and observations, not the narration.
 
-MEASUREMENTS — the user message lists counts computed PROGRAMMATICALLY from the trajectory (total \
-words, total characters, THOUGHT/prose words, code-block lines and characters). For any question \
-that checks the trajectory's size or length against a number, answer by comparing the relevant \
-measurement to that number — NEVER count or estimate yourself. Read "under/below/shorter \
-than/within/less than N" as measured < N, "at most N" as measured <= N, and a hedged number \
-("roughly/about N") as exactly N. Cite the measurement in the explanation (e.g. "measured 212 \
-total words, under 250").
+MEASUREMENTS — the user message lists counts computed PROGRAMMATICALLY from the trajectory. For \
+any question that checks size or length against a number, answer by comparing the relevant \
+measurement to that number — NEVER count or estimate yourself. Questions about the size of the \
+candidate's outputs, replies, THOUGHTs, or responses use the "CANDIDATE OUTPUT words" \
+measurement (the candidate's own scored blocks only); use the whole-document total only when a \
+question explicitly asks about the entire document. Read "under/below/shorter than/within/less \
+than N" as measured < N, "at most N" as measured <= N, and a hedged number ("roughly/about N") \
+as exactly N. Cite the measurement in the explanation (e.g. "measured 212 candidate-output \
+words, under 250").
 
 For "explanation", give exactly ONE sentence citing the specific part of the trajectory — quote a \
 short fragment, or name the command/flag/text from the candidate outputs or observation — that \
@@ -489,21 +528,44 @@ def measure(text: str) -> dict[str, int]:
     }
 
 
+_CANDIDATE_BLOCK_RE = re.compile(
+    r"CANDIDATE OUTPUT(?: \d+)?:\n------\n(.*?)\n------", re.DOTALL
+)
+
+
+def candidate_output_measure(text: str) -> dict[str, int]:
+    """Size of the candidate's OWN outputs inside a merged trajectory string — context and
+    observations excluded, so verbosity bounds measure the candidate, not the sample depth."""
+    blocks = _CANDIDATE_BLOCK_RE.findall(text)
+    if not blocks:
+        blocks = [text]
+    words = [len(b.split()) for b in blocks]
+    return {
+        "blocks": len(_CANDIDATE_BLOCK_RE.findall(text)),
+        "total_words": sum(words),
+        "max_words": max(words) if words else 0,
+    }
+
+
 def measurements_block(text: str) -> str:
     m = measure(text)
+    c = candidate_output_measure(text)
     return (
         "MEASUREMENTS (computed programmatically from the trajectory above — authoritative for "
         "every size or length question):\n"
-        f"- total words (everything, whitespace-separated): {m['total_words']}\n"
+        f"- CANDIDATE OUTPUT words, all scored blocks combined (use THIS for any size bound on "
+        f"the candidate's own outputs): {c['total_words']}\n"
+        f"- longest single CANDIDATE OUTPUT: {c['max_words']} words "
+        f"({c['blocks']} scored blocks)\n"
+        f"- total words of the whole document incl. context/observations: {m['total_words']}\n"
         f"- total characters: {m['total_chars']}\n"
-        f"- THOUGHT/prose words (text before the first code fence): {m['prose_words']}\n"
         f"- fenced code blocks: {m['code_blocks']} (longest: {m['code_lines']} lines, "
         f"{m['code_chars']} code characters total)\n\n"
     )
 
 
 def build_question_messages(
-    *, task: str, n: int, reference: str | None = None
+    *, task: str, n: int, reference: str | None = None, reference_made_edit: bool | None = None
 ) -> list[dict[str, str]]:
     """Question-writer messages; with a SOTA `reference` trajectory the checklist is anchored
     on its concrete milestones (see ANCHORED_QUESTION_BLOCK)."""
@@ -512,9 +574,25 @@ def build_question_messages(
             {"role": "system", "content": QUESTION_SYSTEM.format(n=n, floor=question_floor(n))},
             {"role": "user", "content": QUESTION_USER.format(task=task.rstrip(), n=n)},
         ]
+    edit_status = ""
+    if reference_made_edit is True:
+        edit_status = (
+            "\n\nREFERENCE EDIT STATUS: the reference DID make a concrete edit within its "
+            "window — an edit is reachable from here. At least EIGHT questions must be "
+            "requires:\"action\" checks targeting its edit/verification milestones, and a "
+            "trajectory that only reads must fail them."
+        )
+    elif reference_made_edit is False:
+        edit_status = (
+            "\n\nREFERENCE EDIT STATUS: the reference made NO edit within its window. Do NOT "
+            "emit completed-edit or submit questions (nobody can pass them here). Anchor the "
+            "action share on CONVERGENCE instead: by the final output the trajectory must state "
+            "the located fault/root cause or the concrete next edit target, and label those "
+            "questions requires:\"action\"."
+        )
     system = (QUESTION_SYSTEM + "\n\n" + ANCHORED_QUESTION_BLOCK).format(
         n=n, floor=question_floor(n)
-    )
+    ) + edit_status
     user = ANCHORED_QUESTION_USER.format(task=task.rstrip(), reference=reference.rstrip(), n=n)
     return [
         {"role": "system", "content": system},
@@ -539,6 +617,109 @@ def filter_reference_leaks(questions: list[dict[str, str]]) -> list[dict[str, st
     """Drop the rare question that reveals the reference as shared history; judges could never
     verify it and it leaks the anchoring mechanism."""
     return [q for q in questions if "the reference" not in q["text"].casefold()]
+
+
+# ------------------------------------------------------------------ mechanical question gates
+_EDIT_COMMAND_RE = re.compile(
+    r"sed\s+-i|>\s*[\w./]|>>\s*[\w./]|tee\s+[\w./-]|cat\s*>|str_replace|git apply|patch\s+-p"
+    r"|applypatch|cp\s+[\w./-]+\s+[\w./-]+|mv\s+[\w./-]+\s+[\w./-]+",
+)
+_SUBMIT_RE = re.compile(r"COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT")
+_UNFOLDED_AVOID_RE = re.compile(
+    r"^\s*(?:does[^?]{0,60}\bavoid|is[^?]{0,60}\bfree of|does[^?]{0,60}\brefrain)", re.IGNORECASE
+)
+_ACTION_VERB_RE = re.compile(r"\b(edit|modif|submit|propagat|verif|appl|patch|chang|fix)\w*\b", re.IGNORECASE)
+_COMPLETED_WORK_RE = re.compile(
+    r"\b(submit|final output|after the edit|the edit .{0,30}(applied|made|verified))\b", re.IGNORECASE
+)
+READ_ONLY_QUESTION_CAP = 5
+
+
+def candidate_turn_texts_from_merged(text: str) -> list[str]:
+    """Extract the candidate's own scored blocks from a merged trajectory string."""
+    return _CANDIDATE_BLOCK_RE.findall(text or "")
+
+
+def trajectory_made_edit(turn_texts: list[str]) -> bool:
+    """True when any scored turn contains a state-changing command (regex heuristic)."""
+    return any(_EDIT_COMMAND_RE.search(text or "") for text in turn_texts)
+
+
+def enforce_question_labels(
+    questions: list[dict[str, str]], *, reference_made_edit: bool
+) -> tuple[list[dict[str, str]], dict[str, int]]:
+    """Parse-time enforcement of the anchoring rules (prose rules alone get ignored):
+    cap read-only-passable questions, reject un-folded "avoids X" checks that inaction sweeps,
+    and drop completed-edit/submit dead weight when the reference never edited in its window.
+    Returns (kept, drop_counts). Question ids are reassigned by the caller via parse order."""
+    kept: list[dict[str, str]] = []
+    drops = {"read_cap": 0, "unfolded_avoid": 0, "no_edit_dead_weight": 0}
+    read_kept = 0
+    for question in questions:
+        text = question.get("text", "")
+        requires = question.get("requires") or "neutral"
+        if requires not in ("action", "read", "neutral"):
+            requires = "neutral"
+        is_size = is_measurement_bound_question(text)
+        if not is_size and _UNFOLDED_AVOID_RE.search(text) and not _ACTION_VERB_RE.search(text):
+            drops["unfolded_avoid"] += 1
+            continue
+        if not reference_made_edit and requires == "action" and _COMPLETED_WORK_RE.search(text):
+            drops["no_edit_dead_weight"] += 1
+            continue
+        if requires == "read" and not is_size:
+            if read_kept >= READ_ONLY_QUESTION_CAP:
+                drops["read_cap"] += 1
+                continue
+            read_kept += 1
+        question["requires"] = requires
+        kept.append(question)
+    for position, question in enumerate(kept, start=1):
+        question["id"] = f"q_{position:02d}"
+    return kept, drops
+
+
+def apply_measurement_gate(
+    answers: dict[str, str | None],
+    questions: list[dict[str, str]],
+    *,
+    candidate_turn_texts: list[str],
+    reference_made_edit: bool,
+) -> dict[str, str | None]:
+    """Deterministic per-candidate gate, applied to one judge's answer sheet:
+    - A candidate that made NO edit has inaction-conditional do-no-harm questions REMOVED from
+      its denominator (dropping, never awarding: inaction is the adversary, a free 1 rewards it).
+    - When the reference proved an edit was reachable, the candidate made no edit, and its final
+      turn is still a read, all `requires: action` and progress-category questions are forced to
+      0 — well-groomed exploration must not out-score imperfect work."""
+    made_edit = trajectory_made_edit(candidate_turn_texts)
+    if made_edit:
+        return answers
+    final_is_read = bool(candidate_turn_texts) and not (
+        _EDIT_COMMAND_RE.search(candidate_turn_texts[-1] or "")
+        or _SUBMIT_RE.search(candidate_turn_texts[-1] or "")
+    )
+    gated = dict(answers)
+    for question in questions:
+        qid = question.get("id")
+        if qid not in gated:
+            continue
+        text = question.get("text", "")
+        if (
+            question.get("requires") == "neutral"
+            and not is_measurement_bound_question(text)
+            and _NEGATIVE_QUESTION_RE.search(text)
+            and _ACTION_VERB_RE.search(text)
+        ):
+            gated.pop(qid)  # e.g. "no failed edit", "no premature submit" — unverifiable here
+            continue
+        if (
+            reference_made_edit
+            and final_is_read
+            and (question.get("requires") == "action" or question.get("category") == "progress")
+        ):
+            gated[qid] = "0"
+    return gated
 
 
 def build_judge_messages(*, response: str, questions: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -573,8 +754,15 @@ def question_schema(n: int) -> dict[str, Any]:
                 "maxItems": n,
                 "items": {
                     "type": "object",
-                    "properties": {"text": {"type": "string"}, "example_bad": {"type": "string"}},
-                    "required": ["text", "example_bad"],
+                    "properties": {
+                        "text": {"type": "string"},
+                        "example_bad": {"type": "string"},
+                        # What a candidate must DO to pass: "action" = only a concrete
+                        # edit/verify/justified-submit passes; "read" = passable by
+                        # reading/searching alone; "neutral" = size/protocol/format.
+                        "requires": {"type": "string", "enum": ["action", "read", "neutral"]},
+                    },
+                    "required": ["text", "example_bad", "requires"],
                     "additionalProperties": False,
                 },
             }
@@ -796,6 +984,18 @@ def _is_generic_hygiene_question(text: str) -> bool:
     return bool(_GENERIC_HYGIENE_RE.search(text))
 
 
+_MEASUREMENT_BOUND_RE = re.compile(
+    r"\b\d{2,6}\b[^?]{0,40}\b(?:words?|characters?|sentences?|lines)\b"
+    r"|\b(?:words?|characters?|sentences?|lines)\b[^?]{0,40}\b\d{2,6}\b",
+    re.IGNORECASE,
+)
+MEASUREMENT_QUESTION_LIMIT = 7
+
+
+def is_measurement_bound_question(text: str) -> bool:
+    return bool(_MEASUREMENT_BOUND_RE.search(text))
+
+
 def _is_negative_question(text: str) -> bool:
     return bool(_NEGATIVE_QUESTION_RE.search(text))
 
@@ -837,6 +1037,7 @@ def parse_questions(raw: str, n: int) -> tuple[list[dict[str, str]], bool]:
     template_counts: dict[tuple[str, ...], int] = {}
     generic_hygiene_count = 0
     negative_count = 0
+    measurement_count = 0
     if isinstance(items, list):
         for item in items:
             if not isinstance(item, dict) or not str(item.get("text", "")).strip():
@@ -848,6 +1049,18 @@ def parse_questions(raw: str, n: int) -> tuple[list[dict[str, str]], bool]:
             if key in seen:
                 continue
             seen.add(key)
+            if is_measurement_bound_question(text):
+                if measurement_count >= MEASUREMENT_QUESTION_LIMIT:
+                    continue
+                measurement_count += 1
+                kept_signatures.append(_question_signature(text))
+                out.append({
+                    "text": text,
+                    "example_bad": str(item.get("example_bad", "")).strip(),
+                    "category": "size",
+                    "requires": str(item.get("requires", "neutral")),
+                })
+                continue
             is_negative = _is_negative_question(text)
             if is_negative and negative_count >= NEGATIVE_QUESTION_LIMIT:
                 continue
@@ -879,6 +1092,7 @@ def parse_questions(raw: str, n: int) -> tuple[list[dict[str, str]], bool]:
                 "text": text,
                 "example_bad": str(item.get("example_bad", "")).strip(),
                 "category": classify_question_category(text),
+                "requires": str(item.get("requires", "neutral")),
             })
     out = out[:n]
     for position, question in enumerate(out, start=1):
@@ -912,12 +1126,50 @@ def parse_answers(
 
 
 # --------------------------------------------------------------------------- scoring
+import os as _os
+
+REQUIRES_WEIGHTS = {
+    "action": float(_os.environ.get("ALBEDO_EXP_W_ACTION", "2.0")),
+    "read": float(_os.environ.get("ALBEDO_EXP_W_READ", "0.75")),
+    "neutral": float(_os.environ.get("ALBEDO_EXP_W_NEUTRAL", "0.25")),
+}
+# Size compliance is a MULTIPLIER, not votes: a verbose model that brushes every milestone via
+# sheer output volume must not out-vote the ladder (observed: 16k-word king passes 64% of
+# action checks). floor 0.6 keeps the factor from dominating honest thoroughness.
+SIZE_FACTOR_FLOOR = float(_os.environ.get("ALBEDO_EXP_SIZE_FLOOR", "0.6"))
+
+
 def judge_yes_rate(
     answers: dict[str, str | None], questions: list[dict[str, str]] | None = None
 ) -> float | None:
-    """Mean of 1/0 answers."""
-    values = list(answers.values())
-    bits = [_ANSWER_TO_BIT[v] for v in values if v in _ANSWER_TO_BIT]
+    """Weighted mean of 1/0 answers: action-requiring checks count 1.5x, read 1.0x, neutral
+    (size/protocol) 0.5x — real work separates candidates; freebies must not compress them.
+    Without question metadata (or without labels) this reduces to the plain mean."""
+    if questions:
+        size_ids = {q.get("id") for q in questions if q.get("category") == "size"}
+        weight_by_id = {
+            q.get("id"): REQUIRES_WEIGHTS.get(q.get("requires", "neutral"), 1.0)
+            for q in questions
+        }
+        num = den = 0.0
+        size_num = size_den = 0.0
+        for qid, value in answers.items():
+            if value not in _ANSWER_TO_BIT:
+                continue
+            if qid in size_ids:
+                size_num += _ANSWER_TO_BIT[value]
+                size_den += 1
+                continue
+            w = weight_by_id.get(qid, 1.0)
+            num += w * _ANSWER_TO_BIT[value]
+            den += w
+        if not den:
+            return None
+        rate = num / den
+        if size_den:
+            rate *= SIZE_FACTOR_FLOOR + (1 - SIZE_FACTOR_FLOOR) * (size_num / size_den)
+        return round(rate, 6)
+    bits = [_ANSWER_TO_BIT[v] for v in answers.values() if v in _ANSWER_TO_BIT]
     return round(mean(bits), 6) if bits else None
 
 
