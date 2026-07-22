@@ -37,6 +37,8 @@ class SanityRemoteSettings(BaseSettings):
     vllm_moe_backend: str = ""
     vllm_compile_cache_dir: str = ""
     tensor_parallel_size: int = 2  # GPU_IDS must list exactly this many indices
+    data_parallel_size: int = 1
+    data_parallel_size_local: int = 0
     cpu_offload_gb: int = 0  # GB to spill to CPU RAM; 2x5090 BF16 needs ~6 for the 67 GB model
     # Outer ceiling on a cold model fetch. Must stay above the supervised-download worst case
     # (config_validation.storage._supervise: Hippius 1200s x 2 = 2400s) so the stall watchdog —

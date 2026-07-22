@@ -571,7 +571,7 @@ async def _append_observations(
         state.prompt = format_messages(
             state.messages,
             tokenizer_path=str(_CANONICAL_TOKENIZER_PATH),
-            enable_thinking=False,
+            enable_thinking=True,
         )
     logger.info(
         "[sanity-dispatch] simulated observations turn={} samples={}",

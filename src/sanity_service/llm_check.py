@@ -10,8 +10,7 @@ from enum import StrEnum
 
 from loguru import logger
 
-from albedo_eval_service.judge_core import JUDGE_MODELS
-from sanity_service.judge_panel import query_panel
+from sanity_service.judge_panel import SANITY_DEFAULT_JUDGE_MODELS, query_panel
 from sanity_service.rubric import (
     INJECTION_SYSTEM,
     VIABILITY_SYSTEM,
@@ -42,13 +41,13 @@ def _short(value: str | None, limit: int) -> str:
 
 
 def _resolve_models(override: tuple[str, ...] | None) -> tuple[str, ...]:
-    # Returns override if given; reads SANITY_JUDGE_MODELS from env next; falls back to eval defaults.
+    # Returns override if given; reads SANITY_JUDGE_MODELS from env next; falls back to GLM only.
     if override:
         return override
     env = os.environ.get("SANITY_JUDGE_MODELS", "").strip()
     if env:
         return tuple(m.strip() for m in env.split(",") if m.strip())
-    return JUDGE_MODELS
+    return SANITY_DEFAULT_JUDGE_MODELS
 
 
 def _response_for_gate(response: str) -> str:
@@ -111,7 +110,13 @@ class GateResult:
 # ── Probes ────────────────────────────────────────────────────────────────────
 
 
-async def _injection_probe(client, prompt: str, response: str, models: tuple[str, ...] = JUDGE_MODELS, temperature: float | None = None) -> tuple[bool | None, list[JudgeVote]]:
+async def _injection_probe(
+    client,
+    prompt: str,
+    response: str,
+    models: tuple[str, ...] = SANITY_DEFAULT_JUDGE_MODELS,
+    temperature: float | None = None,
+) -> tuple[bool | None, list[JudgeVote]]:
     # Returns (suspected, votes); suspected is None when too few judges resolved (treat as infra).
     raws = await query_panel(client, INJECTION_SYSTEM, build_injection_user(prompt, response), models, temperature=temperature)
     votes: list[JudgeVote] = []
@@ -144,7 +149,13 @@ async def _injection_probe(client, prompt: str, response: str, models: tuple[str
     return any(v.injection for v in resolved), votes
 
 
-async def _viability_probe(client, prompt: str, response: str, consensus: bool, models: tuple[str, ...] = JUDGE_MODELS) -> tuple[bool | None, str, list[JudgeVote]]:
+async def _viability_probe(
+    client,
+    prompt: str,
+    response: str,
+    consensus: bool,
+    models: tuple[str, ...] = SANITY_DEFAULT_JUDGE_MODELS,
+) -> tuple[bool | None, str, list[JudgeVote]]:
     # Returns (passed, reason, votes); passed is None when too few judges resolved (treat as infra).
     raws = await query_panel(client, VIABILITY_SYSTEM, build_viability_user(prompt, response), models)
     votes: list[JudgeVote] = []
@@ -183,7 +194,13 @@ async def _viability_probe(client, prompt: str, response: str, consensus: bool, 
     return False, f"not viable: {nay}".strip()[:200], votes
 
 
-async def _judge_sample(s: SampleInput, client, consensus: bool, skip_viability: bool = False, models: tuple[str, ...] = JUDGE_MODELS,) -> SampleVerdict:
+async def _judge_sample(
+    s: SampleInput,
+    client,
+    consensus: bool,
+    skip_viability: bool = False,
+    models: tuple[str, ...] = SANITY_DEFAULT_JUDGE_MODELS,
+) -> SampleVerdict:
     # Runs the per-sample flow: heuristics -> injection (+re-check) -> viability.
     excerpt = (s.prompt or "")[:60]
     if not s.heuristic_passed:

@@ -153,27 +153,27 @@ def test_sanity_trajectory_formatter_scores_candidate_turns_only():
     assert "ENVIRONMENT OBSERVATION (context only, do not score)" in text
 
 
-def test_pre_eval_worker_formats_messages_with_non_thinking_template(monkeypatch):
+def test_pre_eval_worker_formats_messages_with_thinking_template(monkeypatch):
     captured = {}
 
     def _fake_format_messages(messages, **kwargs):
         captured["messages"] = messages
         captured["kwargs"] = kwargs
-        return "non-thinking prompt"
+        return "thinking prompt"
 
     monkeypatch.setattr(sanity_worker, "format_messages", _fake_format_messages)
 
     prompts = _format_prompt_messages("/models/qwen", [[{"role": "user", "content": "Fix it."}]])
 
-    assert prompts == ["non-thinking prompt"]
+    assert prompts == ["thinking prompt"]
     assert captured["messages"] == [{"role": "user", "content": "Fix it."}]
     assert captured["kwargs"] == {
         "tokenizer_path": "/models/qwen",
-        "enable_thinking": False,
+        "enable_thinking": True,
     }
 
 
-def test_trajectory_followup_prompt_uses_non_thinking_template(monkeypatch):
+def test_trajectory_followup_prompt_uses_thinking_template(monkeypatch):
     captured = {}
 
     class _Client:
@@ -205,7 +205,7 @@ def test_trajectory_followup_prompt_uses_non_thinking_template(monkeypatch):
     assert state.prompt == "next-turn prompt"
     assert captured["closed"] is True
     assert captured["messages"][-1] == {"role": "user", "content": "Observation: src/app.py"}
-    assert captured["kwargs"]["enable_thinking"] is False
+    assert captured["kwargs"]["enable_thinking"] is True
 
 
 def test_trajectory_no_command_gets_observation_without_simulator(monkeypatch):
@@ -314,9 +314,7 @@ def test_heuristics_empty_vllm_still_fails():
     assert all(v["reason"] == "empty response" for v in out)
 
 
-def test_run_prompts_falls_back_to_raw_on_unclosed_think(monkeypatch):
-    # When vLLM returns an unclosed <think> block, _strip_thinking returns "".
-    # The `or raw` fallback must return the raw string so heuristics see real content.
+def test_run_prompts_does_not_leak_unclosed_think(monkeypatch):
     class _Response:
         status_code = 200
 
@@ -353,8 +351,49 @@ def test_run_prompts_falls_back_to_raw_on_unclosed_think(monkeypatch):
     )()
 
     out = asyncio.run(engine._run_prompts("model-name", ["prompt"], 77))
-    # Must return the raw string, not an empty string.
-    assert out == [_CURSED_RAW]
+    assert out == [""]
+
+
+def test_run_prompts_strips_qwen_thinking_tail(monkeypatch):
+    raw = "Thinking Process: choose ls\n</think>\n\n```bash\nls -la\n```"
+
+    class _Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"choices": [{"text": raw, "finish_reason": "stop"}]}
+
+    class _Client:
+        def __init__(self, *, timeout):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, json):
+            return _Response()
+
+    monkeypatch.setattr("sanity_remote.worker.httpx.AsyncClient", _Client)
+    engine = VllmEngine.__new__(VllmEngine)
+    engine._s = type(
+        "Settings",
+        (),
+        {
+            "vllm_port": 1234,
+            "gen_temperature": 0.7,
+            "gen_top_p": 0.8,
+            "gen_top_k": 20,
+            "gen_min_p": 0.0,
+            "gen_read_timeout_s": 300.0,
+        },
+    )()
+
+    out = asyncio.run(engine._run_prompts("model-name", ["prompt"], 77))
+    assert out == ["```bash\nls -la\n```"]
 
 
 def test_run_prompts_uses_raw_completions(monkeypatch):

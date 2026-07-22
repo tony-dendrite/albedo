@@ -58,13 +58,13 @@ def _warn_if_generation_budget_consumes_context(
 
 
 def _strip_thinking(text: str) -> str:
-    # Removes <think>...</think> so heuristics evaluate the answer, not CoT reasoning.
-    # Returns "" if thinking started but never closed - the model hit its token ceiling mid-thought.
-    if "<think>" not in text:
-        return text
-    if "</think>" not in text:
+    # Qwen may return only the tail of its thinking block (content + </think> + answer).
+    # Keep only the answer after the final close tag so CoT never reaches gates/artifacts.
+    if "</think>" in text:
+        return text.rsplit("</think>", 1)[1].strip()
+    if "<think>" in text:
         return ""
-    return _THINK_RE.sub("", text).strip()
+    return text
 
 
 def _has_bash_command(text: str) -> bool:
@@ -96,7 +96,7 @@ def _strip_model_config(model_dir: str) -> None:
 
 def _format_prompt_messages(tokenizer_path: str, prompt_messages: list[list[dict[str, str]]]) -> list[str]:
     return [
-        format_messages(messages, tokenizer_path=tokenizer_path, enable_thinking=False)
+        format_messages(messages, tokenizer_path=tokenizer_path, enable_thinking=True)
         for messages in prompt_messages
     ]
 
@@ -353,6 +353,13 @@ class VllmEngine:
         ]
         if self._s.tensor_parallel_size > 1:
             cmd += ["--tensor-parallel-size", str(self._s.tensor_parallel_size)]
+        if self._s.data_parallel_size > 1:
+            cmd += ["--data-parallel-size", str(self._s.data_parallel_size)]
+            if self._s.data_parallel_size_local > 0:
+                cmd += [
+                    "--data-parallel-size-local",
+                    str(self._s.data_parallel_size_local),
+                ]
         if self._s.vllm_limit_mm:
             cmd += ["--limit-mm-per-prompt", self._s.vllm_limit_mm]
         if self._s.cpu_offload_gb > 0:
@@ -450,11 +457,11 @@ class VllmEngine:
                 choice = r.json()["choices"][0]
                 raw = choice["text"] or ""
                 finish = choice.get("finish_reason", "unknown")
-                answer = _strip_thinking(raw) or raw
+                answer = _strip_thinking(raw)
                 logger.info(
                     "[sanity-remote] prompt finish={} thinking={} answer_words={}",
                     finish,
-                    "<think>" in raw,
+                    "<think>" in raw or "</think>" in raw,
                     len(answer.split()),
                 )
                 return answer

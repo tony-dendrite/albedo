@@ -39,7 +39,7 @@ class _FakeJudge:
     async def complete(self, *, model, messages, temperature=None):
         if "security auditor" in messages[0]["content"]:
             self._n += 1
-            flag = self._inj2 if self._n > 3 else self._inj1
+            flag = self._inj2 if temperature is not None else self._inj1
             raw = (
                 '{"injection": true, "evidence": "x"}'
                 if flag
