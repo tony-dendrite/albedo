@@ -27,8 +27,8 @@ class JudgeSettings(BaseSettings):
     min_valid_fraction: float = 0.8
     evaluator_model: str = "z-ai/glm-5.2"
     evaluator_providers: str = "z-ai,novita,siliconflow,streamlake"
-    sota_models: str = "z-ai/glm-5.2"
-    sota_max_tokens: int = 4096
+    sota_models: str = "openai/gpt-5.6-luna,xiaomi/mimo-v2.5-pro,z-ai/glm-5.2"
+    sota_max_tokens: int = 8192
     sota_trajectory_turns: int = 8
     num_questions: int = 50
     question_max_tokens: int = 16000

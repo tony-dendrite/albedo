@@ -34,7 +34,7 @@ class RemoteSettings(BaseSettings):
     challenger_model: str | None = None
     previous_king_gpu_ids: str = "0,1,2,3"
     challenger_gpu_ids: str = "4,5,6,7"
-    max_new_tokens: int = 32768
+    max_new_tokens: int = 8192
     generation_result_timeout_seconds: float = 900.0
     trajectory_assistant_turns: int = 8
     temperature: float = 0.0
@@ -73,7 +73,7 @@ class RemoteSettings(BaseSettings):
     scoring_base_url: str | None = None
     scoring_auth_token: str = ""
     scoring_timeout_seconds: float = 1800.0
-    scoring_batch_concurrency: int = 32
+    scoring_batch_concurrency: int = 128
     scoring_retry_count: int = 5
     scoring_retry_backoff_seconds: float = 1.5
     scoring_min_valid_fraction: float = 0.8

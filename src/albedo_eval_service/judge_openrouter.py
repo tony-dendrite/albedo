@@ -173,6 +173,9 @@ class OpenRouterJudgeClient:
             "reasoning": {"enabled": False, "exclude": True},
             "provider": {**provider_block, "require_parameters": True},
         }
+        if model.startswith("openai/"):
+            del payload["temperature"]
+            payload["provider"] = dict(provider_block)
         # Force JSON whenever a schema is given; require_parameters routes only to providers that honor it.
         if response_schema is not None:
             payload["response_format"] = {

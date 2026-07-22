@@ -238,7 +238,9 @@ class ReferenceTrajectoryService:
                 messages=convo,
                 temperature=0.0,
                 max_tokens=self.settings.sota_max_tokens,
-                provider=_evaluator_provider(self.settings),
+                provider=_evaluator_provider(self.settings)
+                if model == self.settings.evaluator_model
+                else None,
                 accept=lambda raw: bool(raw.strip()),
             )
             if response.error or not response.raw.strip():

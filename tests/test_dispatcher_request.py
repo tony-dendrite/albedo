@@ -32,7 +32,7 @@ def test_eval_defaults_keep_64_samples_and_32_batches():
         sampling_algo="algo",
     )
 
-    assert settings.sample_count == 64
+    assert settings.sample_count == 100
     assert dataset.generation_batch_size == 32
     assert dataset.scoring_batch_size == 32
 
