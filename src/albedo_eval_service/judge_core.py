@@ -18,8 +18,8 @@ from difflib import SequenceMatcher
 from statistics import mean
 from typing import Any
 
-# Crown iff (challenger_mean - king_mean) >= this, on the 0-1 absolute scale (margin-only, no LCB).
-CHALLENGER_WIN_MARGIN = 0.02
+# Crown iff (challenger_mean - king_mean) >= this, on the 0-1 absolute scale
+CHALLENGER_WIN_MARGIN = 0.03
 QUESTION_FLOOR_FRACTION = 0.22
 GENERIC_HYGIENE_QUESTION_LIMIT = 3
 NEGATIVE_QUESTION_LIMIT = 8

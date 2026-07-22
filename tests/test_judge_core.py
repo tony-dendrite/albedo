@@ -237,9 +237,9 @@ def test_unbounded_submit_questions_are_diagnostic_only():
 
 
 def test_challenger_win_requires_margin():
-    assert CHALLENGER_WIN_MARGIN == 0.02
-    assert challenger_beats_king(0.32, 0.30) is True   # 0.02 >= 0.02
-    assert challenger_beats_king(0.31, 0.30) is False  # 0.01 < 0.02
+    assert CHALLENGER_WIN_MARGIN == 0.03
+    assert challenger_beats_king(0.34, 0.30) is True
+    assert challenger_beats_king(0.32, 0.30) is False
 
 
 def test_strip_reply_injection_removes_fake_verdict_payloads():
