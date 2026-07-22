@@ -4,6 +4,7 @@ const path = require("path");
 function loadEnv() {
   const envPath = path.resolve(__dirname, "..", ".env");
   const env = { ...process.env };
+  delete env.SANITY_REMOTE_MAX_MODEL_LEN;
   if (!fs.existsSync(envPath)) return env;
   for (const line of fs.readFileSync(envPath, "utf8").split(/\r?\n/)) {
     const trimmed = line.trim();
@@ -25,8 +26,8 @@ module.exports = {
     {
       name: env.SANITY_REMOTE_PM2_NAME || "albedo-sanity-remote-api",
       cwd: path.resolve(__dirname, ".."),
-      script: env.SANITY_REMOTE_UV_PATH || "uv",
-      args: "run sanity-remote",
+      script: env.SANITY_REMOTE_PYTHON_PATH || ".venv/bin/python",
+      args: "-m sanity_remote.api",
       autorestart: true,
       env,
     },

@@ -1,5 +1,5 @@
 [
-  "What does this Python function do?\n\ndef double(x):\n    return x * 2",
-  "Complete this function:\n\ndef add(a, b):\n    ",
-  "What is wrong with this code?\n\nprint(x[5])  # x is not defined"
+  "Task: Inspect the repository and identify where the function `double(x)` is defined. Start by listing the project files.",
+  "Task: Complete the unfinished `add(a, b)` implementation in the repository. Inspect the relevant files before editing.",
+  "Task: Diagnose the failing code path that references `x[5]` before `x` is defined. Inspect the repository before proposing a fix."
 ]

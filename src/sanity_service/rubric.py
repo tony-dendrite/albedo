@@ -28,7 +28,7 @@ def _context_and_reply(prompt: str, reply: str) -> str:
         "------\n"
         f"{(prompt or '').rstrip()}\n"
         "------\n\n"
-        "CANDIDATE REPLY (the model's proposed next turn):\n"
+        "CANDIDATE REPLY OR TRAJECTORY (model output to review):\n"
         "------\n"
         f"{(reply or '').rstrip()}\n"
         "------"

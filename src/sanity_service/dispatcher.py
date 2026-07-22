@@ -5,13 +5,18 @@ from __future__ import annotations
 import argparse
 import asyncio
 import dataclasses
+import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
 import httpx
 from loguru import logger
 
+from albedo_eval_service.judge_config import JudgeSettings, get_judge_settings
+from albedo_eval_service.remote_dataset import format_messages
 from sanity_remote.models import SanityRunRequest
 from sanity_service.dataset import sample_prompts
 from sanity_service.db import ClaimedPreEval, PreEvalRepository
@@ -20,6 +25,67 @@ from sanity_service.llm_check import SampleInput, run_gate
 from sanity_service.remote_client import SanityRemoteClient
 from sanity_service.settings import SanitySettings, get_settings
 from sanity_service.uploads import put_sanity_fault
+
+_CANONICAL_TOKENIZER_PATH = (
+    Path(__file__).resolve().parents[2] / "assets" / "tokenizers" / "Qwen3.6-35B-A3B"
+)
+_COMPLETE_MARKER = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+_BASH_BLOCK_RE = re.compile(r"```(?:bash|sh|shell)\s*\n.*?```", re.IGNORECASE | re.DOTALL)
+
+BASE_PROMPT = """You are the ENVIRONMENT (execution harness) in a SWE-agent session. You are NOT the assistant and you must never act as the assistant.
+
+You will receive a transcript with "### system", "### user" and "### assistant" section markers.
+The transcript ends with the assistant's first message containing one command. Mentally execute
+that command against the repository state implied by the task description and reply with the
+environment's next message: the terminal output of that command.
+
+STRICT RULES:
+- Reply ONLY with the environment message in the exact format specified below — nothing else.
+- NEVER write "THOUGHT:", never write a bash command, never write "### user" or "### assistant"
+  headers, never use markdown code fences, never explain or comment. You are not solving the
+  task; you are only the terminal returning the command's output.
+- NEVER give task tips, hints, suggestions, next steps, encouragement, or any part of the
+  solution. A terminal has no opinion: it only prints what the command outputs, even if the
+  assistant is on the wrong track or asked a question.
+- Emulate realistic tool behavior: sed -i, cp, mv, mkdir, rm print nothing on success; echo
+  prints its argument; cat/sed -n print file content; grep -n prefixes matches with "NN:"
+  (context lines with "NN-"); find/ls list paths one per line; failed commands print realistic
+  error messages.
+- If the assistant message contains MORE THAN ONE bash code block, only the FIRST block is
+  executed — simulate the first command and ignore all later blocks.
+- Respect pipe limits exactly: "| head -N" outputs at most N lines, "| tail -N" the last N.
+  Count your output lines before replying.
+- Anchor on evidence: file, directory and symbol names mentioned in the task description are
+  real — build your output around them and the standard layout for the project's language.
+  When you cannot infer paths with confidence, prefer FEWER lines over invented ones; if the
+  command's filters plausibly match nothing in this project (e.g. a file extension foreign to
+  its language), the output is empty.
+"""
+
+FORMAT_SWE_ZERO = """OUTPUT FORMAT:
+- Your reply MUST begin with the literal string "Observation:" — no text may come before it.
+- After "Observation: " write exactly the stdout/stderr the command would produce — nothing else.
+- If the command would produce no output, reply with exactly "Observation:" and nothing more."""
+
+FORMAT_MINI_CODER = """OUTPUT FORMAT:
+- Your reply MUST have exactly this shape, with no text before or after:
+<returncode>RC</returncode>
+<output>
+OUTPUT
+</output>
+  where RC is the command's exit code and OUTPUT is exactly the stdout/stderr it would produce
+  (empty if the command prints nothing)."""
+
+
+@dataclass
+class _TrajectoryState:
+    sample_id: str
+    prompt: str
+    messages: list[dict[str, str]]
+    turns: list[dict[str, Any]]
+    stopped: bool = False
+    error: str = ""
+    heuristic_reason: str = ""
 
 
 class SanityDispatcher:
@@ -44,9 +110,11 @@ class SanityDispatcher:
             model_uri=submission["model_uri"],
             digest=submission.get("model_hash") or "",
             prompts=[s.prompt for s in samples],
+            sample_ids=[s.sample_id or f"sanity-sample:{i}" for i, s in enumerate(samples)],
             prompt_messages=[
                 s.messages or [{"role": "user", "content": s.prompt}] for s in samples
             ],
+            assistant_turns=self.settings.trajectory_assistant_turns,
             gen_max_tokens=self.settings.gen_max_tokens,
         )
 
@@ -72,10 +140,10 @@ class SanityDispatcher:
         )
         try:
             await client.ready()
-            start = await client.start_run(claimed.request)
-            run_id = str(start.get("run_id") or claimed.attempt_id)
-            self.repository.heartbeat_attempt(attempt_id=claimed.attempt_id, lease_seconds=self.settings.lease_seconds)
-            result = await self._follow_until_result(client, submission_id=claimed.submission_id, attempt_id=claimed.attempt_id, run_id=run_id,)
+            if claimed.request.assistant_turns > 1:
+                result = await self._run_multiturn(client, claimed)
+            else:
+                result = await self._run_remote_request(client, claimed.request, claimed)
             await self._complete(
                 submission_id=claimed.submission_id,
                 attempt_id=claimed.attempt_id,
@@ -127,6 +195,71 @@ class SanityDispatcher:
             return True
         finally:
             await client.aclose()
+
+    async def _run_remote_request(
+        self,
+        client: SanityRemoteClient,
+        request: SanityRunRequest,
+        claimed: ClaimedPreEval,
+    ) -> dict[str, Any]:
+        start = await client.start_run(request)
+        run_id = str(start.get("run_id") or request.run_id)
+        self.repository.heartbeat_attempt(
+            attempt_id=claimed.attempt_id,
+            lease_seconds=self.settings.lease_seconds,
+        )
+        return await self._follow_until_result(
+            client,
+            submission_id=claimed.submission_id,
+            attempt_id=claimed.attempt_id,
+            run_id=run_id,
+        )
+
+    async def _run_multiturn(
+        self, client: SanityRemoteClient, claimed: ClaimedPreEval
+    ) -> dict[str, Any]:
+        # Stable side owns observation simulation; GPU side only generates assistant turns.
+        request = claimed.request
+        turn_count = max(1, int(request.assistant_turns))
+        states = _trajectory_states(request)
+        kept_warm = False
+        try:
+            for turn_index in range(turn_count):
+                active = [state for state in states if not state.stopped and not state.error]
+                if not active:
+                    break
+                turn_request = request.model_copy(
+                    update={
+                        "run_id": f"{claimed.attempt_id}:turn-{turn_index + 1}",
+                        "prompts": [state.prompt for state in active],
+                        "sample_ids": [state.sample_id for state in active],
+                        "prompt_messages": [state.messages for state in active]
+                        if turn_index == 0
+                        else None,
+                        "teardown_after_run": turn_index == turn_count - 1,
+                    }
+                )
+                kept_warm = not turn_request.teardown_after_run
+                logger.info(
+                    "[sanity-dispatch] trajectory turn {}/{} samples={}",
+                    turn_index + 1,
+                    turn_count,
+                    len(active),
+                )
+                result = await self._run_remote_request(client, turn_request, claimed)
+                if result.get("state") == "failed":
+                    return result
+                _apply_turn_result(active, result)
+                if turn_index == turn_count - 1:
+                    break
+                await _append_observations(active, str(claimed.attempt_id), turn_index + 1)
+            return _trajectory_result(str(claimed.attempt_id), states, turn_count)
+        finally:
+            if kept_warm:
+                try:
+                    await client.teardown()
+                except Exception as exc:  # noqa: BLE001 - best-effort GPU cleanup
+                    logger.warning("[sanity-dispatch] remote teardown failed: {}", exc)
 
     async def _follow_until_result(self, client: SanityRemoteClient, *, submission_id: UUID, attempt_id: UUID, run_id: str) -> dict[str, Any]:
         # Polls the worker, recording events and refreshing the lease, until a result appears.
@@ -340,3 +473,293 @@ def main() -> None:
         asyncio.run(dispatcher.dispatch_once())
     else:
         asyncio.run(dispatcher.run_forever())
+
+
+def _trajectory_states(request: SanityRunRequest) -> list[_TrajectoryState]:
+    sample_ids = request.sample_ids or [
+        f"sanity-sample:{i}" for i in range(len(request.prompts))
+    ]
+    prompt_messages = request.prompt_messages or []
+    states: list[_TrajectoryState] = []
+    for i, prompt in enumerate(request.prompts):
+        messages = (
+            prompt_messages[i]
+            if i < len(prompt_messages)
+            else [{"role": "user", "content": prompt}]
+        )
+        clean_messages = [
+            {
+                "role": str(message.get("role") or "user"),
+                "content": str(message.get("content") or ""),
+            }
+            for message in messages
+        ]
+        states.append(
+            _TrajectoryState(
+                sample_id=sample_ids[i] if i < len(sample_ids) else f"sanity-sample:{i}",
+                prompt=prompt,
+                messages=clean_messages,
+                turns=[
+                    {"role": message["role"], "content": message["content"]}
+                    for message in clean_messages
+                ],
+            )
+        )
+    return states
+
+
+def _apply_turn_result(states: list[_TrajectoryState], result: dict[str, Any]) -> None:
+    responses = list(result.get("responses", []))
+    heuristics = list(result.get("heuristics", []))
+    for i, state in enumerate(states):
+        if i >= len(responses):
+            state.error = "missing_generation_response"
+            continue
+        response = str(responses[i] or "")
+        state.turns.append({"role": "assistant", "content": response, "score_target": True})
+        if i < len(heuristics) and not bool(heuristics[i].get("passed", True)):
+            reason = str(heuristics[i].get("reason") or "heuristic failed")
+            if not _has_bash_command(response):
+                state.heuristic_reason = reason
+
+
+async def _append_observations(
+    states: list[_TrajectoryState], eval_run_id: str, turn_index: int
+) -> None:
+    active = []
+    for state in states:
+        if state.error or state.stopped:
+            continue
+        assistant_output = str(state.turns[-1].get("content") or "")
+        if _assistant_submitted(assistant_output):
+            observation = _completion_observation(state.sample_id)
+            _append_observation(state, observation)
+            state.stopped = True
+        elif not _has_bash_command(assistant_output):
+            _append_observation(state, _missing_command_observation(state.sample_id))
+        else:
+            active.append((state, assistant_output))
+    if not active:
+        return
+
+    settings = get_judge_settings()
+    client = make_client(settings)
+    try:
+        results = await asyncio.gather(
+            *[
+                _simulate_observation(
+                    client=client,
+                    settings=settings,
+                    eval_run_id=eval_run_id,
+                    sample_id=state.sample_id,
+                    prompt=state.prompt,
+                    messages=state.messages,
+                    assistant_output=assistant_output,
+                )
+                for state, assistant_output in active
+            ],
+            return_exceptions=True,
+        )
+    finally:
+        await client.aclose()
+
+    for (state, _assistant_output), result in zip(active, results, strict=False):
+        if isinstance(result, Exception):
+            state.error = f"{type(result).__name__}: {result}"
+            continue
+        _append_observation(state, result)
+        state.prompt = format_messages(
+            state.messages,
+            tokenizer_path=str(_CANONICAL_TOKENIZER_PATH),
+            enable_thinking=False,
+        )
+    logger.info(
+        "[sanity-dispatch] simulated observations turn={} samples={}",
+        turn_index,
+        len(active),
+    )
+
+
+def _append_observation(state: _TrajectoryState, observation: str) -> None:
+    assistant_output = str(state.turns[-1].get("content") or "")
+    state.messages.extend(
+        [
+            {"role": "assistant", "content": assistant_output},
+            {"role": "user", "content": observation},
+        ]
+    )
+    state.turns.append(
+        {
+            "role": "user",
+            "content": observation,
+            "environment_observation": True,
+        }
+    )
+
+
+async def _simulate_observation(
+    *,
+    client: Any,
+    settings: JudgeSettings,
+    eval_run_id: str,
+    sample_id: str,
+    prompt: str,
+    messages: list[dict[str, str]],
+    assistant_output: str,
+) -> str:
+    response = await client.complete(
+        model=settings.evaluator_model,
+        messages=[
+            {"role": "system", "content": _simulation_system_prompt(sample_id)},
+            {
+                "role": "user",
+                "content": _simulation_transcript(
+                    messages=messages,
+                    prompt=prompt,
+                    assistant_output=assistant_output,
+                ),
+            },
+        ],
+        temperature=0.0,
+        max_tokens=settings.simulation_max_tokens,
+        provider=_evaluator_provider(settings),
+        accept=lambda raw: _valid_simulation_output(raw, sample_id),
+    )
+    if response.error:
+        raise RuntimeError(response.error)
+    observation = response.raw.strip()
+    if not _valid_simulation_output(observation, sample_id):
+        fallback = _empty_simulation_output(sample_id)
+        logger.warning(
+            "[sanity-dispatch] observation_simulation_invalid_format eval_run_id={} "
+            "sample_id={} fallback={!r}",
+            eval_run_id,
+            sample_id,
+            fallback,
+        )
+        return fallback
+    return observation
+
+
+def _trajectory_result(
+    run_id: str, states: list[_TrajectoryState], turn_count: int
+) -> dict[str, Any]:
+    responses = [
+        "" if state.error else _format_scored_trajectory(state.turns) for state in states
+    ]
+    heuristics = [
+        {
+            "passed": not state.error and not state.heuristic_reason,
+            "reason": state.error or state.heuristic_reason,
+        }
+        for state in states
+    ]
+    return {
+        "type": "result",
+        "run_id": run_id,
+        "state": "succeeded",
+        "responses": responses,
+        "heuristics": heuristics,
+        "assistant_turns": turn_count,
+    }
+
+
+def _format_scored_trajectory(turns: list[dict[str, Any]]) -> str:
+    target_count = sum(
+        1 for turn in turns if turn.get("role") == "assistant" and turn.get("score_target")
+    )
+    target_label = (
+        "CANDIDATE OUTPUT"
+        if target_count == 1
+        else f"CANDIDATE OUTPUT 1 through CANDIDATE OUTPUT {target_count}"
+    )
+    assistant_index = 0
+    parts = [
+        "FULL CANDIDATE TRAJECTORY",
+        f"Score ONLY {target_label}. "
+        "The ENVIRONMENT OBSERVATION is context only.",
+    ]
+    for turn in turns:
+        role = str(turn.get("role") or "")
+        content = str(turn.get("content") or "").rstrip()
+        if role == "assistant" and turn.get("score_target"):
+            assistant_index += 1
+            label = f"CANDIDATE OUTPUT {assistant_index}"
+        elif role == "user" and turn.get("environment_observation"):
+            label = "ENVIRONMENT OBSERVATION (context only, do not score)"
+        else:
+            label = f"CONTEXT {role.upper()} (do not score)" if role else "CONTEXT TURN (do not score)"
+        parts.append(f"\n{label}:\n------\n{content}\n------")
+    return "\n".join(parts).strip()
+
+
+def _simulation_transcript(
+    *,
+    messages: list[dict[str, str]] | None,
+    prompt: str,
+    assistant_output: str,
+) -> str:
+    transcript_messages = messages or [{"role": "user", "content": prompt}]
+    sections = []
+    for message in transcript_messages + [{"role": "assistant", "content": assistant_output}]:
+        role = str(message.get("role") or "user").lower()
+        if role not in {"system", "user", "assistant"}:
+            role = "user"
+        sections.append(f"### {role}\n{str(message.get('content') or '').rstrip()}")
+    return "\n\n".join(sections).rstrip()
+
+
+def _simulation_system_prompt(sample_id: str) -> str:
+    return f"{BASE_PROMPT}\n{_simulation_format(sample_id)}"
+
+
+def _simulation_format(sample_id: str) -> str:
+    return FORMAT_MINI_CODER if "mini-coder" in sample_id.casefold() else FORMAT_SWE_ZERO
+
+
+def _empty_simulation_output(sample_id: str) -> str:
+    if _simulation_format(sample_id) == FORMAT_MINI_CODER:
+        return "<returncode>0</returncode>\n<output>\n</output>"
+    return "Observation:"
+
+
+def _valid_simulation_output(raw: str, sample_id: str) -> bool:
+    text = raw.strip()
+    if _simulation_format(sample_id) == FORMAT_MINI_CODER:
+        return (
+            text.startswith("<returncode>")
+            and "</returncode>" in text
+            and "<output>\n" in text
+            and text.endswith("\n</output>")
+        )
+    return text.startswith("Observation:")
+
+
+def _evaluator_provider(settings: JudgeSettings) -> dict[str, Any]:
+    block: dict[str, Any] = {"allow_fallbacks": True, "quantizations": ["fp8"]}
+    order = [p.strip() for p in settings.evaluator_providers.split(",") if p.strip()]
+    if order:
+        block["order"] = order
+        block["allow_fallbacks"] = False
+    return block
+
+
+def _assistant_submitted(output: str) -> bool:
+    return _COMPLETE_MARKER in output
+
+
+def _has_bash_command(output: str) -> bool:
+    return bool(_BASH_BLOCK_RE.search(output))
+
+
+def _completion_observation(sample_id: str) -> str:
+    if "mini-coder" in sample_id.casefold():
+        return f"<returncode>0</returncode>\n<output>\n{_COMPLETE_MARKER}\n</output>"
+    return f"Observation: {_COMPLETE_MARKER}"
+
+
+def _missing_command_observation(sample_id: str) -> str:
+    message = "No bash command found in assistant message."
+    if "mini-coder" in sample_id.casefold():
+        return f"<returncode>2</returncode>\n<output>\n{message}\n</output>"
+    return f"Observation: {message}"

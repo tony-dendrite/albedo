@@ -19,6 +19,7 @@ function loadEnv() {
 
 const env = loadEnv();
 const sshTarget = `${env.ALBEDO_GPU_HOST_USER}@${env.ALBEDO_GPU_HOST_SSH_HOST}`;
+const sshPort = env.ALBEDO_GPU_HOST_SSH_PORT || "";
 
 module.exports = {
   apps: [
@@ -27,6 +28,7 @@ module.exports = {
       script: "ssh",
       args: [
         "-N",
+        ...(sshPort ? ["-p", sshPort] : []),
         "-o",
         "ExitOnForwardFailure=yes",
         "-o",

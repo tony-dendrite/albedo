@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -28,6 +29,11 @@ _ERR_LOG_CHARS = 400
 # deterministic repeat of the first probe (at temp 0.0 the re-check always confirms - even a spurious
 # flag). A real injection stays flagged under variance; a borderline false positive can clear.
 _RECHECK_TEMPERATURE = float(os.environ.get("SANITY_INJECTION_RECHECK_TEMPERATURE", "0.2"))
+_TRAJECTORY_CANDIDATE_RE = re.compile(
+    r"^CANDIDATE OUTPUT(?: \d+)?:\n------\n(.*?)\n------"
+    r"(?=\n+(?:CANDIDATE OUTPUT|ENVIRONMENT OBSERVATION|CONTEXT )[^\n]*:\n------|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
 
 
 def _short(value: str | None, limit: int) -> str:
@@ -43,6 +49,12 @@ def _resolve_models(override: tuple[str, ...] | None) -> tuple[str, ...]:
     if env:
         return tuple(m.strip() for m in env.split(",") if m.strip())
     return JUDGE_MODELS
+
+
+def _response_for_gate(response: str) -> str:
+    # Multi-turn sanity responses are wrapped with judge instructions; gates audit only model text.
+    parts = [match.group(1).rstrip() for match in _TRAJECTORY_CANDIDATE_RE.finditer(response or "")]
+    return "\n\n".join(parts) if parts else response
 
 
 class LLMGate(StrEnum):
@@ -177,7 +189,8 @@ async def _judge_sample(s: SampleInput, client, consensus: bool, skip_viability:
     if not s.heuristic_passed:
         return SampleVerdict(excerpt, passed=False, reason=f"heuristic: {s.heuristic_reason}")
 
-    suspected, votes = await _injection_probe(client, s.prompt, s.response, models)
+    gate_response = _response_for_gate(s.response)
+    suspected, votes = await _injection_probe(client, s.prompt, gate_response, models)
     if suspected is None:
         return SampleVerdict(excerpt, False, "injection judges unavailable", infra=True, votes=votes)
 
@@ -185,7 +198,7 @@ async def _judge_sample(s: SampleInput, client, consensus: bool, skip_viability:
     if suspected:
         rechecked = True
         # Re-check at a higher temperature (genuine re-sample) so a spurious first flag can clear.
-        confirmed, votes = await _injection_probe(client, s.prompt, s.response, models, temperature=_RECHECK_TEMPERATURE)
+        confirmed, votes = await _injection_probe(client, s.prompt, gate_response, models, temperature=_RECHECK_TEMPERATURE)
         if confirmed is None:
             return SampleVerdict(
                 excerpt,
@@ -210,6 +223,8 @@ async def _judge_sample(s: SampleInput, client, consensus: bool, skip_viability:
     if skip_viability:
         return SampleVerdict(excerpt, passed=True, reason="viability skipped", rechecked=rechecked)
 
+    # Viability sees the full trajectory wrapper, if present, so separate turns are not
+    # mistaken for multiple commands inside one reply.
     decided, reason, vvotes = await _viability_probe(client, s.prompt, s.response, consensus, models)
     if decided is None:
         return SampleVerdict(excerpt, False, reason, infra=True, rechecked=rechecked, votes=vvotes)

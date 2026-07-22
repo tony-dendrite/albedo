@@ -78,3 +78,7 @@ class SanityRemoteClient:
         r = await self._fetch("GET", f"/sanity-runs/{run_id}/events")
         for event in r.json().get("events", []):
             yield event
+
+    async def teardown(self) -> None:
+        # Frees a warm vLLM process after dispatcher-side multi-turn generation.
+        await self._fetch("POST", "/teardown")

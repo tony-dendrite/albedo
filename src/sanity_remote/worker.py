@@ -16,6 +16,7 @@ from typing import Any
 import httpx
 from loguru import logger
 
+from albedo_eval_service.canonical_model_config import canonical_max_model_len
 from albedo_eval_service.remote_dataset import format_messages
 from sanity_remote.config import SanityRemoteSettings, get_remote_settings
 from sanity_remote.state import SanityRun
@@ -29,6 +30,30 @@ from sanity_service.checks import (
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 _FORBIDDEN_CONFIG_KEYS = frozenset({"auto_map", "quantization_config"})
 _QWEN3_IM_END_TOKEN_ID = 248046
+
+
+def _warn_if_context_is_surprising(settings: SanityRemoteSettings) -> None:
+    canonical_len = canonical_max_model_len()
+    if settings.max_model_len != canonical_len:
+        logger.warning(
+            "[sanity-remote] max_model_len={} differs from canonical_model_len={} "
+            "(check SANITY_REMOTE_MAX_MODEL_LEN override)",
+            settings.max_model_len,
+            canonical_len,
+        )
+
+
+def _warn_if_generation_budget_consumes_context(
+    *, max_tokens: int, max_model_len: int, prompt_count: int
+) -> None:
+    if max_tokens >= max_model_len:
+        logger.warning(
+            "[sanity-remote] gen_max_tokens={} leaves no room for prompt tokens "
+            "with max_model_len={} prompts={} (vLLM will reject non-empty prompts)",
+            max_tokens,
+            max_model_len,
+            prompt_count,
+        )
 
 
 def _strip_thinking(text: str) -> str:
@@ -184,12 +209,18 @@ class VllmEngine:
         self._loaded_digest = ""
         self._loaded_dir = ""
         self._lock = asyncio.Lock()
+        _warn_if_context_is_surprising(settings)
         self._kill_port_squatter()
 
     async def run_job(self, model_uri: str, digest: str, prompts: list[str], max_tokens: int, prompt_messages: list[list[dict[str, str]]] | None = None,) -> list[str]:
         # Serializes one generation job: ensure the model is loaded, then generate the prompts.
         n = len(prompt_messages) if prompt_messages is not None else len(prompts)
         logger.info("[sanity-remote] run_job digest={:.16} prompts={} max_tokens={}", digest, n, max_tokens)
+        _warn_if_generation_budget_consumes_context(
+            max_tokens=max_tokens,
+            max_model_len=self._s.max_model_len,
+            prompt_count=n,
+        )
         async with self._lock:
             await self._ensure_model(model_uri, digest)
             if prompt_messages is not None:
@@ -429,6 +460,11 @@ class VllmEngine:
         results = await asyncio.gather(*[_one(p) for p in prompts], return_exceptions=True)
         for res in results:
             if isinstance(res, Exception):
+                if isinstance(res, httpx.ReadTimeout):
+                    raise WorkerFault(
+                        "generation_timeout",
+                        f"vLLM generation exceeded {self._s.gen_read_timeout_s:g}s",
+                    ) from res
                 raise WorkerFault(
                     "generation_transport_error", f"vLLM request failed: {res}"
                 ) from res
@@ -555,7 +591,14 @@ async def generate(run: SanityRun, settings: SanityRemoteSettings | None = None)
     finally:
         # Tear down vLLM so both GPUs free up between preevals (eval-server parity);
         # the next run cold-loads. Best-effort: never let teardown strand the run.
-        try:
-            await engine.teardown()
-        except Exception:  # noqa: BLE001
-            logger.exception("[sanity-remote] vLLM teardown after run failed (best-effort)")
+        if req.teardown_after_run:
+            try:
+                await engine.teardown()
+            except Exception:  # noqa: BLE001
+                logger.exception("[sanity-remote] vLLM teardown after run failed (best-effort)")
+
+
+async def teardown(settings: SanityRemoteSettings | None = None) -> None:
+    # Dispatcher-side multi-turn runs keep vLLM warm between turns, then call this once at the end.
+    engine = _engine()
+    await engine.teardown()

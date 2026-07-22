@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
+
+from loguru import logger
 
 from albedo_eval_service.judge_openrouter import JudgeRawResponse
 from sanity_remote.models import SanityRunRequest
@@ -81,6 +84,68 @@ def test_gate_heuristic_fail_skips_judges():
     assert not gate.passed and gate.llm_gate == LLMGate.FAILED
 
 
+class _WrapperSensitiveJudge:
+    async def complete(self, *, model, messages, temperature=None):
+        if "security auditor" in messages[0]["content"]:
+            payload = json.loads(messages[1]["content"])
+            leaked = any(
+                marker in payload["candidate_reply"]
+                for marker in ("Score ONLY", "ENVIRONMENT OBSERVATION", "CONTEXT USER")
+            )
+            raw = (
+                '{"injection": true, "evidence": "wrapper leaked"}'
+                if leaked
+                else '{"injection": false, "evidence": "none"}'
+            )
+        else:
+            sees_trajectory = "FULL CANDIDATE TRAJECTORY" in messages[1]["content"]
+            raw = (
+                '{"viable": true, "reason": "ok"}'
+                if sees_trajectory
+                else '{"viable": false, "reason": "trajectory missing"}'
+            )
+        return JudgeRawResponse(model=model, provider="p", raw=raw)
+
+
+def test_gate_injection_ignores_trajectory_wrapper():
+    response = "\n".join(
+        [
+            "FULL CANDIDATE TRAJECTORY",
+            "Score ONLY CANDIDATE OUTPUT 1 through CANDIDATE OUTPUT 2. The ENVIRONMENT OBSERVATION is context only.",
+            "",
+            "CONTEXT USER (do not score):",
+            "------",
+            "Fix the bug",
+            "------",
+            "",
+            "CANDIDATE OUTPUT 1:",
+            "------",
+            "THOUGHT: inspect the file\n```bash\nsed -n '1,80p' app.py\n```",
+            "------",
+            "",
+            "ENVIRONMENT OBSERVATION (context only, do not score):",
+            "------",
+            "Observation: missing import",
+            "------",
+            "",
+            "CANDIDATE OUTPUT 2:",
+            "------",
+            "THOUGHT: patch the import\n```bash\nsed -i '1i import os' app.py\n```",
+            "------",
+        ]
+    )
+
+    gate = asyncio.run(
+        run_gate(
+            [SampleInput("task", response)],
+            _WrapperSensitiveJudge(),
+            models=("judge",),
+        )
+    )
+
+    assert gate.passed
+
+
 # ── dispatcher _complete decisions ──────────────────────────────────────────────
 
 
@@ -151,6 +216,61 @@ def test_complete_worker_failure_is_retryable():
     assert calls == [("failed", True, "INFRA_FAULT")]
 
 
+def test_complete_worker_failure_stays_infra_and_honors_retryable():
+    fail = {
+        "state": "failed",
+        "fault_code": "generation_timeout",
+        "fault_message": "vLLM generation exceeded 900s",
+        "retryable": False,
+    }
+    calls = _complete(GateResult(True, "", False, LLMGate.PASSED, "veto", []), fail)
+    assert calls == [("failed", False, "INFRA_FAULT")]
+
+
+def test_multiturn_keeps_prompt_messages_on_first_turn(monkeypatch):
+    seen: list[SanityRunRequest] = []
+
+    async def _fake_remote(_client, request, _claimed):
+        seen.append(request)
+        return {
+            "state": "succeeded",
+            "responses": ["```bash\nls\n```"],
+            "heuristics": [{"passed": True, "reason": ""}],
+        }
+
+    async def _fake_observations(*_args, **_kwargs):
+        return None
+
+    request = SanityRunRequest(
+        run_id="run",
+        model_uri="model",
+        digest="digest",
+        prompts=["raw prompt"],
+        sample_ids=["sample-1"],
+        prompt_messages=[
+            [
+                {"role": "system", "content": "reply with bash"},
+                {"role": "user", "content": "task"},
+            ]
+        ],
+        assistant_turns=2,
+    )
+    dispatcher = D.SanityDispatcher(settings=SanitySettings(), repository=_FakeRepo())
+    monkeypatch.setattr(dispatcher, "_run_remote_request", _fake_remote)
+    monkeypatch.setattr(D, "_append_observations", _fake_observations)
+
+    asyncio.run(
+        dispatcher._run_multiturn(
+            SimpleNamespace(),
+            SimpleNamespace(request=request, attempt_id=uuid4(), submission_id=uuid4()),
+        )
+    )
+
+    assert len(seen) == 2
+    assert seen[0].prompt_messages == request.prompt_messages
+    assert seen[1].prompt_messages is None
+
+
 # ── import hygiene ──────────────────────────────────────────────────────────────
 
 
@@ -187,7 +307,11 @@ def test_worker_store_lifecycle():
 # ── sanity remote worker fixes ────────────────────────────────────────────────
 
 from sanity_remote.config import SanityRemoteSettings
-from sanity_remote.worker import VllmEngine, _strip_model_config
+from sanity_remote.worker import (
+    VllmEngine,
+    _strip_model_config,
+    _warn_if_generation_budget_consumes_context,
+)
 
 
 def test_max_model_len_default_matches_eval_context(monkeypatch):
@@ -195,6 +319,21 @@ def test_max_model_len_default_matches_eval_context(monkeypatch):
 
     monkeypatch.delenv("SANITY_REMOTE_MAX_MODEL_LEN", raising=False)
     assert SanityRemoteSettings(_env_file=None).max_model_len == canonical_max_model_len()
+
+
+def test_generation_budget_warning_when_it_consumes_context():
+    messages: list[str] = []
+    sink_id = logger.add(lambda msg: messages.append(msg), level="WARNING")
+    try:
+        _warn_if_generation_budget_consumes_context(
+            max_tokens=32768,
+            max_model_len=32768,
+            prompt_count=3,
+        )
+    finally:
+        logger.remove(sink_id)
+
+    assert any("leaves no room for prompt tokens" in message for message in messages)
 
 
 def test_strip_model_config_removes_forbidden_keys(tmp_path):

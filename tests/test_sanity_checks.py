@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from sanity_remote import worker as sanity_worker
 from sanity_remote.models import SanityRunRequest
-from sanity_remote.worker import VllmEngine, _format_prompt_messages, _heuristics
+from sanity_remote.worker import VllmEngine, WorkerFault, _format_prompt_messages, _heuristics
+from sanity_service import dispatcher as sanity_dispatcher
 from sanity_service.checks import (
     check_all,
     check_code_present,
@@ -18,6 +21,7 @@ from sanity_service.checks import (
     check_vocabulary,
 )
 from sanity_service.dataset import sample_prompts
+from sanity_service.dispatcher import _format_scored_trajectory
 
 # ── per-response checks ─────────────────────────────────────────────────────────
 
@@ -105,7 +109,29 @@ def test_heuristics_reports_empty_before_set_collapse():
 def test_fallback_prompts_carry_messages_for_worker_template():
     sample = sample_prompts(seed="seed", n=1)[0]
 
-    assert sample.messages == [{"role": "user", "content": sample.prompt}]
+    assert sample.messages
+    assert sample.messages[0]["role"] == "system"
+    assert "fenced bash command" in sample.messages[0]["content"]
+    assert sample.messages[1] == {"role": "user", "content": sample.prompt}
+    assert sample.sample_id == "sanity-fallback:0"
+
+
+def test_sanity_trajectory_formatter_scores_candidate_turns_only():
+    text = _format_scored_trajectory(
+        [
+            {"role": "user", "content": "Fix the bug"},
+            {"role": "assistant", "content": "```bash\nls\n```", "score_target": True},
+            {
+                "role": "user",
+                "content": "Observation: src/app.py",
+                "environment_observation": True,
+            },
+            {"role": "assistant", "content": "```bash\nsed -n '1,80p' src/app.py\n```", "score_target": True},
+        ]
+    )
+
+    assert "Score ONLY CANDIDATE OUTPUT 1 through CANDIDATE OUTPUT 2" in text
+    assert "ENVIRONMENT OBSERVATION (context only, do not score)" in text
 
 
 def test_pre_eval_worker_formats_messages_with_non_thinking_template(monkeypatch):
@@ -126,6 +152,101 @@ def test_pre_eval_worker_formats_messages_with_non_thinking_template(monkeypatch
         "tokenizer_path": "/models/qwen",
         "enable_thinking": False,
     }
+
+
+def test_trajectory_followup_prompt_uses_non_thinking_template(monkeypatch):
+    captured = {}
+
+    class _Client:
+        async def aclose(self):
+            captured["closed"] = True
+
+    async def _fake_simulate_observation(**_kwargs):
+        return "Observation: src/app.py"
+
+    def _fake_format_messages(messages, **kwargs):
+        captured["messages"] = messages
+        captured["kwargs"] = kwargs
+        return "next-turn prompt"
+
+    monkeypatch.setattr(sanity_dispatcher, "get_judge_settings", lambda: object())
+    monkeypatch.setattr(sanity_dispatcher, "make_client", lambda _settings: _Client())
+    monkeypatch.setattr(sanity_dispatcher, "_simulate_observation", _fake_simulate_observation)
+    monkeypatch.setattr(sanity_dispatcher, "format_messages", _fake_format_messages)
+
+    state = sanity_dispatcher._TrajectoryState(
+        sample_id="sanity-fallback:0",
+        prompt="initial prompt",
+        messages=[{"role": "user", "content": "Fix it."}],
+        turns=[{"role": "assistant", "content": "```bash\nls\n```", "score_target": True}],
+    )
+
+    asyncio.run(sanity_dispatcher._append_observations([state], "run", 1))
+
+    assert state.prompt == "next-turn prompt"
+    assert captured["closed"] is True
+    assert captured["messages"][-1] == {"role": "user", "content": "Observation: src/app.py"}
+    assert captured["kwargs"]["enable_thinking"] is False
+
+
+def test_trajectory_no_command_gets_observation_without_simulator(monkeypatch):
+    def _fail_make_client(*_args, **_kwargs):
+        raise AssertionError("simulator should not run without a bash command")
+
+    monkeypatch.setattr(sanity_dispatcher, "make_client", _fail_make_client)
+
+    state = sanity_dispatcher._TrajectoryState(
+        sample_id="sanity-fallback:0",
+        prompt="initial prompt",
+        messages=[{"role": "user", "content": "Fix it."}],
+        turns=[{"role": "assistant", "content": "Here is the answer.", "score_target": True}],
+    )
+
+    asyncio.run(sanity_dispatcher._append_observations([state], "run", 1))
+
+    assert state.messages[-1] == {
+        "role": "user",
+        "content": "Observation: No bash command found in assistant message.",
+    }
+    assert not state.stopped
+
+
+def test_trajectory_ignores_short_heuristic_for_bash_command():
+    state = sanity_dispatcher._TrajectoryState(
+        sample_id="sanity-fallback:0",
+        prompt="initial prompt",
+        messages=[{"role": "user", "content": "Fix it."}],
+        turns=[],
+    )
+
+    sanity_dispatcher._apply_turn_result(
+        [state],
+        {
+            "responses": ["```bash\nls -la\n```"],
+            "heuristics": [{"passed": False, "reason": "too short (4 tokens, min=5)"}],
+        },
+    )
+
+    assert state.heuristic_reason == ""
+
+
+def test_trajectory_keeps_heuristic_for_non_command_output():
+    state = sanity_dispatcher._TrajectoryState(
+        sample_id="sanity-fallback:0",
+        prompt="initial prompt",
+        messages=[{"role": "user", "content": "Fix it."}],
+        turns=[],
+    )
+
+    sanity_dispatcher._apply_turn_result(
+        [state],
+        {
+            "responses": [""],
+            "heuristics": [{"passed": False, "reason": "empty response"}],
+        },
+    )
+
+    assert state.heuristic_reason == "empty response"
 
 
 def test_heuristics_passes_varied_code_responses():
@@ -271,3 +392,39 @@ def test_run_prompts_uses_raw_completions(monkeypatch):
         "min_p": 0.0,
         "stop_token_ids": [248046],
     }
+
+
+def test_run_prompts_timeout_has_retryable_fault_code(monkeypatch):
+    class _Client:
+        def __init__(self, *, timeout):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, json):
+            raise sanity_worker.httpx.ReadTimeout("too slow")
+
+    monkeypatch.setattr("sanity_remote.worker.httpx.AsyncClient", _Client)
+    engine = VllmEngine.__new__(VllmEngine)
+    engine._s = type(
+        "Settings",
+        (),
+        {
+            "vllm_port": 1234,
+            "gen_temperature": 0.7,
+            "gen_top_p": 0.8,
+            "gen_top_k": 20,
+            "gen_min_p": 0.0,
+            "gen_read_timeout_s": 300.0,
+        },
+    )()
+
+    with pytest.raises(WorkerFault) as err:
+        asyncio.run(engine._run_prompts("model-name", ["raw transcript"], 77))
+
+    assert err.value.code == "generation_timeout"
+    assert err.value.retryable is True

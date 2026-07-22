@@ -10,7 +10,7 @@ from loguru import logger
 from sanity_remote.config import SanityRemoteSettings, get_remote_settings
 from sanity_remote.models import SanityRunRequest
 from sanity_remote.state import SanityRunStore
-from sanity_remote.worker import generate
+from sanity_remote.worker import generate, teardown
 
 app = FastAPI(title="Albedo Sanity Remote Worker", version="0.1.0")
 store = SanityRunStore()
@@ -100,6 +100,13 @@ def cancel_run(run_id: str, _: None = Depends(require_auth)) -> dict[str, str]:
     return {"run_id": run_id, "state": run.state}
 
 
+@app.post("/teardown")
+async def teardown_worker(_: None = Depends(require_auth)) -> dict[str, str]:
+    # Explicitly frees the warm vLLM process after dispatcher-side multi-turn orchestration.
+    await teardown()
+    return {"state": "ok"}
+
+
 def main() -> None:
     # Console entrypoint: serve the worker API on the configured port.
     import os
@@ -116,3 +123,7 @@ def main() -> None:
         port=settings.api_port,
         log_level="info",
     )
+
+
+if __name__ == "__main__":
+    main()
