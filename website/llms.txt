@@ -29,7 +29,7 @@ albedo/
 ├── pyproject.toml              All console entrypoints (see "Services" below) + deps (bittensor, fastapi, asyncpg, opensearch, vllm-via-remote)
 ├── chain.toml                  Subnet constants for the config_validation commit-validator (seed digest, arch-lock keys, file allowlist, dedup threshold). NOTE: the LIVE miner/validator manifest is model_validation/config.py + architecture_spec.json — see below.
 ├── schema.sql                  Canonical Postgres schema — the single source of truth for pipeline state
-├── docker-compose.yml          Local Postgres (albedo-postgres) on host port 65432
+├── docker-compose.yml          Local Postgres (albedo-postgres) on a localhost-only port
 ├── .env.example                Full backend/GPU-host env reference
 ├── .env.example_miners         Miner-only env (wallet + Hippius + namespace)
 │
@@ -84,18 +84,18 @@ albedo/
 │   │   └── db.py                       PRE_EVAL_* state machine + sanity_results cache
 │   │
 │   ├── sanity_remote/              PRE-EVAL GPU WORKER (stateless; no DB/dataset/keys)
-│   │   ├── api.py                      FastAPI :9100 — POST /sanity-runs, GET status/events (bearer auth)
+│   │   ├── api.py                      FastAPI :<port> — POST /sanity-runs, GET status/events (bearer auth)
 │   │   └── worker.py                   warm vLLM, generate on sampled prompts, run heuristics, return result
 │   │
 │   ├── albedo_eval_service/        THE DUEL: backend coordinator + remote GPU eval + judge + score bridge
 │   │   ├── dispatcher.py               claim EVAL_QUEUED (advisory lock) → pick EVAL host → stream verdict
-│   │   ├── api.py                      backend status API :8080 (/health /ready /submissions/{id})
-│   │   ├── judge_api.py                judge/scoring API :8091 (/category-prep evaluator questions + /score-batch) — calls OpenRouter
+│   │   ├── api.py                      backend status API :<port> (/health /ready /submissions/{id})
+│   │   ├── judge_api.py                judge/scoring API :<port> (/category-prep evaluator questions + /score-batch) — calls OpenRouter
 │   │   ├── judge_core.py               yes/no question prompts + schemas/parsers, per-response scoring, margin aggregation
 │   │   ├── judge_openrouter.py         OpenRouter client: per-model semaphore, retry+backoff, forced json_schema (fp8)
 │   │   ├── judge_config.py             JudgeSettings (ALBEDO_JUDGE_*): evaluator + judge models, num_questions, margin
 │   │   ├── score_bridge_client.py      backend side of WS bridge → forwards score requests to judge_api
-│   │   ├── remote_api.py               GPU-host control plane :8090 (/eval-runs, /model-prefetch, WS /score-bridge)
+│   │   ├── remote_api.py               GPU-host control plane :<port> (/eval-runs, /model-prefetch, WS /score-bridge)
 │   │   ├── remote_worker.py            run eval: load samples → vLLM king+chal → score over bridge → verdict
 │   │   ├── remote_generation.py        one vLLM subprocess per model, CUDA_VISIBLE_DEVICES per side
 │   │   ├── remote_scoring.py           build score batches, request judging back over the WS bridge
@@ -123,7 +123,7 @@ albedo/
 │   ├── eval_cache_cleanup.py       king-aware model-cache GC (keep active kings + seed + in-flight, drop the rest) — PM2 loop
 │   ├── cleanup_models.sh           hourly disk reclaim: delete model snapshots older than 4h from ALBEDO_MODEL_CACHE_DIR — PM2 cron
 │   ├── full_flow_test.py           end-to-end: real chain commits → full validation pipeline
-│   ├── setup_opensearch.sh         single-node OpenSearch container (:9200, security off)
+│   ├── setup_opensearch.sh         single-node OpenSearch container (:<port>, security off)
 │   └── install_deps.sh             install opensearch-py + config_validation into a venv
 │
 ├── website/                    Static dashboard (reads data/dashboard.json + data/state.json); this llms.txt lives here
@@ -224,9 +224,12 @@ forbidden_globs     = ["*.py"]                        # no custom modeling code
 similarity_threshold = 0.95                           # fingerprint cosine ≥ this → near-duplicate
 ```
 
-> **Live manifest (what's actually enforced)** — `model_validation/config.py` additionally
-> **requires** `preprocessor_config.json` + `video_preprocessor_config.json` (the multimodal
-> Qwen3.6 processor configs) and **allows** `LICENSE` / `configuration.json`. The arch lock
+> **Live manifest (what's actually enforced)** — `model_validation/config.py` **requires**
+> `config.json`, `generation_config.json`, `tokenizer_config.json`, `tokenizer.json`,
+> `chat_template.jinja`, `preprocessor_config.json`, `video_preprocessor_config.json`;
+> **allows** only `model.safetensors.index.json`, `.gitattributes`, `LICENSE`, `README.md`.
+> Anything else — including `merges.txt`, `vocab.json`, `configuration.json`,
+> `special_tokens_map.json` — is an unexpected extra → `file_manifest` rejection. The arch lock
 > compares against `architecture_spec.json` (regenerated from the genesis by `generate_arch_spec.py`),
 > which pins `architectures = ["Qwen3_5MoeForConditionalGeneration"]`, `model_type = "qwen3_5_moe"`,
 > `vocab_size = 248320`, the capacity keys above, and the MoE keys (`num_experts = 256`,
@@ -278,23 +281,34 @@ These are the **live** checks (`model_validation`), run by both the local CLI an
 except where noted. Each maps to a `fault_code`.
 
 1. Repo name doesn't match `^[^/]+/albedo-qwen3\.6-35b-.+$`
-2. File set violates the allowlist — **missing** a required file (`config.json`, `tokenizer_config.json`,
-   `tokenizer.json`, `preprocessor_config.json`, `video_preprocessor_config.json`), any `*.py`, or an
-   unexpected extra (`file_manifest`)
+2. File set violates the allowlist — **missing** a required file (`config.json`, `generation_config.json`,
+   `tokenizer_config.json`, `tokenizer.json`, `chat_template.jinja`, `preprocessor_config.json`,
+   `video_preprocessor_config.json`), any `*.py`, or an unexpected extra such as `merges.txt`,
+   `vocab.json`, `configuration.json` (`file_manifest`)
 3. No `*.safetensors` (`file_manifest`)
-4. **Weights aren't 16-bit** — every safetensors shard must be F16/BF16; quantized / F32 / F64 is
+4. **Metadata not byte-identical to genesis** — sha256 of every metadata file is pinned to the
+   genesis repo revision (`dendriteholdings/albedo-qwen3.6-35b-king-genesis@d7934c55…`):
+   `config.json`, `generation_config.json`, `preprocessor_config.json`, `tokenizer_config.json`,
+   `tokenizer.json`, `video_preprocessor_config.json` (`metadata_hash`); `chat_template.jinja` —
+   and the chat_template string embedded in `tokenizer_config.json` — has its own pin
+   (`chat_template_hash`). Copy these files from genesis verbatim; a single changed byte rejects.
+   Only `model.safetensors.index.json` may differ (re-sharding), checked structurally instead
+5. **Weights aren't 16-bit** — every safetensors shard must be F16/BF16; quantized / F32 / F64 is
    rejected (`weight_dtype`)
-5. **Safetensors index inconsistent** — a sharded checkpoint's `model.safetensors.index.json`
+6. **Safetensors index inconsistent** — a sharded checkpoint's `model.safetensors.index.json`
    weight_map must match the shards + tensors actually on disk (`safetensors_index`)
-6. `config.json` doesn't match the genesis arch spec on the lock keys (incl. the MoE keys), or
+7. `config.json` doesn't match the genesis arch spec on the lock keys (incl. the MoE keys), or
    contains `auto_map` (remote code) / `quantization_config` (quantized) (`architecture`)
-7. **Near-duplicate** (fingerprint cosine ≥ 0.95 of an already-seen model) — *not* checked locally;
-   needs OpenSearch, runs only in `model_validation`. Make your model genuinely distinct (`duplicate`)
+8. **Near-duplicate** (fingerprint cosine ≥ 0.95 of an already-seen model, or an exact
+   weights-hash match) — *not* checked locally; needs OpenSearch, runs only in
+   `model_validation`. Make your model genuinely distinct (`duplicate`)
 
-> **Note:** local `check-hippius --path` runs checks 1–6 (file manifest + arch + safetensors index +
-> 16-bit dtype) but **not** the dedup check; the `--repo/--digest` remote check runs only the file
-> manifest + arch (it lists the repo files and fetches `config.json`). Passing locally does not
-> guarantee acceptance.
+> **Note:** local `check-hippius --path` runs the file manifest + arch + safetensors index +
+> 16-bit dtype checks, but **not** the metadata-hash checks (#4) and **not** dedup (#8) — both run
+> only in `model_validation`; the `--repo/--digest` remote check runs only the file manifest + arch
+> (it lists the repo files and fetches `config.json`). Passing locally does not guarantee
+> acceptance — in particular, verify your metadata files are byte-identical to genesis yourself
+> (`sha256sum` them against the genesis repo).
 
 ---
 
@@ -304,18 +318,18 @@ Console entrypoints (from `pyproject.toml`) — each has a matching `pm2/ecosyst
 
 | Entrypoint | Role | Host | Port / cron |
 |---|---|---|---|
-| `chain-reader` | poll chain → DB | backend | — |
-| `hippius-validation` | validate worker | backend (near OpenSearch) | — |
+| `chain-reader` | poll chain → DB (honors `CHAIN_START_BLOCK` — commits below it are skipped) | backend | — |
+| `model-validation` | validate worker | PRE_EVAL GPU box (co-located with OpenSearch + sanity-remote; shares its model cache with the sanity worker via `ALBEDO_MODEL_CACHE_DIR` = `CV_MODEL_CACHE_DIR`) | — |
 | `sanity-dispatcher` | pre-eval coordinator | backend | — |
-| `sanity-remote` | pre-eval GPU worker | GPU box | :9100 |
-| `albedo-eval-api` | backend status API | backend | :8080 |
-| `albedo-judge-api` | judge / scoring | backend | :8091 |
+| `sanity-remote` | pre-eval GPU worker | GPU box | :<port> |
+| `albedo-eval-api` | backend status API | backend | :<port> |
+| `albedo-judge-api` | judge / scoring | backend | :<port> |
 | `albedo-score-bridge` | WS bridge → judge | backend | — |
 | `albedo-eval-dispatcher` | claim + run evals | backend | — |
 | `albedo-eval-dispatcher --reconcile-running` | replay active runs | backend | cron 1m |
 | `albedo-eval-dispatcher --sweep-abandoned` | expire stale leases | backend | cron 1m |
 | `albedo-eval-requeuer` | retryable → queued | backend | cron 1m |
-| `albedo-remote-eval-api` | GPU eval control plane | GPU box | :8090 |
+| `albedo-remote-eval-api` | GPU eval control plane | GPU box | :<port> |
 | `set-reign-worker` | coronation | backend | — |
 | `weight-setter` | set_weights on-chain | backend | — |
 | `website/monitor.py` (PM2 `albedo-dashboard-monitor`) | publish dashboard.json + state.json → Hippius | backend | on-change poll (~2s) |
@@ -325,10 +339,6 @@ Console entrypoints (from `pyproject.toml`) — each has a matching `pm2/ecosyst
 The dashboard monitor and the two cleanup jobs are the PM2 processes that are **not** `pyproject`
 console entrypoints — they run standalone scripts (`website/monitor.py`, `scripts/eval_cache_cleanup.py`,
 `scripts/cleanup_models.sh`; the monitor is like `push_to_hippius.py`). See *Dashboard publishing* below.
-
-Backend ↔ GPU host is bridged by an SSH tunnel (`pm2/ecosystem.gpu-host-tunnel.config.js`):
-local `:18090` on the backend → `:8090` on the GPU host. The GPU host is registered as a
-`remote_gpu_hosts` row whose `base_url` points at the tunnel.
 
 Full runbook (env, one-time DB setup, smoke mode, health checks): [docs/eval-service-status.md](../docs/eval-service-status.md).
 
@@ -358,7 +368,10 @@ albedo-remote-eval-api  (GPU host)
     GPU split: king = ALBEDO_REMOTE_PREVIOUS_KING_GPU_IDS (0,1,2,3)
                challenger = ALBEDO_REMOTE_CHALLENGER_GPU_IDS (4,5,6,7)  (no overlap, 4 each)
     one vLLM subprocess per side (tensor_parallel_size = #gpus), generate king+chal in parallel
-    score: build batches → send up to ALBEDO_REMOTE_SCORING_BATCH_CONCURRENCY (4) batches concurrently over the WebSocket /score-bridge (multiplexed by request_id)
+    multiturn trajectories: ALBEDO_REMOTE_TRAJECTORY_ASSISTANT_TURNS (8) assistant turns per sample;
+      between turns the tool observation is simulated by the backend (POST /simulate-observation
+      over the score bridge → judge API) so both models roll the trajectory forward turn by turn
+    score: build batches → send up to ALBEDO_REMOTE_SCORING_BATCH_CONCURRENCY (128) batches concurrently over the WebSocket /score-bridge (multiplexed by request_id)
     emit "verdict" event (scores, win_margin, challenger_won, vllm/judge error counts, artifact URIs)
     upload JSONL transcripts + verdict.json to S3
 
@@ -386,7 +399,7 @@ score batches (`ALBEDO_JUDGE_MAX_CONCURRENCY_PER_MODEL`, 32 in prod) with retry 
 `min_valid_fraction` (0.8) of samples scored on both sides or it's a provider fault.
 
 **Deterministic sampling:** `sampling.py` (`multi_source_manifest_sample_ids`) draws `sample_count`
-(128) **unique `instance_id`s** across the two sources (70/30 by manifest `weight`), one **random
+(100) **unique `instance_id`s** across the two sources (70/30 by manifest `weight`), one **random
 rollout** per instance, and assigns each a prefix length from `BUCKETS` (odd #turns, deepest-first
 with feasibility) — seeded by the commit `block_hash`, so the same block always yields the same eval
 set. The prefix ends on a user turn and the model generates the next assistant turn; IDs are
@@ -399,18 +412,29 @@ set. The prefix ends on a user turn and the model generates the next assistant t
 ```
 claim model_submissions oldest-first  (SUBMITTED | HIPPIUS_RETRYABLE)  → HIPPIUS_RUNNING
   1. file manifest    model_validation/config.py allowlist (required / allowed / forbidden globs)
-  2. dtype preflight  header-only HTTP Range read of each shard — must be F16/BF16, else weight_dtype
+  2. chat template    sha256 of chat_template.jinja — AND of the chat_template embedded in
+                      tokenizer_config.json — must match the genesis pins (chat_template_hash)
+  2.5 metadata hashes every other metadata file byte-identical to the genesis repo
+                      (validate/genesis_files.py — sha256 pinned to
+                      dendriteholdings/albedo-qwen3.6-35b-king-genesis@d7934c55: config.json,
+                      generation_config.json, preprocessor_config.json, tokenizer_config.json,
+                      tokenizer.json, video_preprocessor_config.json → metadata_hash;
+                      model.safetensors.index.json is exempt — re-sharding is legit, checked
+                      structurally at step 4)
+  3. dtype preflight  header-only HTTP Range read of each shard — must be F16/BF16, else weight_dtype
                       (rejects quantized / F32 / F64 BEFORE the full download)
-  3. download         full repo from Hippius → ALBEDO_MODEL_CACHE_DIR
+  3.5 download        full repo from the committed hub (HF or Hippius) → ALBEDO_MODEL_CACHE_DIR
   4. safetensors index  model.safetensors.index.json weight_map vs on-disk shards + tensors
   5. architecture     config.json vs validate/architecture_spec.json (architectures + expected + forbidden_keys)
   6. fingerprint      per-tensor L2 norms + deterministic value samples (layer_norms_v2)
                       (fingerprint dim > MAX_KNN_DIM 16000 → fingerprint_too_large)
   7. OpenSearch dedup per-dimension kNN prefilter (HNSW cosine, top-20) → exact per-tensor rerank
                       cosine ≥ similarity_threshold (0.95) AND different hotkey → DUPLICATE
+                      (plus an exact weights_hash gate ahead of the kNN for byte-identical re-uploads)
   success → HIPPIUS_VALIDATED ; index fingerprint for future dedup ; publish fingerprint corpus to S3
   miner fault → TERMINAL_INVALID + fault.json
-                (file_manifest | weight_dtype | safetensors_index | architecture | duplicate | hotkey_already_validated)
+                (file_manifest | chat_template_hash | metadata_hash | weight_dtype | safetensors_index
+                 | architecture | duplicate | hotkey_already_validated)
   infra fault → HIPPIUS_RETRYABLE (≤ 5 attempts) → TERMINAL_INFRA_FAILED
 ```
 
@@ -549,10 +573,10 @@ Full reference in [.env.example](../.env.example) (backend + GPU host) and [.env
 | Variable | Purpose |
 |---|---|
 | `ALBEDO_EVAL_DATABASE_URL` | DSN for the whole eval stack |
-| `ALBEDO_POSTGRES_*` | docker-compose local Postgres (host port 65432) |
+| `ALBEDO_POSTGRES_*` | docker-compose local Postgres (a localhost-only port) |
 | `ALBEDO_EVAL_REMOTE_AUTH_TOKEN` | shared bearer for backend↔remote eval API |
 | `ALBEDO_EVAL_DATASET_MANIFEST_HASH` | sha256 pin of the combined swe-zero+mini-coder shard manifest |
-| `ALBEDO_EVAL_SAMPLE_COUNT` / `_MAX_TURNS_PER_SAMPLE` | duel size (default 128 / 10) |
+| `ALBEDO_EVAL_SAMPLE_COUNT` / `_MAX_TURNS_PER_SAMPLE` | duel size (default 100; max-turns is unused with bucket sampling, kept for call-site compat) |
 | `ALBEDO_EVAL_PREFETCH_NEXT_CHALLENGER` | pre-download the next queued challenger during the running eval (default true) |
 
 ### GPU eval host
@@ -562,7 +586,9 @@ Full reference in [.env.example](../.env.example) (backend + GPU host) and [.env
 | `ALBEDO_REMOTE_PREVIOUS_KING_GPU_IDS` / `_CHALLENGER_GPU_IDS` | `0,1,2,3` / `4,5,6,7` |
 | `ALBEDO_REMOTE_GENERATION_BACKEND` | `vllm` |
 | `ALBEDO_REMOTE_SCORING_BACKEND` | `websocket` (score bridge) or `http` |
-| `ALBEDO_REMOTE_SCORING_BATCH_CONCURRENCY` | concurrent /score-batch requests per eval (default 4) |
+| `ALBEDO_REMOTE_SCORING_BATCH_CONCURRENCY` | concurrent /score-batch requests per eval (default 128) |
+| `ALBEDO_REMOTE_TRAJECTORY_ASSISTANT_TURNS` | assistant turns generated per sample trajectory (default 8) |
+| `ALBEDO_REMOTE_COMPILE_CACHE_DIR` | shared vLLM torch.compile cache dir (e.g. /root/vllm_shared_compile) — same-arch models reuse backbone graphs; unset → per-model dirs pile up in ~/.cache/vllm |
 | `ALBEDO_REMOTE_MOCK_AUTO_VERDICT` | smoke mode — verdict without GPUs |
 | `ALBEDO_REMOTE_S3_*` | artifact upload credentials |
 
@@ -650,7 +676,7 @@ carry `scoring_mode` (`glm_categories` | `fixed_metrics_fallback` | `mixed`), `c
 
 ```bash
 uv run pytest -q                                                  # unit tests
-ALBEDO_TEST_DATABASE_URL=postgresql://user:pass@127.0.0.1:65432/db \
+ALBEDO_TEST_DATABASE_URL=postgresql://user:pass@localhost:<port>/db \
   uv run pytest -q tests/integration                              # needs Postgres + schema.sql
 uv run ruff check src/ && uv run ruff format src/                 # lint
 ```

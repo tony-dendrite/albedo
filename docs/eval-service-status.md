@@ -8,13 +8,13 @@ The repo contains a backend-side eval coordinator, a remote GPU eval API, a judg
 
 The runtime Python entrypoints used by the eval stack are registered in `pyproject.toml`:
 
-- `albedo-eval-api`: backend status API on port `8080`.
+- `albedo-eval-api`: backend status API on a localhost-only port.
 - `albedo-eval-dispatcher`: claims queued eval submissions and sends them to a remote GPU host.
 - `albedo-eval-requeuer`: moves `EVAL_RETRYABLE` submissions back to `EVAL_QUEUED`.
-- `albedo-remote-eval-api`: GPU-host control plane on port `8090`.
-- `albedo-judge-api`: backend judge/scoring API on port `8091`.
+- `albedo-remote-eval-api`: GPU-host control plane on a localhost-only port.
+- `albedo-judge-api`: backend judge/scoring API on a localhost-only port.
 - `albedo-score-bridge`: backend-to-remote WebSocket scoring bridge.
-- `chain-reader` and `hippius-validation`: upstream ingestion/validation services, present but separate from the eval coordinator loop.
+- `chain-reader` and `model-validation`: upstream ingestion/validation services, present but separate from the eval coordinator loop.
 
 ## Database
 
@@ -88,7 +88,7 @@ Run these on the backend/controller host.
 
 - `model_validation`
   - PM2 config: `pm2/ecosystem.chain-validation.config.js`
-  - Command: `uv run hippius-validation`
+  - Command: `uv run model-validation`
   - Validates model artifacts before eval eligibility.
 
 These are needed for a complete production pipeline, but not for a local smoke test if you seed the database yourself.
@@ -104,6 +104,51 @@ Run these on the GPU host unless you are doing local smoke testing.
 
 The remote API can run in smoke mode with `ALBEDO_REMOTE_MOCK_AUTO_VERDICT=true`. For real GPU evals, it uses the remote worker path, vLLM generation, dataset loading, scoring, and artifact upload settings.
 
+## GPU Host Provisioning
+
+Hard-won setup facts for fresh GPU boxes on newer CUDA architectures — without these the vLLM
+boot dies in flashinfer's fused-MoE JIT compile:
+
+- `apt install ninja-build` — the venv's pip `ninja` is not on the worker subprocess PATH.
+- `.env` toolchain block (paths relative to the box's repo/venv):
+
+  ```bash
+  CUDA_HOME=<repo>/.venv/lib/python3.12/site-packages/nvidia/cu13
+  CUDA_PATH=<repo>/.venv/lib/python3.12/site-packages/nvidia/cu13
+  PATH=<cu13>/bin:/usr/local/bin:/usr/bin:/bin:/root/.local/bin
+  LD_LIBRARY_PATH=<cu13>/lib:<cu13>/lib64
+  NVCC_APPEND_FLAGS=-DCCCL_DISABLE_CTK_COMPATIBILITY_CHECK
+  ```
+
+- Symlinks inside the venv `nvidia/cu13/`: `lib64 -> lib`, and in `lib/`:
+  `libcudart.so -> libcudart.so.13`, `libnvrtc.so -> libnvrtc.so.13`,
+  `libnvrtc-builtins.so -> libnvrtc-builtins.so.13.2`.
+- The flashinfer JIT cache (`~/.cache/flashinfer/<ver>/<arch>/`) is portable between same-arch
+  boxes — copying it skips the long fused-MoE kernel build entirely.
+
+**Compile caches.** Set a shared vLLM torch.compile dir on both roles —
+`ALBEDO_REMOTE_COMPILE_CACHE_DIR` (eval worker) and `SANITY_REMOTE_VLLM_COMPILE_CACHE_DIR`
+(sanity worker), e.g. `/root/vllm_shared_compile`. Same-architecture models reuse the backbone
+graphs (warm boot compiles in ~2-3s instead of ~30s). The AOT function cache always lives in
+`~/.cache/vllm/torch_compile_cache/torch_aot_compile/` regardless (not redirectable). Note the
+sanity worker's `SANITY_REMOTE_VLLM_ENFORCE_EAGER` **defaults to true** — set it to an explicit
+`false` for CUDA-graphs mode; commenting it out is not enough.
+
+**Model caches.** The EVAL host uses `ALBEDO_REMOTE_MODEL_CACHE_DIR` (resolver layout:
+`hf/<ns>__<repo>/<rev>/` and `oci/<registry>/<repo>__/<digest>/`, each with an
+`.albedo-model-cache.json` done-marker). On the PRE_EVAL + model_validation host, point all three
+at ONE directory so the sanity worker reuses model_validation's downloads instead of pulling a
+second 66G copy:
+
+```bash
+ALBEDO_MODEL_CACHE_DIR=/workspace/albedo-models
+CV_MODEL_CACHE_DIR=/workspace/albedo-models
+SANITY_REMOTE_MODEL_CACHE_DIR=/workspace/albedo-models
+```
+
+Register `pm2/ecosystem.model-gc.config.js` on that host — it prunes cache entries idle >4h from
+`ALBEDO_MODEL_CACHE_DIR` (hourly cron).
+
 ## Tunnel
 
 The backend needs to reach the GPU host remote API. The provided PM2 tunnel is:
@@ -117,11 +162,26 @@ Set these in `.env` on the backend:
 ```bash
 ALBEDO_GPU_HOST_USER=...
 ALBEDO_GPU_HOST_SSH_HOST=...
-ALBEDO_TUNNEL_BACKEND_LOCAL_GPU_PORT=18090
-ALBEDO_REMOTE_EVAL_API_PORT=8090
+ALBEDO_TUNNEL_BACKEND_LOCAL_GPU_PORT=<port>
+ALBEDO_REMOTE_EVAL_API_PORT=<port>
 ```
 
-Then the backend should register the remote eval host in `remote_gpu_hosts` with a `base_url` that points to the tunnel, usually `http://127.0.0.1:18090`.
+Then the backend should register the remote eval host in `remote_gpu_hosts` with a `base_url` that points to the tunnel, usually `http://localhost:<port>`.
+
+The PRE_EVAL host has the same pattern via `pm2/ecosystem.sanity-host-tunnel.config.js`
+(`ALBEDO_SANITY_TUNNEL_LOCAL_PORT` → `SANITY_REMOTE_API_PORT`), with its
+`remote_gpu_hosts` row at `http://localhost:<port>`.
+
+**DB tunnels (GPU host → backend Postgres).** GPU-host services that need the DB
+(model_validation, eval-cache-cleanup) expect Postgres on `localhost:<port>`. Preferred: the
+pod-side `pm2/ecosystem.db-tunnel.config.js` (`ssh -L <port>:localhost:<port> <backend>` using the
+box's own key, driven by the `ALBEDO_DB_TUNNEL_*` env vars). If the pod has no key of its own, run
+a reverse tunnel from the backend instead (`ssh -R localhost:<port>:localhost:<port> <gpu-host>`
+under pm2 on the backend).
+
+**PM2 env-snapshot gotcha.** pm2 captures env at registration time — after any `.env` change or
+ssh-target repoint, `pm2 delete <name> && pm2 start <config>`; a plain `restart` resurrects the old
+env/args.
 
 ## Required Environment
 
@@ -130,7 +190,7 @@ Start from `.env.example` and fill a real `.env`.
 Backend/controller host needs at least:
 
 ```bash
-ALBEDO_EVAL_DATABASE_URL=postgresql://user:password@127.0.0.1:65432/db
+ALBEDO_EVAL_DATABASE_URL=postgresql://user:password@localhost:<port>/db
 ALBEDO_EVAL_WORKER_ID=eval-dispatcher-1
 ALBEDO_EVAL_REMOTE_AUTH_TOKEN=shared-remote-token
 ALBEDO_EVAL_DATASET_MANIFEST_URI=s3://albedo-artifacts/datasets/swe-zero/manifest.json
@@ -139,11 +199,19 @@ ALBEDO_EVAL_JUDGE_CONFIG_HASH=sha256:replace-with-real-hash
 ALBEDO_EVAL_ARTIFACT_PREFIX=s3://albedo-artifacts
 ALBEDO_JUDGE_API_AUTH_TOKEN=shared-judge-token
 ALBEDO_JUDGE_OPENROUTER_API_KEY=...
-ALBEDO_SCORE_BRIDGE_REMOTE_WS_URL=ws://127.0.0.1:18090/score-bridge
+ALBEDO_SCORE_BRIDGE_REMOTE_WS_URL=ws://localhost:<port>/score-bridge
 ALBEDO_SCORE_BRIDGE_REMOTE_AUTH_TOKEN=shared-remote-token
-ALBEDO_SCORE_BRIDGE_JUDGE_BASE_URL=http://127.0.0.1:8091
+ALBEDO_SCORE_BRIDGE_JUDGE_BASE_URL=http://localhost:<port>
 ALBEDO_SCORE_BRIDGE_JUDGE_AUTH_TOKEN=shared-judge-token
 ```
+
+`chain-reader` honors `CHAIN_START_BLOCK`: on-chain commitments below that block are skipped at
+ingest (`scan: ... skipped=N` in its log). Bump it at cutovers/migrations so historical commits
+are not re-processed; `chain_guard` also seeds its `used_hotkeys` ledger from every hotkey
+committed before that block. Note the GPU-side auth token (`ALBEDO_REMOTE_AUTH_TOKEN` on the box)
+must equal the backend's `ALBEDO_EVAL_REMOTE_AUTH_TOKEN` *and* its
+`ALBEDO_SCORE_BRIDGE_REMOTE_AUTH_TOKEN` — both hit the same check on the remote API; an empty
+token on the box disables auth entirely.
 
 > The eval draws on two datasets in full — **SWE-ZERO (12M)** and **mini-coder (400k)**; at scoring
 > time the eval tasks are split **70/30** across them, per the per-source `weight` in the manifest.
@@ -159,7 +227,7 @@ ALBEDO_REMOTE_HOST_ID=eval-gpu-1
 ALBEDO_REMOTE_HOST_ROLE=EVAL
 ALBEDO_REMOTE_GPU_COUNT=8
 ALBEDO_REMOTE_FREE_GPU_COUNT=8
-ALBEDO_REMOTE_ACCELERATOR_TYPE=B200
+ALBEDO_REMOTE_ACCELERATOR_TYPE=<gpu-type>
 ALBEDO_REMOTE_READY=true
 ALBEDO_REMOTE_GENERATION_BACKEND=vllm
 ALBEDO_REMOTE_DATASET_ROOT=/path/to/swe-zero
@@ -201,8 +269,8 @@ INSERT INTO remote_gpu_hosts (
     accelerator_type, capabilities, last_heartbeat_at
 )
 VALUES (
-    'eval-gpu-1', 'EVAL', 'http://127.0.0.1:18090', 'READY', 8, 8,
-    'B200', '{}'::jsonb, now()
+    'eval-gpu-1', 'EVAL', 'http://localhost:<port>', 'READY', 8, 8,
+    '<gpu-type>', '{}'::jsonb, now()
 )
 ON CONFLICT (id) DO UPDATE
 SET base_url = EXCLUDED.base_url,
@@ -281,22 +349,22 @@ uv run albedo-eval-dispatcher
 Backend API:
 
 ```bash
-curl http://127.0.0.1:8080/health
-curl http://127.0.0.1:8080/ready
+curl http://localhost:<port>/health
+curl http://localhost:<port>/ready
 ```
 
 Judge API:
 
 ```bash
-curl http://127.0.0.1:8091/health
-curl http://127.0.0.1:8091/ready
+curl http://localhost:<port>/health
+curl http://localhost:<port>/ready
 ```
 
 Remote API through the backend tunnel:
 
 ```bash
-curl -H "Authorization: Bearer $ALBEDO_EVAL_REMOTE_AUTH_TOKEN" http://127.0.0.1:18090/ready
-curl -H "Authorization: Bearer $ALBEDO_EVAL_REMOTE_AUTH_TOKEN" http://127.0.0.1:18090/capacity
+curl -H "Authorization: Bearer $ALBEDO_EVAL_REMOTE_AUTH_TOKEN" http://localhost:<port>/ready
+curl -H "Authorization: Bearer $ALBEDO_EVAL_REMOTE_AUTH_TOKEN" http://localhost:<port>/capacity
 ```
 
 ## Eval State Flow
@@ -339,5 +407,5 @@ uv run pytest -q
 Run Postgres integration tests after pointing `ALBEDO_TEST_DATABASE_URL` at a test database. The fixture loads `schema.sql`:
 
 ```bash
-ALBEDO_TEST_DATABASE_URL=postgresql://user:password@127.0.0.1:65432/db uv run pytest -q tests/integration
+ALBEDO_TEST_DATABASE_URL=postgresql://user:password@localhost:<port>/db uv run pytest -q tests/integration
 ```

@@ -17,7 +17,12 @@ used, run
 the **same validation checks you can run locally** (file manifest + architecture lock +
 near-duplicate dedup), and finally **evaluate** the model. A model that beats the current
 king earns weight/emissions. So your job is: produce a model that (a) passes validation and
-(b) scores higher than the incumbent by at least the **2% win margin**.
+(b) scores higher than the incumbent by at least the **3% win margin**.
+
+Evaluation is a multiturn duel: 100 sampled coding-trajectory prefixes (SWE-ZERO + mini-coder,
+70/30), on which your model and the king each generate **8 assistant turns** per sample (tool
+observations are simulated between turns); an LLM judge ensemble scores both sides on the same
+per-sample yes/no questions.
 
 The whole publish flow is one pipeline:
 
@@ -47,16 +52,20 @@ Validation is strict and defined in [chain.toml](chain.toml). Your uploaded repo
 **Repo naming** — `<namespace>/albedo-qwen3.6-35b-<suffix>` (pattern `^[^/]+/albedo-qwen3\.6-35b-.+$`).
 The CLI builds this for you from `--namespace` + `--name`.
 
-**File manifest** (`[files]` in [chain.toml](chain.toml)) — the repo's file set is checked
-against a strict allowlist:
+**File manifest** — the repo's file set is checked against a strict allowlist. The live
+authority is `src/model_validation/config.py` (the `[files]` block in [chain.toml](chain.toml)
+has drifted and is NOT what validators enforce):
 
-- **Required:** `config.json`, `tokenizer_config.json`, `tokenizer.json`
+- **Required (all seven):** `config.json`, `generation_config.json`, `tokenizer_config.json`,
+  `tokenizer.json`, `chat_template.jinja`, `preprocessor_config.json`,
+  `video_preprocessor_config.json`
 - **At least one** `*.safetensors` (single-shard `model.safetensors` or sharded `model-*-of-*.safetensors`)
-- **Allowed (optional):** `generation_config.json`, `special_tokens_map.json`, `added_tokens.json`,
-  `chat_template.jinja`, `merges.txt`, `vocab.json`, `model.safetensors.index.json`,
-  `.gitattributes`, `README.md`
+- **Allowed (optional):** `model.safetensors.index.json`, `.gitattributes`, `LICENSE`, `README.md`
 - **Forbidden:** any `*.py` file (no custom modeling code)
-- Any other file is flagged as an **unexpected extra** and fails validation.
+- Any other file is flagged as an **unexpected extra** and fails validation (`file_manifest`).
+  This includes files HF tooling likes to add: `merges.txt`, `vocab.json`,
+  `configuration.json`, `special_tokens_map.json`, `added_tokens.json` — delete them from the
+  repo before committing (`tokenizer.json` already carries the tokenizer).
 
 **Architecture lock** (`[arch]` / `[seed]` in [chain.toml](chain.toml)) — your `config.json`
 must match the genesis Qwen3.6-35B-A3B seed exactly on:
@@ -67,6 +76,26 @@ must match the genesis Qwen3.6-35B-A3B seed exactly on:
 - MoE keys: `moe_intermediate_size`, `shared_expert_intermediate_size`, `num_experts`,
   `num_experts_per_tok`
 - It must **not** contain `auto_map` (no remote code) or `quantization_config` (no quantized models).
+
+**Metadata hash pinning** — every metadata file you ship must be **byte-for-byte identical** to
+the genesis repo (`dendriteholdings/albedo-qwen3.6-35b-king-genesis`). Validators compare sha256
+hashes pinned to the genesis revision for: `config.json`, `generation_config.json`,
+`preprocessor_config.json`, `tokenizer_config.json`, `tokenizer.json`,
+`video_preprocessor_config.json` (fault: `metadata_hash`), and `chat_template.jinja` has its own
+dedicated hash check — including the chat-template copy embedded inside `tokenizer_config.json`
+(fault: `chat_template_hash`). In practice: **copy these seven files from the genesis repo and
+never edit them** — no generation-config tweaks, no tokenizer changes, no template edits. A single
+changed byte (even whitespace or a re-serialized JSON) is a rejection. The only file allowed to
+differ is `model.safetensors.index.json` (re-sharding is legitimate; it's validated structurally
+instead).
+
+> ⚠️ The local CLI (`check-model --path`) does **not** run these hash checks — verify yourself
+> before uploading: `sha256sum` your metadata files against the genesis repo's copies.
+
+**Weight format** — every safetensors shard must be 16-bit (F16/BF16); quantized / F32 / F64
+weights are rejected (`weight_dtype`, checked header-only before the full download). A sharded
+checkpoint's `model.safetensors.index.json` weight_map must match the shards and tensors actually
+on disk (`safetensors_index`).
 
 In short: fine-tune the weights, keep the Qwen3.6-35B-A3B architecture and tokenizer intact, don't add
 custom code or quantize.
