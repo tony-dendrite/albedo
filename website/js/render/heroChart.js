@@ -1,6 +1,9 @@
 import { el, mount } from "../dom.js";
 import { pct, fmtRelative, fmtDateTime } from "../format.js";
 import { modelRepo } from "../model.js";
+import { CHART_DISPLAY_FROM } from "../config.js";
+
+const chartFromTs = Date.parse(CHART_DISPLAY_FROM);
 
 const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 const HEIGHT = 180;
@@ -39,7 +42,7 @@ function tipRow(value, cls, label) {
 
 export function renderHeroChart(container, runs) {
   const points = (runs || [])
-    .filter(r => r.finished_at && r.score_challenger != null)
+    .filter(r => r.finished_at && r.score_challenger != null && Date.parse(r.finished_at) >= chartFromTs)
     .reverse(); // newest-first -> chronological
   if (points.length < 2) {
     mount(container, el("div", { class: "empty" }, "no eval history yet."));

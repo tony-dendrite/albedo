@@ -1,9 +1,5 @@
-import { HISTORY_DISPLAY_FROM } from "./config.js";
-
-const historyFromTs = Date.parse(HISTORY_DISPLAY_FROM);
-
 export function normalize(d) {
-  const runs = (d.eval_runs || []).filter(r => r.finished_at && Date.parse(r.finished_at) >= historyFromTs);
+  const runs = d.eval_runs || [];
   return {
     updatedAt: d.updated_at,
     chain: d.chain || {},
