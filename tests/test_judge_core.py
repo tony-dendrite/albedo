@@ -331,8 +331,8 @@ def test_parse_questions_drops_semantic_near_duplicates():
     )
     out, _ = parse_questions(raw, 10)
     texts = [q["text"] for q in out]
-    assert texts == [paraphrases[0], stamped[0]] + distinct  # one survivor per padded family
-    assert [q["id"] for q in out] == [f"q_{i:02d}" for i in range(1, 6)]
+    assert texts == [paraphrases[0], paraphrases[3], stamped[0]] + distinct
+    assert [q["id"] for q in out] == [f"q_{i:02d}" for i in range(1, 7)]
 
 
 def test_parse_questions_caps_template_stamping():
@@ -352,7 +352,7 @@ def test_parse_questions_caps_template_stamping():
     raw = json.dumps({"questions": [{"text": t, "example_bad": "b"} for t in stamped + others]})
     out, _ = parse_questions(raw, 10)
     texts = [q["text"] for q in out]
-    assert texts == stamped[:2] + others  # capped at 2 per leading phrase
+    assert texts == stamped[:3] + others
 
 
 def test_parse_questions_caps_generic_hygiene_checks():

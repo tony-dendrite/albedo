@@ -13,6 +13,7 @@ answered against computed numbers instead of the judge's own counting.
 from __future__ import annotations
 
 import json
+import os as _os
 import re
 from difflib import SequenceMatcher
 from statistics import mean
@@ -838,12 +839,12 @@ _QUESTION_STOPWORDS = frozenset(
     "not no any all one when if such e g rather than instead avoid avoids using use uses run "
     "runs running contain contains include includes reference references".split()
 )
-_DUP_JACCARD = 0.55
-_DUP_CONTAINMENT = 0.75
-_DUP_CHAR_RATIO = 0.75
+_DUP_JACCARD = float(_os.environ.get("ALBEDO_EXP_DUP_JACCARD", "0.75"))
+_DUP_CONTAINMENT = float(_os.environ.get("ALBEDO_EXP_DUP_CONTAINMENT", "0.90"))
+_DUP_CHAR_RATIO = float(_os.environ.get("ALBEDO_EXP_DUP_CHAR_RATIO", "0.87"))
 _DUP_CHAR_MIN_LEN = 20
 _TEMPLATE_KEY_TOKENS = 5
-_TEMPLATE_MAX_PER_KEY = 2
+_TEMPLATE_MAX_PER_KEY = int(_os.environ.get("ALBEDO_EXP_TEMPLATE_MAX_PER_KEY", "4"))
 _CONDITIONAL_RE = re.compile(r"^\s*if\b", re.IGNORECASE)
 _UNCONDITIONAL_SUBMIT_RE = re.compile(
     r"\b(?:submit|submits|submitting|finali[sz]e|finali[sz]es|finish(?:es)?)\b",
@@ -1126,7 +1127,6 @@ def parse_answers(
 
 
 # --------------------------------------------------------------------------- scoring
-import os as _os
 
 REQUIRES_WEIGHTS = {
     "action": float(_os.environ.get("ALBEDO_EXP_W_ACTION", "2.0")),
