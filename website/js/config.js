@@ -1,5 +1,8 @@
 export const POLL_MS = 4000;
 
+// hide eval history before this date (2026-07-22 era reset)
+export const HISTORY_DISPLAY_FROM = "2026-07-22T00:00:00Z";
+
 export const DATA_ENDPOINTS = [
   "https://s3.hippius.com/albedo/data/dashboard.json",
   "https://us-east-1.hippius.com/albedo/data/dashboard.json",
