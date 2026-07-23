@@ -1,4 +1,4 @@
-import { fetchBenchmarks, fetchJson } from "../fetch.js";
+import { fetchBenchmarkRun, fetchBenchmarks, fetchJson } from "../fetch.js";
 import { el, mount } from "../dom.js";
 import { fmt, fmtDateTime, shortDigest } from "../format.js";
 import { modelRepo, kingTitleName } from "../model.js";
@@ -332,7 +332,11 @@ async function load() {
     mount($("b-body"), el("div", { class: "empty" }, "benchmark model not found."));
     return;
   }
-  const selected = completedRuns(model).find(run => run.id === runId) || latestRun(model);
+  let selected = completedRuns(model).find(run => run.id === runId) || latestRun(model);
+  if (selected?.detail_path) {
+    const detail = await fetchBenchmarkRun(selected);
+    if (detail) selected = { ...selected, ...detail };
+  }
   render(model, selected, genesisScores(models));
 }
 

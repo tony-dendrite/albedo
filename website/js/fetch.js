@@ -3,11 +3,11 @@ import { DATA_ENDPOINTS, STATE_ENDPOINTS, BENCHMARK_ENDPOINTS, MANIFEST_ENDPOINT
 let llmsTextCache = null;
 const registrationCacheKey = "albedo.registrationHistory.v2";
 
-async function fetchFirstJson(endpoints) {
-  const buster = Date.now();
+async function fetchFirstJson(endpoints, { revalidate = false } = {}) {
+  const suffix = revalidate ? "" : "?t=" + Date.now();
   for (const url of endpoints) {
     try {
-      const r = await fetch(url + "?t=" + buster, { cache: "no-store" });
+      const r = await fetch(url + suffix, { cache: revalidate ? "no-cache" : "no-store" });
       if (!r.ok) continue;
       return await r.json();
     } catch {}
@@ -24,7 +24,21 @@ export async function fetchState() {
 }
 
 export async function fetchBenchmarks() {
-  return fetchFirstJson(BENCHMARK_ENDPOINTS);
+  return fetchFirstJson(BENCHMARK_ENDPOINTS, { revalidate: true });
+}
+
+export async function fetchBenchmarkRun(run) {
+  if (!run?.detail_path) return null;
+  for (const endpoint of BENCHMARK_ENDPOINTS) {
+    const base = endpoint.slice(0, endpoint.lastIndexOf("/") + 1);
+    try {
+      const r = await fetch(base + run.detail_path, { cache: "no-cache" });
+      if (!r.ok) continue;
+      const payload = await r.json();
+      return payload?.run || payload;
+    } catch {}
+  }
+  return null;
 }
 
 export async function fetchManifest() {
