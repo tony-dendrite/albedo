@@ -9,7 +9,7 @@ const BENCHMARK_LABELS = {
   swe_rebench_2026_03: "SWE-rebench",
 };
 
-const BENCHMARK_ORDER = ["tau2_airline", "tau2_retail", "tau2_telecom"];
+const BENCHMARK_ORDER = ["tau2_airline", "tau2_retail", "tau2_telecom", "swe_rebench_2026_03"];
 
 const PAGE_SIZES = [5, 10, 25, 50];
 const ACTIVE_STATES = new Set(["QUEUED", "CLAIMED", "LOADING_MODEL", "RUNNING", "SCORING"]);
