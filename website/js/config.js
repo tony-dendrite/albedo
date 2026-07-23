@@ -1,7 +1,7 @@
 export const POLL_MS = 4000;
 
-// history chart only plots runs from this date on (2026-07-22 era reset); the table shows everything
-export const CHART_DISPLAY_FROM = "2026-07-22T00:00:00Z";
+// history chart only plots the last N days; the table shows everything
+export const CHART_DISPLAY_DAYS = 7;
 
 export const DATA_ENDPOINTS = [
   "https://s3.hippius.com/albedo/data/dashboard.json",
