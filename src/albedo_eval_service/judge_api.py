@@ -384,6 +384,8 @@ class QuestionService:
         }
         if reference_model:
             source["reference_model"] = reference_model
+        if reference is not None:
+            source["reference_trajectory"] = reference
         return QuestionPrepResult(questions=questions, source=source)
 
 

@@ -366,6 +366,7 @@ def test_prepare_anchors_on_reference_and_filters_leaks():
     assert fake.saw_reference_prompt
     assert result.source["question_mode"] == "sota_anchored"
     assert result.source["reference_model"] == "z-ai/glm-5.2"
+    assert "REFERENCE STEP" in result.source["reference_trajectory"]
     assert all("the reference" not in q["text"].casefold() for q in result.questions)
 
 
