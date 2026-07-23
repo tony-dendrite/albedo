@@ -56,7 +56,9 @@ def test_score_batch_payload_carries_both_outputs_no_index():
     assert payloads[0]["total_sample_count"] == len(samples)
     assert payloads[0]["category_prep_id"] == "prep-1"
     for entry in payloads[0]["samples"]:
-        assert set(entry) == {"sample_id", "prompt", "previous_king_output", "challenger_output"}
+        assert set(entry) == {
+            "sample_id", "prompt", "previous_king_output", "challenger_output", "messages",
+        }
 
 
 def test_simulate_observation_payload_carries_messages():

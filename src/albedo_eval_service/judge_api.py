@@ -66,6 +66,8 @@ class JudgeSample(BaseModel):
     previous_king_output: str
     challenger_output: str
     sample_index: int = 0
+    messages: list[dict[str, str]] | None = None
+    assistant_turns: int = 0
 
 
 class ScoreBatchRequest(BaseModel):
@@ -810,6 +812,9 @@ async def _score_samples(
             "judge_results": king_recs + chal_recs,
             "scored": scored,
             "scoring_mode": "binary",
+            # Question regime provenance: task_only here means the sample was scored WITHOUT
+            # the anchored checklist (no size ladder) — must be visible in artifacts.
+            "question_source": prepared.source,
         }
 
     records = await asyncio.gather(*[_score_one(sample) for sample in request.samples])

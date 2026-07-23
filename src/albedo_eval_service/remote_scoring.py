@@ -332,6 +332,7 @@ def _score_batch_payloads(
                         "prompt": sample.prompt,
                         "previous_king_output": king_by_id[sample.sample_id].text,
                         "challenger_output": challenger_by_id[sample.sample_id].text,
+                        "messages": sample.messages,
                     }
                     for sample in batch
                 ],
