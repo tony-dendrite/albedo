@@ -690,7 +690,7 @@ td.judge .judge-ver { color: var(--color-fg-4); font-size: 10px; }
 .bench-history-toggle:hover { border-color: var(--color-border-hover); color: var(--color-fg); }
 .bench-tile-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
 }
 .bench-tile {
@@ -748,7 +748,7 @@ a.bench-tile:hover .bench-tile-score { color: var(--color-accent); }
 .bench-tile[data-status="running"] .bench-tile-score { color: var(--color-fg-2); }
 .bench-queue-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(120px, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
   margin-bottom: 12px;
 }
@@ -805,7 +805,7 @@ a.bench-tile:hover .bench-tile-score { color: var(--color-accent); }
 }
 .bench-spark-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(120px, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
   margin-bottom: 12px;
 }

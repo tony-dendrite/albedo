@@ -94,13 +94,6 @@ function progressLabel(progress) {
   return state || "active";
 }
 
-function progressMeta(progress) {
-  const seconds = Number(progress?.seconds_since_last_progress);
-  if (Number.isFinite(seconds)) return `${Math.max(0, Math.round(seconds))}s since progress`;
-  if (progress?.updated_at) return fmtRelative(progress.updated_at);
-  return progress?.worker_id || "active";
-}
-
 function latestRun(model) {
   return completedRuns(model).sort((a, b) => {
     const at = new Date(a.finished_at || a.started_at || "").getTime();
@@ -168,6 +161,17 @@ function panelScore(value) {
   return `${pct(value, 1)}%`;
 }
 
+function baselineComparison(entry, baseline) {
+  if (baseline?.score == null) return { label: "genesis —", delta: "—", cls: "" };
+  if (entry?.score == null) return { label: `genesis ${panelScore(baseline.score)}`, delta: "—", cls: "" };
+  const delta = (Number(entry.score) - Number(baseline.score)) * 100;
+  return {
+    label: `genesis ${panelScore(baseline.score)}`,
+    delta: `${delta > 0 ? "+" : ""}${delta.toFixed(1)} pp`,
+    cls: delta > 0 ? "up" : delta < 0 ? "down" : "flat",
+  };
+}
+
 function svgEl(tag, attrs = {}, ...children) {
   const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
   for (const [k, v] of Object.entries(attrs)) {
@@ -181,16 +185,17 @@ function svgEl(tag, attrs = {}, ...children) {
   return node;
 }
 
-function renderTile(model, suite, progress) {
+function renderTile(model, suite, progress, baseline) {
   const entry = suiteScores(model)[suite];
   const scored = entry?.score != null;
+  const comparison = baselineComparison(entry, baseline);
   if (!scored && progress) {
     return el("div", { class: "bench-tile", "data-status": "running" },
       el("div", { class: "bench-tile-name" }, benchmarkLabel(suite)),
       el("div", { class: "bench-tile-score" }, progressLabel(progress)),
       el("div", { class: "bench-tile-status" },
         el("span", { class: "live" }, activeState(progress).toLowerCase().replaceAll("_", " ") || "active"),
-        el("span", {}, progressMeta(progress))));
+        el("span", {}, comparison.label)));
   }
   const href = entry?.run_id ? detailHref(model, entry.run_id) : null;
   return el(href ? "a" : "div", { class: "bench-tile", "data-status": scored ? "completed" : "missing", href },
@@ -198,9 +203,9 @@ function renderTile(model, suite, progress) {
     el("div", { class: "bench-tile-score" }, scored ? panelScore(entry.score) : "missing"),
     el("div", { class: "bench-tile-status" },
       scored
-        ? [el("span", { class: "ok" }, "succeeded"),
-           el("span", {}, `${entry.passed_count ?? "—"}/${entry.task_count ?? "—"}`)]
-        : [el("span", {}, "—"), el("span", {}, "no run")]));
+        ? [el("span", {}, comparison.label),
+           el("span", { class: `bench-delta ${comparison.cls}`, title: "delta vs genesis" }, comparison.delta)]
+        : [el("span", {}, comparison.label), el("span", {}, "no run")]));
 }
 
 function renderSparks(sorted) {
@@ -377,6 +382,7 @@ export function renderBenchmarks(container, metaNode, data) {
     return;
   }
   const selected = sorted.find(model => !isGenesis(model)) || sorted[0];
+  const baselineScores = suiteScores((data?.models || []).find(isGenesis));
   const rerender = () => renderBenchmarks(container, metaNode, data);
   const scores = suiteScores(selected);
   const done = BENCHMARK_ORDER.filter(suite => scores[suite]?.score != null).length;
@@ -394,7 +400,7 @@ export function renderBenchmarks(container, metaNode, data) {
           el("span", { class: "bench-panel-meta" },
             `${done}/${BENCHMARK_ORDER.length} scores · ${modelLabel(selected)}`))),
       el("div", { class: "bench-tile-grid" }, BENCHMARK_ORDER.map(suite =>
-        renderTile(selected, suite, activeProgress.get(progressKey(selected.model_repo || selected.id, suite))))),
+        renderTile(selected, suite, activeProgress.get(progressKey(selected.model_repo || selected.id, suite)), baselineScores[suite]))),
       historyOpen ? renderHistoryPanel(sorted, selected, rerender, data) : null));
   if (metaNode) metaNode.textContent = `${models.length} models · ${data.counts?.runs ?? 0} benchmark runs · updated ${fmtRelative(data.generated_at)}`;
 }
