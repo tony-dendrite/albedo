@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -23,6 +24,26 @@ _SCORED_OR_BEYOND = (
     "COMPLETE_LOSS",
     "COMPLETE_CORONATED",
 )
+
+_ERROR_LINE = re.compile(r"[A-Za-z_][\w.]*(?:Error|Exception)\b")
+
+
+def _concise_fault(message: str | None, max_chars: int = 300) -> str:
+    """One readable line for dashboard-bound fault text — never a raw traceback.
+
+    Upstream fault messages should already be single-line, but any that still carry
+    an embedded traceback are reduced to their final exception line here so code
+    dumps never reach the public site.
+    """
+    if not message:
+        return ""
+    lines = [line.strip() for line in message.splitlines() if line.strip()]
+    if len(lines) > 1:
+        for idx in range(len(lines) - 1, -1, -1):
+            if _ERROR_LINE.match(lines[idx]):
+                return lines[idx][:max_chars]
+        return lines[-1][:max_chars]
+    return lines[0][:max_chars]
 
 
 @dataclass(frozen=True)
@@ -499,7 +520,7 @@ class EvalRepository:
                     message = (
                         f"Eval retry cap reached: retry_count={row['retry_count']} "
                         f"max_retry_count={max_retry_count}; "
-                        f"last_fault={row['fault_code']}: {row['fault_message']}"
+                        f"last_fault={row['fault_code']}: {_concise_fault(row['fault_message'])}"
                     )
                     conn.execute(
                         """

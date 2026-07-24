@@ -41,10 +41,26 @@ def _download_child() -> None:
     """Child-process entry point for a supervised full HF download (see _supervise).
 
     Invoked as ``python -c "...; _download_child()" <repo> <revision> <local_dir> <max_workers>``.
+    Shards go through _fastdl (parallel ranged requests, sha256-verified, only
+    missing/broken files re-fetched); the index stays on snapshot_download.
     """
+    from pathlib import Path
+
     from huggingface_hub import snapshot_download
 
+    from config_validation.storage import _fastdl
+
     repo, revision, local_dir, max_workers = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+    if _fastdl.available():
+        snapshot_download(
+            repo_id=repo,
+            revision=revision,
+            local_dir=local_dir,
+            allow_patterns=["model.safetensors.index.json"],
+            token=_token(),
+        )
+        _fastdl.fetch_shards(repo, revision, Path(local_dir), _token())
+        return
     snapshot_download(
         repo_id=repo,
         revision=revision,

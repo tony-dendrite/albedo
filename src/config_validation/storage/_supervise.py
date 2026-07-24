@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -25,8 +26,9 @@ _HEARTBEAT_INTERVAL_S = 10.0
 
 # Tunable per host via env, read at import so a redeploy picks up changes.
 OUT_OF_PROCESS = os.environ.get("ALBEDO_DOWNLOAD_OUT_OF_PROCESS", "1") not in ("0", "false", "False", "")
-# HF's CDN streams steadily, so several minutes of zero progress means the transfer is dead.
-STALL_SECONDS = float(os.environ.get("ALBEDO_DOWNLOAD_STALL_SECONDS", "600"))
+# HF's CDN streams steadily, so zero byte growth means the transfer is dead — this is a
+# no-progress freeze window, not a total-download timeout (active transfers never expire).
+STALL_SECONDS = float(os.environ.get("ALBEDO_DOWNLOAD_STALL_SECONDS", "30"))
 STALL_RETRIES = int(os.environ.get("ALBEDO_DOWNLOAD_STALL_RETRIES", "3"))
 # Hippius pulls from decentralized storage — slower, with longer *legitimate* gaps between
 # chunks — so it tolerates a wider no-progress window before a kill.
@@ -67,6 +69,29 @@ def _tail_file(path: Path, max_bytes: int) -> str:
         return "(download log unavailable)"
     text = data.decode("utf-8", errors="replace").strip()
     return text or "(no output captured)"
+
+
+_ERROR_LINE = re.compile(r"[A-Za-z_][\w.]*(?:Error|Exception|Interrupt)\b")
+
+
+def _summarize_error_log(text: str, max_chars: int = 300) -> str:
+    """Compress a child's log tail to one human-readable failure reason.
+
+    This string becomes ``fault_message`` and is shown verbatim on the public
+    dashboard — keep the final exception line (plus its explanatory follow-up when
+    present) instead of a raw traceback.
+    """
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return "(no output captured)"
+    for idx in range(len(lines) - 1, -1, -1):
+        if _ERROR_LINE.match(lines[idx]):
+            summary = lines[idx]
+            follow = lines[idx + 1] if idx + 1 < len(lines) else ""
+            if follow and not follow.startswith(("Please ", "If you ", "For more", "Traceback")):
+                summary += " — " + follow
+            return summary[:max_chars]
+    return lines[-1][:max_chars]
 
 
 def _spawn(child_call: str, args: list[str], log_path: Path) -> subprocess.Popen:
@@ -120,15 +145,22 @@ def supervise_download(
     runs its download; ``args`` become the child's ``sys.argv[1:]``. A watchdog samples
     ``watch_dir``'s byte total every ``_HEARTBEAT_INTERVAL_S``; if it stops growing for
     ``stall_seconds`` the child (its own process group) is terminated and the download
-    retried, resuming from what already landed on disk. Raises ``TimeoutError`` after
-    ``max_attempts`` consecutive stalls, or ``RuntimeError`` on a genuine child error —
-    both are retryable infra faults one level up. ``stall_seconds`` / ``max_attempts``
-    default to the HF-tuned module globals; the Hippius backend passes its own wider ones.
+    retried, resuming from what already landed on disk. An attempt that grew the
+    directory resets the retry budget, so a transfer that keeps making progress is
+    resumed as many times as it needs; ``TimeoutError`` is raised only after
+    ``max_attempts`` *consecutive* attempts with zero byte progress. ``RuntimeError``
+    on a genuine child error — both are retryable infra faults one level up.
+    ``stall_seconds`` / ``max_attempts`` default to the HF-tuned module globals; the
+    Hippius backend passes its own wider ones.
     """
     stall = STALL_SECONDS if stall_seconds is None else stall_seconds
     log_path = watch_dir.parent / f"{watch_dir.name}.download.log"
     attempts = max(1, STALL_RETRIES if max_attempts is None else max_attempts)
-    for attempt in range(1, attempts + 1):
+    attempt = 0
+    fruitless = 0
+    while True:
+        attempt += 1
+        baseline = _dir_bytes(watch_dir)
         proc = _spawn(child_call, args, log_path)
         start = time.monotonic()
         last_bytes = -1
@@ -139,27 +171,30 @@ def supervise_download(
             current = _dir_bytes(watch_dir)
             now = time.monotonic()
             log.info(
-                "download %s attempt=%d/%d elapsed=%.0fs bytes=%d",
-                label, attempt, attempts, now - start, current,
+                "download %s attempt=%d elapsed=%.0fs bytes=%d",
+                label, attempt, now - start, current,
             )
             if current > last_bytes:
                 last_bytes = current
                 last_progress = now
             elif now - last_progress >= stall:
                 log.warning(
-                    "download %s stalled attempt=%d/%d bytes=%d no_progress=%.0fs — killing",
-                    label, attempt, attempts, current, now - last_progress,
+                    "download %s stalled attempt=%d bytes=%d no_progress=%.0fs — killing",
+                    label, attempt, current, now - last_progress,
                 )
                 _terminate(proc)
                 stalled = True
                 break
         if stalled:
+            fruitless = 0 if last_bytes > baseline else fruitless + 1
+            if fruitless >= attempts:
+                raise TimeoutError(
+                    f"download of {label} made no progress for {stall:.0f}s "
+                    f"across {attempts} consecutive attempts"
+                )
             continue
         if proc.returncode == 0:
             log_path.unlink(missing_ok=True)
             return
-        detail = _tail_file(log_path, 4000)
+        detail = _summarize_error_log(_tail_file(log_path, 4000))
         raise RuntimeError(f"download of {label} exited {proc.returncode}: {detail}")
-    raise TimeoutError(
-        f"download of {label} made no progress for {stall:.0f}s across {attempts} attempts"
-    )

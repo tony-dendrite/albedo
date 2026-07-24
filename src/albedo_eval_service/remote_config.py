@@ -58,7 +58,7 @@ class RemoteSettings(BaseSettings):
     # model_download_stall_seconds, giving up (retryable) after
     # model_download_stall_retries consecutive stalls. Set False to fetch in-process.
     model_download_out_of_process: bool = True
-    model_download_stall_seconds: float = 300.0
+    model_download_stall_seconds: float = 30.0
     model_download_stall_retries: int = 3
     # Chunked (pointer.v2) hippius artifacts download via hippius_hub, whose decentralized
     # backend has longer legitimate no-progress gaps than the HF CDN — wider stall window.

@@ -525,13 +525,31 @@ def _hf_download_child() -> None:
     os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
     from huggingface_hub import snapshot_download
 
+    token = os.environ.get("HF_TOKEN") or None
+    try:
+        from config_validation.storage import _fastdl
+    except ImportError:
+        _fastdl = None
+    if _fastdl is not None and _fastdl.available():
+        # Shards via parallel ranged requests, sha256-verified, file-granular restart;
+        # see config_validation/storage/_fastdl.py for why snapshot_download alone
+        # can neither sustain throughput nor resume after a kill.
+        snapshot_download(
+            repo_id=repo,
+            revision=revision,
+            local_dir=local_dir,
+            allow_patterns=["model.safetensors.index.json"],
+            token=token,
+        )
+        _fastdl.fetch_shards(repo, revision, Path(local_dir), token)
+        return
     snapshot_download(
         repo_id=repo,
         revision=revision,
         local_dir=local_dir,
         max_workers=max(1, int(max_workers)),
         allow_patterns=_MODEL_PAYLOAD_PATTERNS,
-        token=os.environ.get("HF_TOKEN") or None,
+        token=token,
     )
 
 
@@ -618,6 +636,29 @@ def _tail_file(path: Path, max_bytes: int) -> str:
     return text or "(no output captured)"
 
 
+_ERROR_LINE = re.compile(r"[A-Za-z_][\w.]*(?:Error|Exception|Interrupt)\b")
+
+
+def _summarize_error_log(text: str, max_chars: int = 300) -> str:
+    """Compress a child's log tail to one human-readable failure reason.
+
+    This string becomes ``fault_message`` and is shown verbatim on the public
+    dashboard — keep the final exception line (plus its explanatory follow-up when
+    present) instead of a raw traceback.
+    """
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return "(no output captured)"
+    for idx in range(len(lines) - 1, -1, -1):
+        if _ERROR_LINE.match(lines[idx]):
+            summary = lines[idx]
+            follow = lines[idx + 1] if idx + 1 < len(lines) else ""
+            if follow and not follow.startswith(("Please ", "If you ", "For more", "Traceback")):
+                summary += " — " + follow
+            return summary[:max_chars]
+    return lines[-1][:max_chars]
+
+
 def _run_hf_download_supervised(
     *,
     repo: str,
@@ -662,7 +703,7 @@ def _run_hf_download_supervised(
         if proc.returncode == 0:
             log_path.unlink(missing_ok=True)
             return
-        detail = _tail_file(log_path, 4000)
+        detail = _summarize_error_log(_tail_file(log_path, 4000))
         raise RuntimeError(
             f"snapshot_download exited {proc.returncode} for {repo}@{revision}: {detail}"
         )
