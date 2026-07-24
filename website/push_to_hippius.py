@@ -56,12 +56,13 @@ def make_client(endpoint: str, access_key: str, secret_key: str):
         from botocore.config import Config
     except ImportError:
         sys.exit("boto3 is required: pip install boto3")
+    region = os.environ.get("ALBEDO_S3_REGION") or ("auto" if "r2.cloudflarestorage.com" in endpoint else "decentralized")
     return boto3.client(
         "s3",
         endpoint_url=endpoint,
         aws_access_key_id=access_key,
         aws_secret_access_key=secret_key,
-        region_name="decentralized",
+        region_name=region,
         config=Config(connect_timeout=15, read_timeout=60, retries={"mode": "adaptive", "max_attempts": 3}),
     )
 
@@ -81,7 +82,7 @@ def upload(client, bucket: str, key: str, path: Path, *, dry_run: bool) -> None:
     if dry_run:
         print(f"  [dry-run] {key}  ({ctype}, {size} B)")
         return
-    client.put_object(
+    put_args = dict(
         Bucket=bucket,
         Key=key,
         Body=path.read_bytes(),
@@ -89,6 +90,13 @@ def upload(client, bucket: str, key: str, path: Path, *, dry_run: bool) -> None:
         CacheControl=cc,
         ACL="public-read",
     )
+    try:
+        client.put_object(**put_args)
+    except Exception as exc:
+        if "AccessControlListNotSupported" not in str(exc) and "NotImplemented" not in str(exc):
+            raise
+        put_args.pop("ACL", None)
+        client.put_object(**put_args)
     print(f"  uploaded {key}  ({size} B)")
 
 
@@ -122,7 +130,8 @@ def main() -> int:
         sys.exit("missing ALBEDO_S3_ACCESS_KEY / ALBEDO_S3_SECRET_KEY (set them in .env)")
 
     client = None if args.dry_run else make_client(endpoint, access_key, secret_key)
-    print(f"target: {endpoint}/{bucket}/  (region=decentralized, acl=public-read)")
+    region = os.environ.get("ALBEDO_S3_REGION") or ("auto" if "r2.cloudflarestorage.com" in endpoint else "decentralized")
+    print(f"target: {endpoint}/{bucket}/  (region={region}, acl=public-read if supported)")
 
     if args.file:
         key = args.key or args.file.name

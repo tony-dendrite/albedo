@@ -95,7 +95,10 @@ def _public_url(uri: str | None, base: str) -> str | None:
     if not uri:
         return None
     if uri.startswith("s3://"):
-        return f"{base.rstrip('/')}/{uri[len('s3://'):]}"
+        bucket_and_key = uri[len("s3://"):]
+        if ".r2.dev" in base or "albedo.tech" in base:
+            _, _, bucket_and_key = bucket_and_key.partition("/")
+        return f"{base.rstrip('/')}/{bucket_and_key}"
     if uri.startswith(("http://", "https://")):
         return uri
     return None  # local-cache://, file:// — not browser-fetchable
@@ -137,7 +140,8 @@ def _king_by_judge_from_artifact(url: str) -> dict[str, float] | None:
     import urllib.request
 
     try:
-        with urllib.request.urlopen(url, timeout=60) as resp:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
             text = resp.read().decode("utf-8", errors="replace")
     except Exception as exc:
         log.warning("king by_judge fetch failed for %s: %s", url, exc)
@@ -500,15 +504,16 @@ def _upload_to_hippius(key: str, path: Path) -> bool:
         import boto3
         from botocore.config import Config
 
+        region = os.environ.get("ALBEDO_S3_REGION") or ("auto" if "r2.cloudflarestorage.com" in endpoint else "decentralized")
         client = boto3.client(
             "s3",
             endpoint_url=endpoint,
             aws_access_key_id=access,
             aws_secret_access_key=secret,
-            region_name="decentralized",
+            region_name=region,
             config=Config(connect_timeout=15, read_timeout=60, retries={"mode": "adaptive", "max_attempts": 3}),
         )
-        client.put_object(
+        put_args = dict(
             Bucket=bucket,
             Key=key,
             Body=path.read_bytes(),
@@ -516,6 +521,13 @@ def _upload_to_hippius(key: str, path: Path) -> bool:
             CacheControl="no-cache, must-revalidate",
             ACL="public-read",
         )
+        try:
+            client.put_object(**put_args)
+        except Exception as exc:
+            if "AccessControlListNotSupported" not in str(exc) and "NotImplemented" not in str(exc):
+                raise
+            put_args.pop("ACL", None)
+            client.put_object(**put_args)
         return True
     except Exception as exc:  # never wedge the loop on an upload
         log.error("upload failed for %s: %s", key, exc)

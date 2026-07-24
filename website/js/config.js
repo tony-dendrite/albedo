@@ -4,44 +4,26 @@ export const POLL_MS = 4000;
 export const CHART_DISPLAY_DAYS = 7;
 
 export const DATA_ENDPOINTS = [
-  "https://s3.hippius.com/albedo/data/dashboard.json",
-  "https://us-east-1.hippius.com/albedo/data/dashboard.json",
-  "https://eu-central-1.hippius.com/albedo/data/dashboard.json",
   "./data/dashboard.json",
 ];
 export const STATE_ENDPOINTS = [
-  "https://s3.hippius.com/albedo/data/state.json",
-  "https://us-east-1.hippius.com/albedo/data/state.json",
-  "https://eu-central-1.hippius.com/albedo/data/state.json",
   "./data/state.json",
 ];
 
 
 export const BENCHMARK_ENDPOINTS = [
-  "https://s3.hippius.com/albedo/data/benchmarks.json",
-  "https://us-east-1.hippius.com/albedo/data/benchmarks.json",
-  "https://eu-central-1.hippius.com/albedo/data/benchmarks.json",
   "./data/benchmarks.json",
 ];
 
 export const MANIFEST_ENDPOINTS = [
-  "https://s3.hippius.com/albedo/datasets/manifest.meta.json",
-  "https://us-east-1.hippius.com/albedo/datasets/manifest.meta.json",
-  "https://eu-central-1.hippius.com/albedo/datasets/manifest.meta.json",
-  "./data/manifest.meta.json",
+  "./datasets/manifest.meta.json",
 ];
 
 export const LLMS_URLS = [
-  "https://s3.hippius.com/albedo/llms.txt",
-  "https://us-east-1.hippius.com/albedo/llms.txt",
-  "https://eu-central-1.hippius.com/albedo/llms.txt",
   "./llms.txt",
 ];
 
 export const REGISTRATION_ENDPOINTS = [
-  "https://s3.hippius.com/albedo/data/registrations_30d.json",
-  "https://us-east-1.hippius.com/albedo/data/registrations_30d.json",
-  "https://eu-central-1.hippius.com/albedo/data/registrations_30d.json",
   "./data/registrations_30d.json",
 ];
 
