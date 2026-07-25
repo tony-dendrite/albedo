@@ -179,6 +179,7 @@ def _evaluator_provider(settings: JudgeSettings) -> dict[str, Any]:
 
 
 _COMPLETE_MARKER = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+_REROLL_WINDOW_TURNS = 5
 
 
 def _reference_completion_observation(sample_id: str) -> str:
@@ -201,31 +202,60 @@ class ReferenceTrajectoryService:
         self.client = client
         self.simulator = simulator
 
-    def _model_for(self, sample_id: str) -> str:
+    def _model_for(self, sample_id: str, *, offset: int = 0) -> str:
         pool = [m.strip() for m in self.settings.sota_models.split(",") if m.strip()]
         if not pool:
             raise QuestionScoringUnavailable("ALBEDO_JUDGE_SOTA_MODELS is empty")
-        return random.Random(sample_id).choice(pool)
+        index = random.Random(sample_id).randrange(len(pool))
+        return pool[(index + offset) % len(pool)]
 
     async def generate(
         self, sample: QuestionPrepSample, *, eval_run_id: str = ""
     ) -> tuple[str, str, bool]:
-        """Returns (reference_text, model, made_edit). A reference that never edits anchors the
-        checklist on reads (the inaction-exploit regime), so re-roll once with a longer window."""
-        reference, model, made_edit = await self._generate_once(sample, eval_run_id, extra_turns=0)
-        if not made_edit:
-            try:
-                longer = await self._generate_once(sample, eval_run_id, extra_turns=2)
-                if longer[2]:
-                    return longer
-            except QuestionScoringUnavailable:
-                pass
+        """Returns (reference_text, model, made_edit)."""
+        reference, model, made_edit, _ = await self._generate_once(
+            sample, eval_run_id, extra_turns=0
+        )
+        if made_edit:
+            return reference, model, made_edit
+        try:
+            longer = await self._generate_once(sample, eval_run_id, extra_turns=2)
+        except QuestionScoringUnavailable:
+            return reference, model, made_edit
+        if longer[2]:
+            return longer[0], longer[1], longer[2]
+        return reference, model, made_edit
+
+    async def reroll_for_material(
+        self, sample: QuestionPrepSample, *, eval_run_id: str = "", exclude_model: str
+    ) -> tuple[str, str, bool] | None:
+        window = min(_REROLL_WINDOW_TURNS, self.settings.sota_trajectory_turns)
+        extra = window - max(
+            1, sample.assistant_turns or self.settings.sota_trajectory_turns
+        )
+        try:
+            reference, model, made_edit, steps = await self._generate_once(
+                sample, eval_run_id, extra_turns=extra, model_offset=1
+            )
+        except QuestionScoringUnavailable as exc:
+            logger.warning(
+                "reference_reroll_failed sample_id={} error={}", sample.sample_id, exc
+            )
+            return None
+        if steps < 2 or model == exclude_model:
+            return None
+        logger.info(
+            "reference_reroll_used sample_id={} replaced={} with={}/{}steps window={}",
+            sample.sample_id, exclude_model, model, steps, window,
+        )
         return reference, model, made_edit
 
     async def _generate_once(
-        self, sample: QuestionPrepSample, eval_run_id: str, *, extra_turns: int
-    ) -> tuple[str, str, bool]:
-        model = self._model_for(sample.sample_id)
+        self, sample: QuestionPrepSample, eval_run_id: str, *, extra_turns: int,
+        model_offset: int = 0,
+    ) -> tuple[str, str, bool, int]:
+        """Returns (reference_text, model, made_edit, generated_step_count)."""
+        model = self._model_for(sample.sample_id, offset=model_offset)
         turn_count = (
             max(1, sample.assistant_turns or self.settings.sota_trajectory_turns) + extra_turns
         )
@@ -283,10 +313,9 @@ class ReferenceTrajectoryService:
         reference = format_reference_trajectory(turns)
         if not reference.strip():
             raise QuestionScoringUnavailable("reference trajectory rendered empty")
-        made_edit = trajectory_made_edit(
-            [t["content"] for t in turns if t.get("score_target")]
-        )
-        return reference, model, made_edit
+        generated = [t["content"] for t in turns if t.get("score_target")]
+        made_edit = trajectory_made_edit(generated)
+        return reference, model, made_edit, len(generated)
 
 
 class QuestionService:
@@ -309,26 +338,51 @@ class QuestionService:
         reference: str | None = None
         reference_model: str | None = None
         reference_made_edit = False
-        if self.reference_service is not None and getattr(sample, "messages", None):
+        anchoring_intended = (
+            self.reference_service is not None and bool(getattr(sample, "messages", None))
+        )
+        if anchoring_intended:
             try:
                 reference, reference_model, reference_made_edit = (
                     await self.reference_service.generate(sample, eval_run_id=eval_run_id)
                 )
             except Exception as exc:
                 logger.warning(
-                    "reference_trajectory_failed sample_id={} error={}",
+                    "reference_trajectory_failed sample_id={} error={} retrying=reference_reroll",
                     sample.sample_id, f"{type(exc).__name__}: {exc}",
                 )
+                rerolled = await self.reference_service.reroll_for_material(
+                    sample, eval_run_id=eval_run_id, exclude_model=""
+                )
+                if rerolled is None:
+                    raise QuestionScoringUnavailable(
+                        f"reference unavailable: {type(exc).__name__}: {exc}"
+                    ) from exc
+                reference, reference_model, reference_made_edit = rerolled
         if reference is not None:
+            # No task-only fallback once anchoring was possible: task-only questions are a
+            # DIFFERENT rubric (no size ladder, no read cap) and scored ~+0.09 higher, so a
+            # silent fallback mixes two regimes inside one eval. Instead, pay for ONE reference
+            # re-roll on the samples that actually failed (measured: ~2-3 per 100, ~+$0.4/eval)
+            # and drop the sample only if that fails too — evals already tolerate a handful of
+            # unscored samples, and the 0.8 valid-fraction gate catches systemic breakage.
             try:
                 return await self._prepare_once(
                     sample, reference, reference_model, reference_made_edit
                 )
             except QuestionScoringUnavailable as exc:
+                if self.reference_service is None:
+                    raise
                 logger.warning(
-                    "anchored_questions_failed sample_id={} error={} falling_back=task_only",
+                    "anchored_questions_failed sample_id={} error={} retrying=reference_reroll",
                     sample.sample_id, exc,
                 )
+                rerolled = await self.reference_service.reroll_for_material(
+                    sample, eval_run_id=eval_run_id, exclude_model=reference_model or ""
+                )
+                if rerolled is None:
+                    raise
+                return await self._prepare_once(sample, *rerolled)
         return await self._prepare_once(sample, None, None, False)
 
     async def _prepare_once(
