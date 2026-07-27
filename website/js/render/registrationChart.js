@@ -3,6 +3,7 @@ import { fmtDateTime, shortHotkey } from "../format.js";
 
 const HEIGHT = 128;
 const PAD = { top: 10, right: 14, bottom: 22, left: 40 };
+const MIN_PRICE = 0.05;
 const RANGE_MS = { "1M": 30 * 24 * 60 * 60 * 1000, "7D": 7 * 24 * 60 * 60 * 1000, "24H": 24 * 60 * 60 * 1000 };
 let activeRange = "1M";
 const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
@@ -59,7 +60,7 @@ function pointsFrom(data) {
         price: Number(r.registration_cost_tao),
       };
     })
-    .filter(p => p.hotkey && Number.isFinite(p.time) && Number.isFinite(p.price) && p.price >= 0.5)
+    .filter(p => p.hotkey && Number.isFinite(p.time) && Number.isFinite(p.price) && p.price >= MIN_PRICE)
     .sort((a, b) => a.time - b.time);
   const latest = points[points.length - 1]?.time;
   return latest ? points.filter(p => p.time >= latest - RANGE_MS[activeRange]) : points;
@@ -80,7 +81,7 @@ export function renderRegistrationChart(container, rows) {
   let pMin = Math.min(...points.map(p => p.price));
   let pMax = Math.max(...points.map(p => p.price));
   const pPad = Math.max((pMax - pMin) * 0.08, 0.01);
-  pMin = Math.max(0.5, pMin - pPad);
+  pMin = Math.max(MIN_PRICE, pMin - pPad);
   pMax += pPad;
 
   const x = t => PAD.left + ((t - t0) / Math.max(t1 - t0, 1)) * w;
