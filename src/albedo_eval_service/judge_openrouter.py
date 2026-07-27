@@ -172,6 +172,7 @@ class OpenRouterJudgeClient:
             "max_tokens": self.settings.max_tokens if max_tokens is None else max_tokens,
             "reasoning": {"enabled": False, "exclude": True},
             "provider": {**provider_block, "require_parameters": True},
+            "usage": {"include": True},
         }
         if model.startswith("openai/"):
             del payload["temperature"]
@@ -185,6 +186,13 @@ class OpenRouterJudgeClient:
         response = await self._client.post("/v1/chat/completions", json=payload)
         response.raise_for_status()
         body = response.json()
+        usage = body.get("usage") or {}
+        cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+        logger.debug(
+            f"[judge-openrouter] usage model={model} "
+            f"prompt_tokens={usage.get('prompt_tokens')} cached_tokens={cached} "
+            f"cost={usage.get('cost')}"
+        )
         raw = _message_content(body.get("choices", []))
         provider = _provider_name(model)
         return JudgeRawResponse(model=model, provider=provider, raw=raw)
