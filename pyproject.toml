@@ -45,6 +45,7 @@ set-reign-worker = "set_reign_worker.service:main"
 weight-setter = "weight_setter.service:main"
 albedo-remote-eval-api = "albedo_eval_service.remote_api:main"
 albedo-judge-api = "albedo_eval_service.judge_api:main"
+albedo-repo-context-api = "repo_context_service.api:main"
 albedo-score-bridge = "albedo_eval_service.score_bridge_client:main"
 chain-reader = "chain_reader.reader:main"
 model-validation = "model_validation.validate_worker:main"
@@ -64,6 +65,7 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = [
     "src/albedo_eval_service",
+    "src/repo_context_service",
     "src/set_reign_worker",
     "src/weight_setter",
     "src/chain_reader",
