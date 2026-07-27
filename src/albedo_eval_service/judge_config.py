@@ -33,8 +33,11 @@ class JudgeSettings(BaseSettings):
     num_questions: int = 50
     question_max_tokens: int = 16000
     simulation_max_tokens: int = 4096
+    simulation_loop_reruns: int = 2
     answer_max_tokens: int = 8000
     question_prep_ttl_seconds: float = 14400.0
+    repo_context_url: str = ""
+    repo_context_timeout_seconds: float = 20.0
 
     slack_error_webhook_url: str = ""
 

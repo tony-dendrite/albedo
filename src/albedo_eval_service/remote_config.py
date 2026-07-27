@@ -30,6 +30,7 @@ class RemoteSettings(BaseSettings):
 
     generation_backend: str = "vllm"
     dataset_root: str | None = None
+    repo_context_url: str = ""
     previous_king_model: str | None = None
     challenger_model: str | None = None
     previous_king_gpu_ids: str = "0,1,2,3"

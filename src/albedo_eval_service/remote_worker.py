@@ -3,11 +3,13 @@ from __future__ import annotations
 import glob
 import os
 import subprocess
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol, TypeVar
 
+import httpx
 from loguru import logger
 
 from .canonical_model_config import canonical_generation_config, canonical_max_model_len
@@ -95,6 +97,7 @@ class RemoteEvalWorker:
         request = run.request
         topology = self._topology(request)
         samples = self._load_samples(request, tokenizer_path=str(_CANONICAL_TOKENIZER_PATH))
+        self._prefetch_repo_context(request, samples)
         category_prep_id = self._start_category_prep(run, request, samples)
         run.append_event(
             {
@@ -180,6 +183,27 @@ class RemoteEvalWorker:
         )
         run.append_event(verdict)
         run.set_state(str(verdict["state"]))
+
+    def _prefetch_repo_context(self, request: EvalRequest, samples: list[EvalSample]) -> None:
+        """Fire-and-forget snapshot prefetch on the local repo-context service so grounding
+        material downloads alongside model resolution. Already-cached snapshots are skipped
+        service-side; failures never affect the eval."""
+        url = (self.settings.repo_context_url or "").rstrip("/")
+        if not url:
+            return
+        sample_ids = [sample.sample_id for sample in samples]
+        eval_run_id = str(request.eval_run_id)
+
+        def _post() -> None:
+            try:
+                httpx.post(f"{url}/prefetch", json={"sample_ids": sample_ids}, timeout=30.0)
+            except Exception as exc:  # noqa: BLE001 - prefetch is best-effort
+                logger.warning(
+                    f"[remote-worker] repo_context_prefetch_failed eval_run={eval_run_id}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+        threading.Thread(target=_post, name="repo-context-prefetch", daemon=True).start()
 
     def _start_category_prep(
         self, run: RemoteRun, request: EvalRequest, samples: list[EvalSample]

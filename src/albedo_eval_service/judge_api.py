@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
+import httpx
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException
 from loguru import logger
@@ -149,6 +150,40 @@ STRICT RULES:
   When you cannot infer paths with confidence, prefer FEWER lines over invented ones; if the
   command's filters plausibly match nothing in this project (e.g. a file extension foreign to
   its language), the output is empty.
+"""
+
+# Grounded variant used when the repo-context service supplies real repository material
+# (file listing / file contents / reference exchanges). Same rules as BASE_PROMPT except the
+# "Anchor on evidence" inference clause is replaced by grounding rules.
+GROUNDED_BASE_PROMPT = """You are the ENVIRONMENT (execution harness) in a SWE-agent session. You are NOT the assistant and you must never act as the assistant.
+
+You will receive a transcript with "### system", "### user" and "### assistant" section markers.
+The transcript ends with the assistant's latest message containing one command. Mentally execute
+that command against the repository state described in the grounding material below and reply
+with the environment's next message: the terminal output of that command.
+
+STRICT RULES:
+- Reply ONLY with the environment message in the exact format specified below — nothing else.
+- NEVER write "THOUGHT:", never write a bash command, never write "### user" or "### assistant"
+  headers, never use markdown code fences, never explain or comment. You are not solving the
+  task; you are only the terminal returning the command's output.
+- NEVER give task tips, hints, suggestions, next steps, encouragement, or any part of the
+  solution. A terminal has no opinion: it only prints what the command outputs, even if the
+  assistant is on the wrong track or asked a question.
+- Emulate realistic tool behavior: sed -i, cp, mv, mkdir, rm print nothing on success; echo
+  prints its argument; cat/sed -n print file content; grep -n prefixes matches with "NN:"
+  (context lines with "NN-"); find/ls list paths one per line; failed commands print realistic
+  error messages.
+- If the assistant message contains MORE THAN ONE bash code block, only the FIRST block is
+  executed — simulate the first command and ignore all later blocks.
+- Respect pipe limits exactly: "| head -N" outputs at most N lines, "| tail -N" the last N.
+  Count your output lines before replying.
+- Ground your output in the repository material below (file listing, file contents, reference
+  exchanges): derive paths and contents from it and do not invent paths or contents it
+  contradicts.
+- Commands earlier in the transcript may have created, modified or deleted files; those effects
+  take precedence over the grounding material below, which describes the repository at the
+  initial commit.
 """
 
 FORMAT_SWE_ZERO = """OUTPUT FORMAT:
@@ -443,33 +478,105 @@ class QuestionService:
         return QuestionPrepResult(questions=questions, source=source)
 
 
+class RepoContextClient:
+    """Fetches grounding blocks from the repo-context service on the eval host. Any failure
+    degrades to None so simulation proceeds ungrounded; warnings are rate-limited to avoid
+    log spam while the service or tunnel is down."""
+
+    def __init__(self, settings: JudgeSettings):
+        self._client = httpx.AsyncClient(
+            base_url=settings.repo_context_url.rstrip("/"),
+            timeout=settings.repo_context_timeout_seconds,
+        )
+        self._last_warning = 0.0
+
+    async def context_for(self, sample_id: str, assistant_output: str) -> str | None:
+        try:
+            response = await self._client.post(
+                "/repo-context",
+                json={"sample_id": sample_id, "assistant_output": assistant_output},
+            )
+            response.raise_for_status()
+            context = response.json().get("context")
+            return context if isinstance(context, str) and context else None
+        except Exception as exc:  # noqa: BLE001 - grounding is best-effort
+            now = time.monotonic()
+            if now - self._last_warning > 60.0:
+                self._last_warning = now
+                logger.warning(
+                    "repo_context_unavailable sample_id={} error={}",
+                    sample_id, f"{type(exc).__name__}: {exc}",
+                )
+            return None
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+
 class ObservationSimulationService:
-    def __init__(self, settings: JudgeSettings, client: OpenRouterJudgeClient):
+    def __init__(
+        self,
+        settings: JudgeSettings,
+        client: OpenRouterJudgeClient,
+        repo_context: RepoContextClient | None = None,
+    ):
         self.settings = settings
         self.client = client
+        self.repo_context = repo_context
 
     async def simulate(self, request: SimulateObservationRequest) -> str:
-        response = await self.client.complete(
-            model=self.settings.evaluator_model,
-            messages=[
-                {"role": "system", "content": _simulation_system_prompt(request.sample_id)},
-                {
-                    "role": "user",
-                    "content": _simulation_transcript(
-                        messages=request.messages,
-                        prompt=request.prompt,
-                        assistant_output=request.assistant_output,
-                    ),
-                },
-            ],
-            temperature=0.0,
-            max_tokens=self.settings.simulation_max_tokens,
-            provider=_evaluator_provider(self.settings),
-            accept=lambda raw: _valid_simulation_output(raw, request.sample_id),
-        )
-        if response.error:
-            raise ObservationSimulationUnavailable(response.error)
-        observation = response.raw.strip()
+        context_block = None
+        if self.repo_context is not None:
+            context_block = await self.repo_context.context_for(
+                request.sample_id, request.assistant_output
+            )
+        messages = [
+            {
+                "role": "system",
+                "content": _simulation_system_prompt(request.sample_id, context_block),
+            },
+            {
+                "role": "user",
+                "content": _simulation_transcript(
+                    messages=request.messages,
+                    prompt=request.prompt,
+                    assistant_output=request.assistant_output,
+                ),
+            },
+        ]
+        observation = ""
+        for rerun in range(self.settings.simulation_loop_reruns + 1):
+            response = await self.client.complete(
+                model=self.settings.evaluator_model,
+                messages=messages,
+                temperature=0.0,
+                max_tokens=self.settings.simulation_max_tokens,
+                provider=_evaluator_provider(self.settings),
+                accept=lambda raw: _valid_simulation_output(raw, request.sample_id),
+            )
+            if response.error:
+                raise ObservationSimulationUnavailable(response.error)
+            observation = response.raw.strip()
+            if not _looping_output(observation):
+                break
+            if rerun < self.settings.simulation_loop_reruns:
+                logger.warning(
+                    "observation_simulation_looping_rerun eval_run_id={} sample_id={} rerun={}/{}",
+                    request.eval_run_id,
+                    request.sample_id,
+                    rerun + 1,
+                    self.settings.simulation_loop_reruns,
+                )
+        if _looping_output(observation):
+            collapsed = _collapse_looping(observation).strip()
+            logger.warning(
+                "observation_simulation_looping_collapsed eval_run_id={} sample_id={} chars={}->{}",
+                request.eval_run_id,
+                request.sample_id,
+                len(observation),
+                len(collapsed),
+            )
+            observation = collapsed
         if not _valid_simulation_output(observation, request.sample_id):
             fallback = _empty_simulation_output(request.sample_id)
             logger.warning(
@@ -542,7 +649,9 @@ def create_app(settings: JudgeSettings | None = None) -> FastAPI:
     async def startup() -> None:
         client = OpenRouterJudgeClient(settings)
         app.state.eval_client = client
-        app.state.observation_service = ObservationSimulationService(settings, client)
+        repo_context = RepoContextClient(settings) if settings.repo_context_url else None
+        app.state.repo_context_client = repo_context
+        app.state.observation_service = ObservationSimulationService(settings, client, repo_context)
         app.state.question_service = QuestionService(
             settings, client,
             ReferenceTrajectoryService(settings, client, app.state.observation_service),
@@ -554,6 +663,9 @@ def create_app(settings: JudgeSettings | None = None) -> FastAPI:
         client = getattr(app.state, "eval_client", None)
         if client is not None:
             await client.aclose()
+        repo_context = getattr(app.state, "repo_context_client", None)
+        if repo_context is not None:
+            await repo_context.aclose()
 
     def require_auth(authorization: str | None = Header(default=None)) -> None:
         if not settings.api_auth_token:
@@ -566,7 +678,11 @@ def create_app(settings: JudgeSettings | None = None) -> FastAPI:
         if store is None:
             client = OpenRouterJudgeClient(settings)
             app.state.eval_client = client
-            app.state.observation_service = ObservationSimulationService(settings, client)
+            repo_context = RepoContextClient(settings) if settings.repo_context_url else None
+            app.state.repo_context_client = repo_context
+            app.state.observation_service = ObservationSimulationService(
+                settings, client, repo_context
+            )
             app.state.question_service = QuestionService(
                 settings, client,
                 ReferenceTrajectoryService(settings, client, app.state.observation_service),
@@ -704,12 +820,80 @@ def _simulation_transcript(
     return "\n\n".join(sections).rstrip()
 
 
-def _simulation_system_prompt(sample_id: str) -> str:
-    return f"{BASE_PROMPT}\n{_simulation_format(sample_id)}"
+def _simulation_system_prompt(sample_id: str, context_block: str | None = None) -> str:
+    if not context_block:
+        return f"{BASE_PROMPT}\n{_simulation_format(sample_id)}"
+    return f"{GROUNDED_BASE_PROMPT}\n{context_block}\n{_simulation_format(sample_id)}"
 
 
 def _simulation_format(sample_id: str) -> str:
     return FORMAT_MINI_CODER if "mini-coder" in sample_id.casefold() else FORMAT_SWE_ZERO
+
+
+# Degenerate-repetition guard for simulated observations (greedy decoding at temperature 0 can
+# lock into emitting the same line/block until the token cap). Thresholds are deliberately far
+# above anything seen in real environment output.
+_LOOP_LINE_RUN = 25  # consecutive identical non-empty lines
+_LOOP_TAIL_WINDOW = 512  # tail span that must be fully periodic to call it a cycle loop
+_LOOP_MIN_REPEATS = 4  # the period must fit this many times inside the tail window
+
+
+def _looping_output(text: str) -> bool:
+    run = 1
+    prev: str | None = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped and stripped == prev:
+            run += 1
+            if run >= _LOOP_LINE_RUN:
+                return True
+        elif stripped:
+            run = 1
+            prev = stripped
+    return _trailing_cycle_period(text) > 0
+
+
+def _trailing_cycle_period(text: str) -> int:
+    """Smallest period p such that the last _LOOP_TAIL_WINDOW chars are p-periodic (i.e. the
+    output ends in >= _LOOP_MIN_REPEATS repeats of the same unit, any alignment)."""
+    tail = text.rstrip()[-_LOOP_TAIL_WINDOW:]
+    if len(tail) < _LOOP_TAIL_WINDOW:
+        return 0  # short outputs cannot loop meaningfully; the line-run check covers them
+    for period in range(1, _LOOP_TAIL_WINDOW // _LOOP_MIN_REPEATS + 1):
+        if tail[period:] == tail[:-period]:
+            return period
+    return 0
+
+
+def _collapse_looping(text: str) -> str:
+    """Collapse degenerate repetition: runs of identical lines are cut at the threshold, and a
+    trailing cycle is reduced to two units, each with an explicit repeat marker (mirrors how
+    real harnesses clip runaway output)."""
+    out: list[str] = []
+    run = 1
+    prev: str | None = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped and stripped == prev:
+            run += 1
+            if run == _LOOP_LINE_RUN:
+                out.append("... (output repeats)")
+            if run >= _LOOP_LINE_RUN:
+                continue
+        elif stripped:
+            run = 1
+            prev = stripped
+        out.append(line)
+    collapsed = "\n".join(out)
+    period = _trailing_cycle_period(collapsed)
+    if period:
+        stripped_text = collapsed.rstrip()
+        index = len(stripped_text) - period - 1
+        while index >= 0 and stripped_text[index] == stripped_text[index + period]:
+            index -= 1
+        keep = min(len(stripped_text), index + 1 + 2 * period)
+        collapsed = stripped_text[:keep].rstrip() + "\n... (output repeats)"
+    return collapsed
 
 
 def _empty_simulation_output(sample_id: str) -> str:
