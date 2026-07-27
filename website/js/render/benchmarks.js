@@ -51,6 +51,13 @@ function modelLabel(model) {
   return kingTitleName(romanToInt(match[1]));
 }
 
+function modelKingNumber(model) {
+  const labelMatch = /^King\s+([IVXLCDM]+)$/i.exec(model?.label || "");
+  const repoMatch = /-king-([IVXLCDM]+)$/i.exec(model?.model_repo || "");
+  const numeral = labelMatch?.[1] || repoMatch?.[1];
+  return numeral ? romanToInt(numeral) : null;
+}
+
 function hfRepoUrl(model) {
   return model?.model_repo ? `https://huggingface.co/${model.model_repo}` : null;
 }
@@ -98,9 +105,16 @@ function latestRunTime(model) {
   return run?.finished_at || run?.started_at || model?.activated_at || model?.discovered_at || "";
 }
 
-function sortModels(models) {
+export function sortModels(models) {
   return [...(models || [])].sort((a, b) => {
     if (isGenesis(a) !== isGenesis(b)) return isGenesis(a) ? 1 : -1;
+    const aKing = modelKingNumber(a);
+    const bKing = modelKingNumber(b);
+    if (aKing != null || bKing != null) {
+      if (aKing == null) return 1;
+      if (bKing == null) return -1;
+      if (aKing !== bKing) return bKing - aKing;
+    }
     const orderDelta = Number(a.model_order ?? 999999) - Number(b.model_order ?? 999999);
     if (orderDelta) return orderDelta;
     const timeDelta = new Date(latestRunTime(b)).getTime() - new Date(latestRunTime(a)).getTime();
