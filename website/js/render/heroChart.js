@@ -1,11 +1,9 @@
 import { el, mount } from "../dom.js";
-import { pct, fmtRelative, fmtDateTime } from "../format.js";
+import { pct } from "../format.js";
 import { modelRepo } from "../model.js";
-import { CHART_DISPLAY_DAYS } from "../config.js";
 
-const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 const HEIGHT = 180;
-const PAD = { top: 12, right: 14, bottom: 24, left: 38 };
+const PAD = { top: 12, right: 14, bottom: 12, left: 38 };
 
 function svgEl(tag, attrs = {}, ...children) {
   const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
@@ -39,10 +37,9 @@ function tipRow(value, cls, label) {
 }
 
 export function renderHeroChart(container, runs) {
-  const chartFromTs = Date.now() - CHART_DISPLAY_DAYS * 86400000;
   const points = (runs || [])
-    .filter(r => r.finished_at && r.score_challenger != null && Date.parse(r.finished_at) >= chartFromTs)
-    .reverse(); // newest-first -> chronological
+    .filter(r => r.score_challenger != null)
+    .reverse(); // newest-first -> evaluation order
   if (points.length < 2) {
     mount(container, el("div", { class: "empty" }, "no eval history yet."));
     return;
@@ -52,15 +49,13 @@ export function renderHeroChart(container, runs) {
   const w = width - PAD.left - PAD.right;
   const h = HEIGHT - PAD.top - PAD.bottom;
 
-  const ts = points.map(r => new Date(r.finished_at).getTime());
-  const t0 = ts[0], t1 = ts[ts.length - 1];
   const vals = points.flatMap(r => [r.score_challenger * 100, r.score_king != null ? r.score_king * 100 : null])
     .filter(v => v != null);
   let vMin = Math.min(...vals), vMax = Math.max(...vals);
   const vPad = Math.max((vMax - vMin) * 0.06, 0.5);
   vMin -= vPad; vMax += vPad;
 
-  const x = t => PAD.left + ((t - t0) / Math.max(t1 - t0, 1)) * w;
+  const x = i => PAD.left + (i / (points.length - 1)) * w;
   const y = v => PAD.top + (1 - (v - vMin) / (vMax - vMin)) * h;
 
   const svg = svgEl("svg", { width, height: HEIGHT, viewBox: `0 0 ${width} ${HEIGHT}`, role: "img" });
@@ -72,32 +67,22 @@ export function renderHeroChart(container, runs) {
     svg.append(svgEl("text", { x: PAD.left - 8, y: y(v), class: "tick", "text-anchor": "end", "dominant-baseline": "middle" }, v));
   }
 
-  // x ticks at UTC midnights
-  const dayMs = 86400000;
-  const days = Math.max((t1 - t0) / dayMs, 1);
-  const dayStep = Math.max(1, Math.ceil(days / Math.max(Math.floor(w / 110), 2)));
-  for (let t = Math.ceil(t0 / dayMs) * dayMs; t <= t1; t += dayStep * dayMs) {
-    const d = new Date(t);
-    svg.append(svgEl("text", { x: x(t), y: HEIGHT - 6, class: "tick", "text-anchor": "middle" },
-      `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`));
-  }
-
   // challenger series (gray line)
   svg.append(svgEl("polyline", {
-    points: points.map((r, i) => `${x(ts[i]).toFixed(1)},${y(r.score_challenger * 100).toFixed(1)}`).join(" "),
+    points: points.map((r, i) => `${x(i).toFixed(1)},${y(r.score_challenger * 100).toFixed(1)}`).join(" "),
     class: "line-chal",
   }));
 
   // king series (gold line)
   const kingPts = points
-    .map((r, i) => (r.score_king != null ? `${x(ts[i]).toFixed(1)},${y(r.score_king * 100).toFixed(1)}` : null))
+    .map((r, i) => (r.score_king != null ? `${x(i).toFixed(1)},${y(r.score_king * 100).toFixed(1)}` : null))
     .filter(Boolean);
   if (kingPts.length > 1) svg.append(svgEl("polyline", { points: kingPts.join(" "), class: "line-king" }));
 
   // coronations: gold dots with surface ring, on top
   points.forEach((r, i) => {
     if (!r.coronated) return;
-    svg.append(svgEl("circle", { cx: x(ts[i]).toFixed(1), cy: y(r.score_challenger * 100).toFixed(1), r: 4, class: "dot-crown" }));
+    svg.append(svgEl("circle", { cx: x(i).toFixed(1), cy: y(r.score_challenger * 100).toFixed(1), r: 4, class: "dot-crown" }));
   });
 
   // hover: crosshair snapping to the nearest run + one tooltip for both series
@@ -108,8 +93,8 @@ export function renderHeroChart(container, runs) {
 
   function nearestRun(px) {
     let best = 0;
-    for (let i = 1; i < ts.length; i++) {
-      if (Math.abs(x(ts[i]) - px) < Math.abs(x(ts[best]) - px)) best = i;
+    for (let i = 1; i < points.length; i++) {
+      if (Math.abs(x(i) - px) < Math.abs(x(best) - px)) best = i;
     }
     return best;
   }
@@ -118,15 +103,15 @@ export function renderHeroChart(container, runs) {
     const rect = svg.getBoundingClientRect();
     const i = nearestRun(e.clientX - rect.left);
     hover = i;
-    const r = points[i], px = x(ts[i]);
+    const r = points[i], px = x(i);
     crosshair.setAttribute("x1", px.toFixed(1));
     crosshair.setAttribute("x2", px.toFixed(1));
     crosshair.removeAttribute("visibility");
     mount(tip,
       tipRow(r.score_challenger, "k-chal", `challenger · ${modelRepo(r.model_uri)}`),
       r.score_king != null ? tipRow(r.score_king, "k-king", "king") : null,
-      el("div", { class: "hero-chart-tip-meta", title: fmtDateTime(r.finished_at) },
-        `uid ${r.uid ?? "—"} · ${fmtRelative(r.finished_at)} · ${r.coronated ? "crowned" : r.challenger_won ? "won" : "lost"}`));
+      el("div", { class: "hero-chart-tip-meta" },
+        `uid ${r.uid ?? "—"} · ${r.coronated ? "crowned" : r.challenger_won ? "won" : "lost"}`));
     tip.hidden = false;
     const left = px + 12 + tip.offsetWidth > width ? px - tip.offsetWidth - 12 : px + 12;
     tip.style.left = `${Math.max(left, 0)}px`;

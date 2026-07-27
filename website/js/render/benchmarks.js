@@ -84,16 +84,6 @@ function hasActiveProgress(model, activeProgress) {
   return BENCHMARK_ORDER.some(suite => activeProgress.has(progressKey(model?.model_repo || model?.id, suite)));
 }
 
-function progressLabel(progress) {
-  const done = Number(progress?.progress_done);
-  const total = Number(progress?.progress_total);
-  if (Number.isFinite(done) && Number.isFinite(total) && total > 0) {
-    return `${Math.max(0, Math.min(100, Math.round((done / total) * 100)))}%`;
-  }
-  const state = activeState(progress).toLowerCase().replaceAll("_", " ");
-  return state || "active";
-}
-
 function latestRun(model) {
   return completedRuns(model).sort((a, b) => {
     const at = new Date(a.finished_at || a.started_at || "").getTime();
@@ -134,15 +124,21 @@ function runTime(run) {
   return new Date(run?.finished_at || run?.started_at || "").getTime() || 0;
 }
 
-function suiteScores(model) {
-  if (model?.latest_scores && Object.keys(model.latest_scores).length) return model.latest_scores;
-  const scores = {};
+export function suiteScores(model) {
+  const scores = { ...(model?.latest_scores || {}) };
+  const passes = {};
   for (const run of model?.runs || []) {
     if (!run?.suite || run.score == null) continue;
-    const previous = scores[run.suite];
-    if (!previous || runTime(run) > runTime(previous)) {
-      scores[run.suite] = { ...run, run_id: run.run_id || run.id };
-    }
+    (passes[run.suite] ||= []).push(run);
+  }
+  for (const [suite, runs] of Object.entries(passes)) {
+    const latest = runs.reduce((a, b) => runTime(b) > runTime(a) ? b : a);
+    scores[suite] = {
+      ...latest,
+      score: runs.reduce((sum, run) => sum + Number(run.score), 0) / runs.length,
+      pass_count: runs.length,
+      run_id: latest.run_id || latest.id,
+    };
   }
   return scores;
 }
@@ -172,6 +168,19 @@ function baselineComparison(entry, baseline) {
   };
 }
 
+function previousComparison(entry, sorted, selected, suite) {
+  if (entry?.score == null) return { delta: "—", cls: "flat" };
+  const previous = sorted
+    .slice(sorted.indexOf(selected) + 1)
+    .find(model => !isGenesis(model) && suiteScores(model)[suite]?.score != null);
+  if (!previous) return { delta: "—", cls: "flat" };
+  const delta = (Number(entry.score) - Number(suiteScores(previous)[suite].score)) * 100;
+  return {
+    delta: `${delta > 0 ? "+" : ""}${delta.toFixed(1)} pp`,
+    cls: delta > 0 ? "up" : delta < 0 ? "down" : "flat",
+  };
+}
+
 function svgEl(tag, attrs = {}, ...children) {
   const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
   for (const [k, v] of Object.entries(attrs)) {
@@ -185,72 +194,74 @@ function svgEl(tag, attrs = {}, ...children) {
   return node;
 }
 
-function renderTile(model, suite, progress, baseline) {
-  const entry = suiteScores(model)[suite];
-  const scored = entry?.score != null;
-  const comparison = baselineComparison(entry, baseline);
-  if (!scored && progress) {
-    return el("div", { class: "bench-tile", "data-status": "running" },
-      el("div", { class: "bench-tile-name" }, benchmarkLabel(suite)),
-      el("div", { class: "bench-tile-score" }, progressLabel(progress)),
-      el("div", { class: "bench-tile-status" },
-        el("span", { class: "live" }, activeState(progress).toLowerCase().replaceAll("_", " ") || "active"),
-        el("span", {}, comparison.label)));
+function renderSpark(sorted, suite) {
+  const points = [...sorted].reverse()
+    .map(model => ({ label: modelLabel(model), score: suiteScores(model)[suite]?.score }))
+    .filter(point => point.score != null);
+  const svg = svgEl("svg", { viewBox: "0 0 360 44", preserveAspectRatio: "none", role: "img" });
+  svg.append(svgEl("line", { x1: 6, y1: 36, x2: 354, y2: 36, stroke: "currentColor", "stroke-width": 1, opacity: 0.15 }));
+  if (!points.length) {
+    svg.append(svgEl("text", { x: 180, y: 27, "text-anchor": "middle", "font-size": 8, fill: "currentColor", opacity: 0.45 }, "no score"));
+    return svg;
   }
-  const href = entry?.run_id ? detailHref(model, entry.run_id) : null;
-  return el(href ? "a" : "div", { class: "bench-tile", "data-status": scored ? "completed" : "missing", href },
-    el("div", { class: "bench-tile-name" }, benchmarkLabel(suite)),
-    el("div", { class: "bench-tile-score" }, scored ? panelScore(entry.score) : "missing"),
-    el("div", { class: "bench-tile-status" },
-      scored
-        ? [el("span", {}, comparison.label),
-           el("span", { class: `bench-delta ${comparison.cls}`, title: "delta vs genesis" }, comparison.delta)]
-        : [el("span", {}, comparison.label), el("span", {}, "no run")]));
+  let min = Math.min(...points.map(point => point.score));
+  let max = Math.max(...points.map(point => point.score));
+  if (min === max) { min -= 0.005; max += 0.005; }
+  const coords = points.map((point, i) => ({
+    x: points.length === 1 ? 180 : 6 + (i / (points.length - 1)) * 348,
+    y: 36 - ((point.score - min) / (max - min)) * 28,
+    point,
+  }));
+  if (coords.length > 1) {
+    svg.append(svgEl("polyline", {
+      points: coords.map(c => `${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(" "),
+      fill: "none", stroke: "currentColor", "stroke-width": 2,
+      "stroke-linejoin": "round", "stroke-linecap": "round",
+    }));
+  }
+  coords.forEach((c, i) => {
+    const last = i === coords.length - 1;
+    svg.append(svgEl("circle", {
+      cx: c.x.toFixed(1), cy: c.y.toFixed(1), r: last ? 3 : 2.4,
+      fill: "currentColor", opacity: last ? 1 : 0.45,
+      class: last ? "spark-dot-last" : null,
+    }, svgEl("title", {}, `${c.point.label} · ${panelScore(c.point.score)}`)));
+  });
+  return svg;
 }
 
-function renderSparks(sorted) {
-  const chrono = [...sorted].reverse();
-  return el("div", { class: "bench-spark-grid" }, BENCHMARK_ORDER.map(suite => {
-    const points = chrono
-      .map(model => ({ label: modelLabel(model), score: suiteScores(model)[suite]?.score }))
-      .filter(point => point.score != null);
-    const latest = points[points.length - 1];
-    const svg = svgEl("svg", { viewBox: "0 0 360 34", preserveAspectRatio: "none", role: "img" });
-    svg.append(svgEl("line", { x1: 6, y1: 26, x2: 354, y2: 26, stroke: "currentColor", "stroke-width": 1, opacity: 0.15 }));
-    if (!points.length) {
-      svg.append(svgEl("text", { x: 180, y: 20, "text-anchor": "middle", "font-size": 8, fill: "currentColor", opacity: 0.45 }, "no score"));
-    } else {
-      let min = Math.min(...points.map(point => point.score));
-      let max = Math.max(...points.map(point => point.score));
-      if (min === max) { min -= 0.005; max += 0.005; }
-      const span = max - min;
-      const coords = points.map((point, i) => ({
-        x: points.length === 1 ? 180 : 6 + (i / (points.length - 1)) * 348,
-        y: 26 - ((point.score - min) / span) * 20,
-        point,
-      }));
-      if (coords.length > 1) {
-        svg.append(svgEl("polyline", {
-          points: coords.map(c => `${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(" "),
-          fill: "none", stroke: "currentColor", "stroke-width": 2,
-          "stroke-linejoin": "round", "stroke-linecap": "round",
-        }));
-      }
-      coords.forEach((c, i) => {
-        const last = i === coords.length - 1;
-        svg.append(svgEl("circle", {
-          cx: c.x.toFixed(1), cy: c.y.toFixed(1), r: 2.4,
-          fill: "currentColor", opacity: last ? 1 : 0.45,
-          class: last ? "spark-dot-last" : null,
-        }, svgEl("title", {}, `${c.point.label} · ${panelScore(c.point.score)}`)));
-      });
-    }
-    return el("div", { class: "bench-spark" },
-      el("div", { class: "bench-spark-head" },
-        el("strong", {}, benchmarkLabel(suite)),
-        el("span", {}, latest ? panelScore(latest.score) : "waiting")),
-      svg);
-  }));
+function renderTile(model, suite, sorted, baseline, activity) {
+  const entry = suiteScores(model)[suite];
+  const scored = entry?.score != null;
+  const genesis = baselineComparison(entry, baseline);
+  const previous = previousComparison(entry, sorted, model, suite);
+  const running = activity?.running;
+  const queued = activity?.queued || [];
+  const href = entry?.run_id ? detailHref(model, entry.run_id) : null;
+  const runNote = running
+    ? [runningLabel(running, activity.labelByRepo), progressNote(running)].filter(Boolean).join(" · ")
+    : queued.length ? `${queued.length} pending` : "";
+  return el("article", {
+    class: "bench-tile",
+    "data-status": scored ? "completed" : "missing",
+    "data-activity": running ? "running" : "idle",
+  },
+    el("div", { class: "bench-tile-head" },
+      el("div", { class: "bench-tile-name" }, benchmarkLabel(suite)),
+      el("span", { class: running ? "bench-tile-activity live" : "bench-tile-activity" }, running ? "running" : "idle")),
+    el("div", { class: "bench-tile-main" },
+      el("div", { class: "bench-tile-score-wrap" },
+        el(href ? "a" : "span", { class: "bench-tile-score", href }, scored ? panelScore(entry.score) : "missing"),
+        scored ? el("span", { class: "bench-tile-pass-count" },
+          `avg · ${entry.pass_count || 1} ${entry.pass_count === 1 ? "pass" : "passes"}`) : null),
+      el("div", { class: `bench-tile-change ${previous.cls}` },
+        el("strong", {}, previous.delta),
+        el("span", {}, "since last"))),
+    el("div", { class: "bench-tile-chart" }, renderSpark(sorted, suite)),
+    el("div", { class: "bench-tile-status" },
+      el("span", {}, genesis.label),
+      el("span", { class: `bench-delta ${genesis.cls}`, title: "delta vs genesis" }, genesis.delta)),
+    runNote ? el("div", { class: "bench-tile-run-note" }, runNote) : null);
 }
 
 function runningLabel(item, labelByRepo) {
@@ -266,7 +277,7 @@ function progressNote(item) {
   return null;
 }
 
-function renderSuiteQueues(data) {
+function suiteActivity(data) {
   const models = data?.models || [];
   const labelByRepo = new Map(models.filter(m => m.model_repo).map(m => [m.model_repo, modelLabel(m)]));
   const orderByRepo = new Map(models.filter(m => m.model_repo).map(m => [m.model_repo, Number(m.model_order ?? 999999)]));
@@ -281,37 +292,14 @@ function renderSuiteQueues(data) {
     if (activeState(job) === "QUEUED") queuedBySuite.get(job.suite).push(job);
     else if (!runningBySuite.has(job.suite)) runningBySuite.set(job.suite, job);
   }
-  if (!runningBySuite.size && ![...queuedBySuite.values()].some(jobs => jobs.length)) return null;
-
-  return el("div", { class: "bench-queue-grid" }, BENCHMARK_ORDER.map(suite => {
-    const running = runningBySuite.get(suite);
-    const queued = [...queuedBySuite.get(suite)].sort((a, b) =>
+  return new Map(BENCHMARK_ORDER.map(suite => {
+    const queued = [...(queuedBySuite.get(suite) || [])].sort((a, b) =>
       (orderByRepo.get(a.model_repo) ?? 999999) - (orderByRepo.get(b.model_repo) ?? 999999));
-    const stateRows = [];
-    if (running) {
-      const note = [activeState(running).toLowerCase().replaceAll("_", " "), progressNote(running)].filter(Boolean).join(" · ");
-      stateRows.push(el("div", { class: "bench-queue-row" },
-        el("span", { class: "bench-queue-state live" }, "running"),
-        el("span", { class: "bench-queue-model" }, runningLabel(running, labelByRepo)),
-        el("span", { class: "bench-queue-note" }, note)));
-    } else {
-      stateRows.push(el("div", { class: "bench-queue-row" },
-        el("span", { class: "bench-queue-state" }, "running"),
-        el("span", { class: "bench-queue-model muted" }, "idle")));
-    }
-    stateRows.push(el("div", { class: "bench-queue-row" },
-      el("span", { class: "bench-queue-state" }, "pending"),
-      el("span", { class: queued.length ? "bench-queue-model" : "bench-queue-model muted" },
-        queued.length ? queued.map(job => runningLabel(job, labelByRepo)).join(", ") : "none")));
-    return el("div", { class: "bench-queue" },
-      el("div", { class: "bench-queue-head" },
-        el("strong", {}, benchmarkLabel(suite)),
-        el("span", {}, queued.length ? `${queued.length} pending` : "")),
-      stateRows);
+    return [suite, { running: runningBySuite.get(suite), queued, labelByRepo }];
   }));
 }
 
-function renderHistoryPanel(sorted, selectedModel, rerender, data) {
+function renderHistoryPanel(sorted, selectedModel, rerender) {
   const pages = Math.max(1, Math.ceil(sorted.length / historyPageSize));
   historyPage = Math.min(Math.max(1, historyPage), pages);
   const shown = sorted.slice((historyPage - 1) * historyPageSize, historyPage * historyPageSize);
@@ -349,13 +337,11 @@ function renderHistoryPanel(sorted, selectedModel, rerender, data) {
       BENCHMARK_ORDER.map(suite => {
         const entry = scores[suite];
         if (entry?.score == null) return el("td", { class: "r" }, el("span", { class: "muted-dash" }, "—"));
-        return el("td", { class: "r" }, panelScore(entry.score));
+        return el("td", { class: "r", title: `${entry.pass_count || 1} pass average` }, panelScore(entry.score));
       }));
   });
 
   return el("div", { class: "bench-history" },
-    renderSparks(sorted),
-    renderSuiteQueues(data),
     pager,
     sorted.length
       ? el("div", { class: "data-table-wrap" },
@@ -383,6 +369,7 @@ export function renderBenchmarks(container, metaNode, data) {
   }
   const selected = sorted.find(model => !isGenesis(model)) || sorted[0];
   const baselineScores = suiteScores((data?.models || []).find(isGenesis));
+  const activity = suiteActivity(data);
   const rerender = () => renderBenchmarks(container, metaNode, data);
   const scores = suiteScores(selected);
   const done = BENCHMARK_ORDER.filter(suite => scores[suite]?.score != null).length;
@@ -400,7 +387,7 @@ export function renderBenchmarks(container, metaNode, data) {
           el("span", { class: "bench-panel-meta" },
             `${done}/${BENCHMARK_ORDER.length} scores · ${modelLabel(selected)}`))),
       el("div", { class: "bench-tile-grid" }, BENCHMARK_ORDER.map(suite =>
-        renderTile(selected, suite, activeProgress.get(progressKey(selected.model_repo || selected.id, suite)), baselineScores[suite]))),
-      historyOpen ? renderHistoryPanel(sorted, selected, rerender, data) : null));
+        renderTile(selected, suite, sorted, baselineScores[suite], activity.get(suite)))),
+      historyOpen ? renderHistoryPanel(sorted, selected, rerender) : null));
   if (metaNode) metaNode.textContent = `${models.length} models · ${data.counts?.runs ?? 0} benchmark runs · updated ${fmtRelative(data.generated_at)}`;
 }
