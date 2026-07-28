@@ -57,10 +57,12 @@ class OpenRouterJudgeClient:
         max_tokens: int | None = None,
         provider: dict[str, Any] | None = None,
         accept: Callable[[str], bool] | None = None,
+        purpose: str = "judge",
     ) -> JudgeRawResponse:
         return await self._call(
             model=model, messages=messages, response_schema=response_schema,
             schema_name=schema_name, max_tokens=max_tokens, provider=provider, accept=accept,
+            purpose=purpose,
         )
 
     async def complete(
@@ -73,12 +75,14 @@ class OpenRouterJudgeClient:
         provider: dict[str, Any] | None = None,
         response_schema: dict[str, Any] | None = None,
         accept: Callable[[str], bool] | None = None,
+        purpose: str = "other",
     ) -> JudgeRawResponse:
         # Generic completion (e.g. the question evaluator): `response_schema` forces JSON, `provider`
         # overrides the per-model pins.
         return await self._call(
             model=model, messages=messages, response_schema=response_schema,
             temperature=temperature, max_tokens=max_tokens, provider=provider, accept=accept,
+            purpose=purpose,
         )
 
     async def _call(
@@ -92,6 +96,7 @@ class OpenRouterJudgeClient:
         max_tokens: int | None = None,
         provider: dict[str, Any] | None = None,
         accept: Callable[[str], bool] | None = None,
+        purpose: str = "other",
     ) -> JudgeRawResponse:
         sem = self._semaphores.setdefault(
             model, asyncio.Semaphore(max(1, self.settings.max_concurrency_per_model))
@@ -106,6 +111,7 @@ class OpenRouterJudgeClient:
                     schema_name=schema_name, temperature=temperature, max_tokens=max_tokens,
                     provider=provider,
                     base_shift=parse_attempt * (self.settings.retry_count + 1),
+                    purpose=purpose,
                 )
                 if last.error is None and (accept is None or accept(last.raw)):
                     return last
@@ -122,6 +128,7 @@ class OpenRouterJudgeClient:
         max_tokens: int | None = None,
         provider: dict[str, Any] | None = None,
         base_shift: int = 0,
+        purpose: str = "other",
     ) -> JudgeRawResponse:
         last_error = ""
         for attempt in range(self.settings.retry_count + 1):
@@ -135,6 +142,7 @@ class OpenRouterJudgeClient:
                     max_tokens=max_tokens,
                     provider=provider,
                     provider_shift=base_shift + attempt,
+                    purpose=purpose,
                 )
             except Exception as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
@@ -162,6 +170,7 @@ class OpenRouterJudgeClient:
         max_tokens: int | None = None,
         provider: dict[str, Any] | None = None,
         provider_shift: int = 0,
+        purpose: str = "other",
     ) -> JudgeRawResponse:
         provider_block = provider if provider is not None else JUDGE_PROVIDER_PINS.get(model, {})
         provider_block = _rotate_order(provider_block, provider_shift)
@@ -188,10 +197,13 @@ class OpenRouterJudgeClient:
         body = response.json()
         usage = body.get("usage") or {}
         cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+        reasoning = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens", 0)
         logger.debug(
-            f"[judge-openrouter] usage model={model} "
+            f"[judge-openrouter] usage purpose={purpose} model={model} "
             f"prompt_tokens={usage.get('prompt_tokens')} cached_tokens={cached} "
-            f"cost={usage.get('cost')}"
+            f"completion_tokens={usage.get('completion_tokens')} "
+            f"reasoning_tokens={reasoning} "
+            f"cost={float(usage.get('cost') or 0.0):.8f}"
         )
         raw = _message_content(body.get("choices", []))
         provider = _provider_name(model)

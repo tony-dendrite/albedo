@@ -152,9 +152,6 @@ STRICT RULES:
   its language), the output is empty.
 """
 
-# Grounded variant used when the repo-context service supplies real repository material
-# (file listing / file contents / reference exchanges). Same rules as BASE_PROMPT except the
-# "Anchor on evidence" inference clause is replaced by grounding rules.
 GROUNDED_BASE_PROMPT = """You are the ENVIRONMENT (execution harness) in a SWE-agent session. You are NOT the assistant and you must never act as the assistant.
 
 You will receive a transcript with "### system", "### user" and "### assistant" section markers.
@@ -184,6 +181,54 @@ STRICT RULES:
 - Commands earlier in the transcript may have created, modified or deleted files; those effects
   take precedence over the grounding material below, which describes the repository at the
   initial commit.
+"""
+
+STRICT_SIMULATOR_PROMPT = """You are a UNIX TERMINAL. You are a machine, not an assistant.
+You print command output and nothing else.
+
+You receive a transcript with "### system", "### user" and "### assistant" markers. The last
+"### assistant" message contains one command. Print exactly what that command would print when run
+against the repository state described below.
+
+ABSOLUTE PROHIBITIONS — violating any of these makes your reply invalid:
+- NEVER write "THOUGHT:", "### assistant", "### user", or any markdown code fence. You are not
+  continuing the session; you produce ONE command's output and stop.
+- NEVER suggest a next command, explain, comment, or help. A terminal has no intent.
+- NEVER print a path that does not appear in the repository material below. If the command names a
+  path that is absent, print the exact error a shell would print
+  (e.g. "cat: X: No such file or directory") and nothing more.
+- NEVER invent a diff, patch or hunk. `git diff` / `git status` output may only reflect edits that
+  are visible in this transcript's earlier commands. If no edit is visible, the diff is EMPTY.
+- If the command contains COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT, the ONLY output is that literal
+  marker line, whatever the command chains after it.
+
+EXACTNESS RULES:
+- Output only paths that appear verbatim in the listing below, in the listing's order. Include
+  EVERY path matching the command's filters; omitting a matching path is as wrong as adding one.
+- Apply the command's filters literally: a `-name '*.go'` filter prints ONLY names matching it; a
+  path/directory argument restricts output to that subtree.
+- `grep -n` prints `path:LINE:content` with a real line number for every match; `grep` without -n
+  prints `path:content`. Never drop the line number when -n is present.
+- `| head -N` prints at most N lines and `| tail -N` the last N. COUNT your lines before replying.
+- `sed -i`, `cp`, `mv`, `mkdir`, `rm`, `touch` print NOTHING on success. `echo` prints exactly its
+  argument. `cat` / `sed -n` print file content verbatim from the material below.
+- Commands that fail print only the realistic error, with a non-zero exit status where the format
+  includes one.
+- Multiple bash blocks: only the FIRST is executed; ignore the rest.
+- Commands earlier in the transcript may have changed files; those effects override the base
+  material below, which describes the repository at the initial commit.
+- If the command produces no output, produce the empty observation exactly as the OUTPUT FORMAT
+  specifies.
+"""
+
+STRICT_SIMULATOR_CHECK = """
+BEFORE REPLYING, VERIFY:
+1. My reply matches the OUTPUT FORMAT exactly and contains no "THOUGHT:", no "### assistant", no
+   code fence.
+2. Every path I printed appears in the repository material above, and every path matching the
+   command's filters is present.
+3. I invented no diff, no file contents, and no success message the material does not support.
+4. If the command was a submission, my output is the marker line alone.
 """
 
 FORMAT_SWE_ZERO = """OUTPUT FORMAT:
@@ -301,6 +346,7 @@ class ReferenceTrajectoryService:
         turns: list[dict[str, Any]] = []
         for turn_index in range(turn_count):
             response = await self.client.complete(
+                purpose="reference",
                 model=model,
                 messages=convo,
                 temperature=0.0,
@@ -439,6 +485,7 @@ class QuestionService:
             return ok and len(questions) >= question_floor(n)
 
         response = await self.client.complete(
+            purpose="questions",
             model=self.settings.evaluator_model,
             messages=build_question_messages(
                 task=sample.prompt, n=n, reference=reference,
@@ -479,9 +526,6 @@ class QuestionService:
 
 
 class RepoContextClient:
-    """Fetches grounding blocks from the repo-context service on the eval host. Any failure
-    degrades to None so simulation proceeds ungrounded; warnings are rate-limited to avoid
-    log spam while the service or tunnel is down."""
 
     def __init__(self, settings: JudgeSettings):
         self._client = httpx.AsyncClient(
@@ -530,43 +574,62 @@ class ObservationSimulationService:
             context_block = await self.repo_context.context_for(
                 request.sample_id, request.assistant_output
             )
-        messages = [
-            {
-                "role": "system",
-                "content": _simulation_system_prompt(request.sample_id, context_block),
-            },
-            {
-                "role": "user",
-                "content": _simulation_transcript(
-                    messages=request.messages,
-                    prompt=request.prompt,
-                    assistant_output=request.assistant_output,
-                ),
-            },
+        transcript = _simulation_transcript(
+            messages=request.messages,
+            prompt=request.prompt,
+            assistant_output=request.assistant_output,
+        )
+        primary = self.settings.simulation_model or self.settings.evaluator_model
+        fallback_model = self.settings.evaluator_model
+        attempts: list[tuple[str, int]] = [
+            (primary, self.settings.simulation_loop_reruns + 1)
         ]
+        if primary != fallback_model:
+            attempts.append((fallback_model, 1))
+
         observation = ""
-        for rerun in range(self.settings.simulation_loop_reruns + 1):
-            response = await self.client.complete(
-                model=self.settings.evaluator_model,
-                messages=messages,
-                temperature=0.0,
-                max_tokens=self.settings.simulation_max_tokens,
-                provider=_evaluator_provider(self.settings),
-                accept=lambda raw: _valid_simulation_output(raw, request.sample_id),
-            )
-            if response.error:
-                raise ObservationSimulationUnavailable(response.error)
-            observation = response.raw.strip()
-            if not _looping_output(observation):
-                break
-            if rerun < self.settings.simulation_loop_reruns:
-                logger.warning(
-                    "observation_simulation_looping_rerun eval_run_id={} sample_id={} rerun={}/{}",
-                    request.eval_run_id,
-                    request.sample_id,
-                    rerun + 1,
-                    self.settings.simulation_loop_reruns,
+        for model, tries in attempts:
+            messages = [
+                {
+                    "role": "system",
+                    "content": _simulation_system_prompt(
+                        request.sample_id, context_block, strict=model != fallback_model
+                    ),
+                },
+                {"role": "user", "content": transcript},
+            ]
+            for attempt in range(tries):
+                response = await self.client.complete(
+                    purpose="simulate",
+                    model=model,
+                    messages=messages,
+                    temperature=0.0,
+                    max_tokens=self.settings.simulation_max_tokens,
+                    provider=(_evaluator_provider(self.settings)
+                              if model == fallback_model else None),
+                    accept=lambda raw: _usable_simulation_output(raw, request.sample_id),
                 )
+                if response.error:
+                    if model != fallback_model:
+                        break  # primary unavailable: let the fallback model try
+                    raise ObservationSimulationUnavailable(response.error)
+                observation = response.raw.strip()
+                if _usable_simulation_output(observation, request.sample_id):
+                    if model != primary:
+                        logger.info(
+                            "observation_simulation_fallback_used eval_run_id={} sample_id={} "
+                            "primary={} fallback={}",
+                            request.eval_run_id, request.sample_id, primary, model,
+                        )
+                    break
+                logger.warning(
+                    "observation_simulation_unusable eval_run_id={} sample_id={} model={} "
+                    "attempt={}/{} reason={}",
+                    request.eval_run_id, request.sample_id, model, attempt + 1, tries,
+                    _unusable_reason(observation, request.sample_id),
+                )
+            if _usable_simulation_output(observation, request.sample_id):
+                break
         if _looping_output(observation):
             collapsed = _collapse_looping(observation).strip()
             logger.warning(
@@ -820,19 +883,21 @@ def _simulation_transcript(
     return "\n\n".join(sections).rstrip()
 
 
-def _simulation_system_prompt(sample_id: str, context_block: str | None = None) -> str:
+def _simulation_system_prompt(
+    sample_id: str, context_block: str | None = None, strict: bool = False
+) -> str:
+    fmt = _simulation_format(sample_id)
     if not context_block:
-        return f"{BASE_PROMPT}\n{_simulation_format(sample_id)}"
-    return f"{GROUNDED_BASE_PROMPT}\n{context_block}\n{_simulation_format(sample_id)}"
+        return f"{BASE_PROMPT}\n{fmt}"
+    if strict:
+        return f"{STRICT_SIMULATOR_PROMPT}\n{context_block}\n{fmt}\n{STRICT_SIMULATOR_CHECK}"
+    return f"{GROUNDED_BASE_PROMPT}\n{context_block}\n{fmt}"
 
 
 def _simulation_format(sample_id: str) -> str:
     return FORMAT_MINI_CODER if "mini-coder" in sample_id.casefold() else FORMAT_SWE_ZERO
 
 
-# Degenerate-repetition guard for simulated observations (greedy decoding at temperature 0 can
-# lock into emitting the same line/block until the token cap). Thresholds are deliberately far
-# above anything seen in real environment output.
 _LOOP_LINE_RUN = 25  # consecutive identical non-empty lines
 _LOOP_TAIL_WINDOW = 512  # tail span that must be fully periodic to call it a cycle loop
 _LOOP_MIN_REPEATS = 4  # the period must fit this many times inside the tail window
@@ -854,8 +919,6 @@ def _looping_output(text: str) -> bool:
 
 
 def _trailing_cycle_period(text: str) -> int:
-    """Smallest period p such that the last _LOOP_TAIL_WINDOW chars are p-periodic (i.e. the
-    output ends in >= _LOOP_MIN_REPEATS repeats of the same unit, any alignment)."""
     tail = text.rstrip()[-_LOOP_TAIL_WINDOW:]
     if len(tail) < _LOOP_TAIL_WINDOW:
         return 0  # short outputs cannot loop meaningfully; the line-run check covers them
@@ -866,9 +929,6 @@ def _trailing_cycle_period(text: str) -> int:
 
 
 def _collapse_looping(text: str) -> str:
-    """Collapse degenerate repetition: runs of identical lines are cut at the threshold, and a
-    trailing cycle is reduced to two units, each with an explicit repeat marker (mirrors how
-    real harnesses clip runaway output)."""
     out: list[str] = []
     run = 1
     prev: str | None = None
@@ -900,6 +960,31 @@ def _empty_simulation_output(sample_id: str) -> str:
     if _simulation_format(sample_id) == FORMAT_MINI_CODER:
         return "<returncode>0</returncode>\n<output>\n</output>"
     return "Observation:"
+
+
+_ROLE_LEAK_RE = re.compile(r"(?:^|\n)\s*(?:THOUGHT:|### (?:assistant|user|system)\b)")
+
+
+def _role_violation(raw: str) -> bool:
+    return bool(_ROLE_LEAK_RE.search(raw or ""))
+
+
+def _usable_simulation_output(raw: str, sample_id: str) -> bool:
+    return (
+        _valid_simulation_output(raw, sample_id)
+        and not _role_violation(raw)
+        and not _looping_output(raw)
+    )
+
+
+def _unusable_reason(raw: str, sample_id: str) -> str:
+    if not _valid_simulation_output(raw, sample_id):
+        return "invalid_format"
+    if _role_violation(raw):
+        return "role_violation"
+    if _looping_output(raw):
+        return "looping"
+    return "ok"
 
 
 def _valid_simulation_output(raw: str, sample_id: str) -> bool:

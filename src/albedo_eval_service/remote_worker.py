@@ -185,9 +185,6 @@ class RemoteEvalWorker:
         run.set_state(str(verdict["state"]))
 
     def _prefetch_repo_context(self, request: EvalRequest, samples: list[EvalSample]) -> None:
-        """Fire-and-forget snapshot prefetch on the local repo-context service so grounding
-        material downloads alongside model resolution. Already-cached snapshots are skipped
-        service-side; failures never affect the eval."""
         url = (self.settings.repo_context_url or "").rstrip("/")
         if not url:
             return

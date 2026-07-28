@@ -34,6 +34,7 @@ class JudgeSettings(BaseSettings):
     question_max_tokens: int = 16000
     simulation_max_tokens: int = 4096
     simulation_loop_reruns: int = 2
+    simulation_model: str = ""
     answer_max_tokens: int = 8000
     question_prep_ttl_seconds: float = 14400.0
     repo_context_url: str = ""
