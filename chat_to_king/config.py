@@ -33,6 +33,17 @@ class KingChatSettings(BaseSettings):
     llms_keywords: str = "albedo,sn97,subnet 97,netuid 97"
     llms_max_chars: int = 0
 
+    # Our own HF mirror of each king, written by scripts/king_hf_uploader.py — the same env vars the
+    # uploader reads, so the two cannot point at different namespaces.
+    hf_namespace: str = Field(
+        default="dendriteholdings",
+        validation_alias=AliasChoices("KING_CHAT_HF_NAMESPACE", "ALBEDO_KING_HF_NAMESPACE"),
+    )
+    hf_repo_prefix: str = Field(
+        default="albedo-qwen3.6-35b-king",
+        validation_alias=AliasChoices("KING_CHAT_HF_REPO_PREFIX", "ALBEDO_KING_HF_REPO_PREFIX"),
+    )
+
     served_model_name: str = "albedo-king"
     vllm_host: str = "0.0.0.0"
     vllm_port: int = 9201

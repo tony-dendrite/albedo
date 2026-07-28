@@ -25,6 +25,31 @@ ORDER BY r.version DESC
 LIMIT 1
 """
 
+_LINEAGE_SQL = """
+SELECT ms.model_uri,
+       ms.architecture,
+       ms.parameter_count,
+       a.uri AS artifact_uri,
+       coalesce(r.reason, '') AS reason
+FROM king_versions kv
+JOIN model_submissions ms ON ms.id = kv.submission_id
+LEFT JOIN artifacts a ON a.id = kv.artifact_id
+LEFT JOIN reigns r ON r.id = kv.entered_reign_id
+WHERE kv.version <= %s
+ORDER BY kv.version ASC
+"""
+
+# Which king_versions rows count towards the lineage number — kept in sync with
+# scripts/king_hf_uploader.py, which names the HF mirrors after that number.
+_QWEN_PATTERNS = ("qwen3.6", "qwen3-6", "qwen3_6")
+_SIZE_PATTERNS = ("35b", "35-b")
+_GENESIS_MARKERS = ("qwen3.6-35b-a3b-genesis", "35b-a3b-genesis")
+_ROMAN_NUMERALS = (
+    (1000, "M"), (900, "CM"), (500, "D"), (400, "CD"),
+    (100, "C"), (90, "XC"), (50, "L"), (40, "XL"),
+    (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I"),
+)
+
 
 @dataclass(frozen=True)
 class King:
@@ -33,11 +58,42 @@ class King:
     uid: int | None = None
     hotkey: str | None = None
     king_version: int | None = None
+    roman: str = ""  # lineage number ("XCVI"), i.e. which HF mirror repo holds this king
 
     @property
     def digest(self) -> str:
         _repo, digest = _model_ref_parts(self.model_uri, self.model_hash)
         return digest
+
+
+def _to_roman(n: int) -> str:
+    out: list[str] = []
+    for value, symbol in _ROMAN_NUMERALS:
+        while n >= value:
+            out.append(symbol)
+            n -= value
+    return "".join(out)
+
+
+def _lineage_roman(conn, king_version: int) -> str:
+    """Position of this king in the crowned lineage, as a roman numeral. Genesis reigns and models
+    off the current architecture are not counted (same enumeration as the HF uploader, so the number
+    matches the mirror repo name); "" when it cannot be determined."""
+    number = 0
+    for row in conn.execute(_LINEAGE_SQL, (king_version,)):
+        text = " ".join(
+            str(row[key] or "")
+            for key in ("model_uri", "artifact_uri", "architecture", "parameter_count")
+        ).lower()
+        if not (
+            any(p in text for p in _QWEN_PATTERNS) and any(p in text for p in _SIZE_PATTERNS)
+        ):
+            continue
+        repo = (row["model_uri"] or row["artifact_uri"] or "").lower()
+        if row["reason"].upper() == "GENESIS" or any(m in repo for m in _GENESIS_MARKERS):
+            continue
+        number += 1
+    return _to_roman(number) if number else ""
 
 
 def _resolve_dsn(settings: KingChatSettings) -> str:
@@ -71,12 +127,12 @@ def current_king(settings: KingChatSettings) -> King | None:
         with psycopg.connect(dsn, row_factory=dict_row) as conn:
             conn.execute("SET TRANSACTION READ ONLY")
             row = conn.execute(_KING_SQL).fetchone()
+            if not row or not row.get("model_uri"):
+                logger.warning("[king-chat] no active king found (empty reign?)")
+                return None
+            roman = _lineage_roman(conn, int(row["king_version"]))
     except Exception as exc:
         logger.warning("[king-chat] king query failed: {}", exc)
-        return None
-
-    if not row or not row.get("model_uri"):
-        logger.warning("[king-chat] no active king found (empty reign?)")
         return None
 
     return King(
@@ -85,4 +141,5 @@ def current_king(settings: KingChatSettings) -> King | None:
         uid=row["uid"],
         hotkey=row["hotkey"],
         king_version=row["king_version"],
+        roman=roman,
     )

@@ -20,6 +20,7 @@ import signal
 import socket
 import subprocess
 import time
+from pathlib import Path
 
 import httpx
 from loguru import logger
@@ -34,6 +35,14 @@ from albedo_eval_service.remote_dataset import _QWEN3_CHAT_TEMPLATE
 
 from config import KingChatSettings
 from king_source import King
+from mirror import MirrorNotReady, mirror_repo_id, mirror_revision
+
+
+def _model_complete(model_dir: str) -> bool:
+    """``_model_present`` only checks the weights, but the HF download path fetches weights and
+    config files in separate calls — a shard-complete dir with no config.json boots vLLM straight
+    into "Invalid repository ID or local directory"."""
+    return _model_present(model_dir) and (Path(model_dir) / "config.json").exists()
 
 
 class KingVllmEngine:
@@ -42,6 +51,7 @@ class KingVllmEngine:
         self._proc: subprocess.Popen | None = None
         self._loaded_digest = ""
         self._loaded_dir = ""
+        self._prev_dir = ""
         self._lock = asyncio.Lock()
         self.reloading = False
         self.serving_king: King | None = None
@@ -67,9 +77,13 @@ class KingVllmEngine:
             self.incoming_king = king
             try:
                 model_dir = await asyncio.wait_for(
-                    self._materialize(king.model_uri, king.digest),
+                    self._materialize(king),
                     timeout=self._s.download_timeout_s,
                 )
+            except MirrorNotReady as exc:
+                self.incoming_king = None
+                logger.info("[king-chat] waiting for HF mirror (keeping current king): {}", exc)
+                return
             except Exception as exc:
                 self.incoming_king = None
                 logger.error("[king-chat] download failed (keeping current king): {}", exc)
@@ -86,8 +100,8 @@ class KingVllmEngine:
                 self._loaded_digest = king.digest
                 self.serving_king = king
                 if old_dir and old_dir != model_dir:
-                    await asyncio.to_thread(shutil.rmtree, old_dir, True)
-                    logger.info("[king-chat] deleted previous king at {}", old_dir)
+                    self._prev_dir = old_dir
+                await asyncio.to_thread(self._prune_models, {model_dir, self._prev_dir})
             except Exception as exc:
                 self._loaded_digest = ""
                 logger.error("[king-chat] vLLM boot failed: {}", exc)
@@ -111,19 +125,47 @@ class KingVllmEngine:
                 self.reloading = False
 
 
-    async def _materialize(self, model_uri: str, digest: str) -> str:
-        from model_validation.storage import cache_dir, download_full, make_ref
+    async def _materialize(self, king: King) -> str:
+        """Stage the king's weights locally, from our own HF mirror of it (see mirror.py). Raises
+        MirrorNotReady while the mirror is still uploading, so the current king keeps serving."""
+        from model_validation.storage import cache_dir, download_config, download_full, make_ref
 
-        repo, ref_digest = _model_ref_parts(model_uri, digest)
+        original_repo, original_digest = _model_ref_parts(king.model_uri, king.digest)
+        if self._s.king_override_uri:  # manual override: take the operator's ref as given
+            repo, ref_digest = original_repo, original_digest
+        else:
+            repo = mirror_repo_id(king.roman, self._s)
+            ref_digest = await asyncio.to_thread(mirror_revision, repo, original_repo)
         ref = make_ref(repo, ref_digest)
         dest = str(cache_dir(ref))
-        if _model_present(dest):
+        if _model_complete(dest):
             logger.info("[king-chat] reusing on-disk model at {} — skipping download", dest)
         else:
-            logger.info("[king-chat] downloading {} digest={:.16} to {}", repo, ref_digest, dest)
+            logger.info("[king-chat] downloading {} rev={:.16} to {}", repo, ref_digest, dest)
+            await asyncio.to_thread(self._prune_models, {self._loaded_dir, self._prev_dir})
+            await asyncio.to_thread(download_config, ref)  # download_full fetches weights only
             dest = await asyncio.to_thread(download_full, ref)
         await asyncio.to_thread(_inject_seed_processor_files, dest)
         return dest
+
+    def _prune_models(self, keep: set[str]) -> None:
+        """Keep only the current and the previous king's weights under models_dir — a coronation that
+        fails to boot otherwise leaves 60G+ behind on every attempt. Dirs without weights (the seed
+        processor's config staging) are left alone."""
+        root = Path(self._s.models_dir)
+        keep_real = {os.path.realpath(p) for p in keep if p}
+        for weights_dir in {p.parent for p in root.rglob("*.safetensors")}:
+            if os.path.realpath(weights_dir) in keep_real:
+                continue
+            shutil.rmtree(weights_dir, ignore_errors=True)
+            logger.info("[king-chat] pruned old king weights at {}", weights_dir)
+            try:
+                parent = weights_dir.parent
+                while parent != root and parent.is_dir() and not any(parent.iterdir()):
+                    parent.rmdir()
+                    parent = parent.parent
+            except OSError:
+                pass
 
     async def _start_vllm(self, model_dir: str) -> None:
         s = self._s
@@ -188,6 +230,8 @@ class KingVllmEngine:
         deadline = time.monotonic() + timeout
         async with httpx.AsyncClient(timeout=5.0) as c:
             while time.monotonic() < deadline:
+                if self._proc is not None and self._proc.poll() is not None:
+                    raise RuntimeError(f"vLLM exited with code {self._proc.returncode} on startup")
                 try:
                     if (await c.get(url)).status_code == 200:
                         return
