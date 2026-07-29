@@ -31,11 +31,11 @@ class JudgeSettings(BaseSettings):
     sota_max_tokens: int = 8192
     sota_trajectory_turns: int = 8
     num_questions: int = 50
-    question_max_tokens: int = 16000
+    question_max_tokens: int = 20000
     simulation_max_tokens: int = 4096
     simulation_loop_reruns: int = 2
     simulation_model: str = ""
-    answer_max_tokens: int = 8000
+    answer_max_tokens: int = 22000
     question_prep_ttl_seconds: float = 14400.0
     repo_context_url: str = ""
     repo_context_timeout_seconds: float = 20.0
