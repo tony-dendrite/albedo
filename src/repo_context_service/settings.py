@@ -14,11 +14,9 @@ class RepoContextSettings(BaseSettings):
 
     api_host: str = "127.0.0.1"
     api_port: int = 8093
-    # Explicit snapshot download directory — REQUIRED; the service refuses to start without it.
     cache_dir: str = ""
     dataset_manifest_path: str = ""
     dataset_manifest_hash: str = ""
-    # Parquet shards root (= ALBEDO_REMOTE_DATASET_ROOT) — needed for the trajectory fallback.
     dataset_root: str = ""
     github_token: str = ""
     max_paths: int = 2000
@@ -26,7 +24,6 @@ class RepoContextSettings(BaseSettings):
     max_file_chars: int = 30000
     max_context_chars: int = 120000
     max_snapshot_mb: int = 500
-    # Total cap on the snapshot cache; when reached the snapshots dir is cleared (0 = unlimited).
     max_cache_gb: float = 60.0
     max_trajectory_pairs: int = 8
 

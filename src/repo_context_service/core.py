@@ -1,17 +1,3 @@
-"""Grounding engine for the environment simulator: real repo context from GitHub snapshots.
-
-For a task's ``sample_id`` this resolves the upstream ``instance_id`` (manifest ``rows_meta``),
-derives owner/repo/commit, downloads ONE tarball snapshot per (repo, sha) into an explicit cache
-directory, and builds a command-aware grounding block (file listing + referenced file contents).
-
-Hard rules:
-- Files are served ONLY from the task's own snapshot; paths referenced by the command that do not
-  exist at that commit are reported in an explicit FILES NOT PRESENT section, never fabricated.
-- When the snapshot is unavailable (private/deleted/oversized/network), fall back to grounding
-  with the task's original trajectory from the dataset parquet (real command->observation pairs).
-- ``context_for`` never raises: total failure degrades to ``(None, "none")`` so the caller keeps
-  the ungrounded simulator prompt.
-"""
 
 from __future__ import annotations
 
@@ -47,15 +33,14 @@ from .settings import RepoContextSettings
 _API_BASE = "https://api.github.com"
 _DONE_MARKER = ".albedo-repo-context-done"
 _LISTING_NAME = ".albedo-listing.json"
-_NEGATIVE_TTL_SECONDS = 24 * 3600.0  # deterministic failures (404 private/deleted, oversized)
-_TRANSIENT_TTL_SECONDS = 900.0  # network/5xx failures: retry sooner
-_MAX_MEMBER_BYTES = 2 * 1024 * 1024  # single files above this are never injectable anyway
-_MAX_MEMBERS = 200_000  # tarball file-count bomb guard (largest real repos are ~100k files)
+_NEGATIVE_TTL_SECONDS = 24 * 3600.0
+_TRANSIENT_TTL_SECONDS = 900.0
+_MAX_MEMBER_BYTES = 2 * 1024 * 1024
+_MAX_MEMBERS = 200_000
 _MAX_MISSING_PATHS = 10
 _RETRIES = 3
 _COMPLETE_MARKER = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 
-# Same semantics as judge_api._COMMAND_BLOCK_RE: only the FIRST fenced block is executed.
 _COMMAND_BLOCK_RE = re.compile(r"```(?:bash|sh)?[ \t]*\n(.*?)```", re.DOTALL)
 
 LISTING_HEADER = """REPOSITORY FILE LISTING — tracked files at the current commit relevant to the
@@ -99,7 +84,7 @@ class RepoRef:
 @dataclass(frozen=True)
 class GroundingContext:
     context: str | None
-    kind: str  # "repo" | "trajectory" | "none"
+    kind: str
     reason: str | None = None
 
 
@@ -112,18 +97,12 @@ class _SnapshotTooLarge(Exception):
 
 
 def parse_instance(source: str, instance_id: str) -> RepoRef | None:
-    """Derive owner/repo/ref from an instance id.
-
-    swe-zero: ``owner__repo-<PR number>`` -> PR base sha; mini-coder: ``owner__repo.<shortsha>``
-    (optionally with a ``__suffix``) -> commit sha."""
     try:
         if source == "mini-coder":
             parts = instance_id.split("__")
             if len(parts) < 2:
                 return None
             owner, rest = parts[0], parts[1]
-            # rest is "<repo>.<shortsha>[.<suffix>...]" where repo itself may contain dots
-            # (e.g. "goatcounter.854b1dd2.lm_modify"): the sha is the first hex component.
             tokens = rest.split(".")
             for index in range(1, len(tokens)):
                 if re.fullmatch(r"[0-9a-f]{6,40}", tokens[index]):
@@ -161,7 +140,6 @@ def _name_patterns(cmd: str) -> list[str]:
 
 
 def _filter_listing(paths: list[str], cmd: str) -> tuple[list[str], bool]:
-    """Filter listing paths by the command's find -name patterns. Returns (paths, filtered?)."""
     pats = _name_patterns(cmd)
     if not (pats and cmd.startswith(("find", "ls"))):
         return paths, False
@@ -175,7 +153,6 @@ def _filter_listing(paths: list[str], cmd: str) -> tuple[list[str], bool]:
 
 
 def _referenced_paths(cmd: str, listing: list[str]) -> tuple[list[str], list[str]]:
-    """Repo paths explicitly named in the command: (present in snapshot, missing at this commit)."""
     listing_set = set(listing)
     top_dirs = {p.split("/", 1)[0] for p in listing_set if "/" in p}
     present: list[str] = []
@@ -192,23 +169,22 @@ def _referenced_paths(cmd: str, listing: list[str]) -> tuple[list[str], list[str
             continue
         norm = p.rstrip("/")
         if not norm or norm in (".", "..") or norm in missing:
-            continue  # "." / ".." are the repo root and its parent, not missing files
+            continue
         if any(x.startswith(norm + "/") for x in listing_set):
-            continue  # existing directory, not a missing file
+            continue
         if tok.startswith(("/", "..")):
-            missing.append(norm)  # outside the repo by construction
+            missing.append(norm)
         elif _plausible_repo_path(norm, top_dirs):
             missing.append(norm)
     return present, missing[:_MAX_MISSING_PATHS]
 
 
 def _plausible_repo_path(path: str, top_dirs: set[str]) -> bool:
-    """Conservative filter so shell noise (sed scripts, grep patterns) is not reported missing."""
     segments = path.split("/")
     if segments[0] in top_dirs:
         return True
     if len(segments) == 1 and path.startswith("."):
-        return True  # dotfile such as .env
+        return True
     last = segments[-1]
     return bool(re.fullmatch(r"\.?[\w@.-]+\.[A-Za-z][A-Za-z0-9]*", last))
 
@@ -221,13 +197,11 @@ def _truncate(text: str, limit: int) -> str:
 
 @lru_cache(maxsize=64)
 def _load_listing(listing_path: str) -> tuple[str, ...]:
-    # Snapshots are immutable once the done-marker exists, so caching by path is safe.
     return tuple(json.loads(Path(listing_path).read_text()))
 
 
 @lru_cache(maxsize=4096)
 def _iid_from_parquet(dataset_root: str, shard_name: str, row_idx: int) -> str | None:
-    """instance_id of one row, reading only that column (rows are immutable -> cacheable)."""
     import pyarrow.parquet as pq
 
     path = Path(dataset_root) / shard_name
@@ -272,10 +246,8 @@ class RepoContextService:
     def close(self) -> None:
         self._client.close()
 
-    # ── public entrypoints ────────────────────────────────────────────────────
 
     def context_for(self, sample_id: str, assistant_output: str) -> GroundingContext:
-        """Grounding block for the simulator prompt. Never raises."""
         try:
             return self._context_for(sample_id, assistant_output)
         except Exception as exc:  # noqa: BLE001 - total failure must degrade, not propagate
@@ -286,9 +258,6 @@ class RepoContextService:
             return GroundingContext(context=None, kind="none", reason="unexpected")
 
     def prefetch(self, sample_ids: list[str]) -> dict[str, int]:
-        """Warm the sha + snapshot caches for a run's samples so grounding material is ready
-        before generation starts. Instances are deduped and already-downloaded snapshots are
-        skipped (done-marker short-circuit in _ensure_snapshot). Never raises."""
         instances: dict[str, str] = {}
         for sample_id in sample_ids:
             try:
@@ -329,7 +298,6 @@ class RepoContextService:
     def repo_context_for_instance(
         self, source: str, instance_id: str, assistant_output: str
     ) -> GroundingContext:
-        """Repo-snapshot grounding only (no trajectory fallback) for a known instance id."""
         ref = parse_instance(source, instance_id)
         if ref is None:
             return GroundingContext(context=None, kind="none", reason="instance_unparsed")
@@ -344,7 +312,6 @@ class RepoContextService:
         block = self._build_repo_block(snapshot, listing, _first_command(assistant_output))
         return GroundingContext(context=block, kind="repo")
 
-    # ── grounding chain ───────────────────────────────────────────────────────
 
     def _context_for(self, sample_id: str, assistant_output: str) -> GroundingContext:
         try:
@@ -367,15 +334,12 @@ class RepoContextService:
         logger.warning("repo_context_fallback sample_id={} kind=none reason={}", sample_id, reason)
         return GroundingContext(context=None, kind="none", reason=reason)
 
-    # ── instance resolution (manifest rows_meta) ──────────────────────────────
 
     def _iid_for(self, shard_name: str, row_idx: int) -> tuple[str, str] | None:
         if self.settings.dataset_manifest_path:
             resolved = self._iid_from_manifest(shard_name, row_idx)
             if resolved is not None:
                 return resolved
-        # Colocated with the dataset (the eval server): read the row's instance_id column
-        # directly — avoids holding the multi-GB rows_meta manifest in memory.
         if self.settings.dataset_root:
             iid = _iid_from_parquet(self.settings.dataset_root, shard_name, row_idx)
             if iid:
@@ -420,7 +384,6 @@ class RepoContextService:
                     self._shards = shards
         return self._shards
 
-    # ── sha resolution (per-instance cache + negative cache) ──────────────────
 
     def _resolve_sha(self, ref: RepoRef) -> tuple[str, str, str] | None:
         cache_path = self._shas_dir / f"{_safe_name(ref.instance_id)}.json"
@@ -439,7 +402,6 @@ class RepoContextService:
                 try:
                     sha = self._sha_from_api(owner, repo, ref)
                 except _NotFound:
-                    # renamed repo: the bare repo endpoint follows the redirect; retry there
                     data = self._github_json(f"/repos/{owner}/{repo}")
                     owner, repo = data["full_name"].split("/", 1)
                     sha = self._sha_from_api(owner, repo, ref)
@@ -462,7 +424,6 @@ class RepoContextService:
         data = self._github_json(f"/repos/{owner}/{repo}/commits/{ref.commit}")
         return data["sha"]
 
-    # ── snapshot download + extraction ────────────────────────────────────────
 
     def _ensure_snapshot(self, owner: str, repo: str, sha: str) -> Path | None:
         key = f"{_safe_name(owner)}__{_safe_name(repo)}__{sha[:12]}"
@@ -489,7 +450,7 @@ class RepoContextService:
                 os.replace(tmp_dir, final)
             except Exception as exc:  # noqa: BLE001
                 shutil.rmtree(tmp_dir, ignore_errors=True)
-                if (final / _DONE_MARKER).exists():  # lost a cross-process race: still usable
+                if (final / _DONE_MARKER).exists():
                     return final
                 ttl_kind = "oversized" if isinstance(exc, _SnapshotTooLarge) else "transient"
                 logger.info(
@@ -537,8 +498,6 @@ class RepoContextService:
                         out.write(chunk)
 
     def _enforce_cache_limit(self) -> None:
-        """When the snapshot cache reaches max_cache_gb, clear it entirely (snapshots re-download
-        on demand; the tiny per-instance sha cache is kept)."""
         limit = int(self.settings.max_cache_gb * 1024**3)
         if limit <= 0:
             return
@@ -557,9 +516,6 @@ class RepoContextService:
         _load_listing.cache_clear()
 
     def _extract_tarball(self, tar_path: Path, dest_dir: Path) -> tuple[list[str], int]:
-        """Extract regular files only (no symlinks/devices), strip the tarball's top-level
-        directory, and refuse absolute or parent-traversing member paths. Returns the sorted
-        listing and the extracted byte count."""
         max_extracted = self.settings.max_snapshot_mb * 1024 * 1024 * 4
         total = 0
         paths: list[str] = []
@@ -573,10 +529,8 @@ class RepoContextService:
                 if len(parts) < 2 or any(part in ("..", "") for part in parts):
                     continue
                 if parts[1] in (_LISTING_NAME, _DONE_MARKER):
-                    continue  # repo files must never collide with our snapshot metadata
+                    continue
                 if member.size > _MAX_MEMBER_BYTES:
-                    # Part of the repo tree (must appear in find/ls output) but never injectable:
-                    # keep it in the listing without extracting the content.
                     paths.append("/".join(parts[1:]))
                     continue
                 total += member.size
@@ -593,10 +547,7 @@ class RepoContextService:
                 paths.append(rel)
         return sorted(paths), total
 
-    # ── block building ────────────────────────────────────────────────────────
 
-    # Listing room guaranteed even when file contents fill the budget (huge repos): referenced
-    # file contents are the highest-value grounding, but a floor of listing must survive too.
     _LISTING_MIN_CHARS = 8000
 
     def _build_repo_block(self, snapshot_dir: Path, listing: list[str], cmd: str) -> str:
@@ -608,7 +559,6 @@ class RepoContextService:
             else ""
         )
 
-        # File contents take priority over the listing, bounded so a listing floor remains.
         contents_budget = (
             self.settings.max_context_chars
             - len(LISTING_HEADER)
@@ -630,17 +580,14 @@ class RepoContextService:
             "\n" + CONTENTS_HEADER + "\n" + "\n".join(contents_parts) if contents_parts else ""
         )
 
-        # Listing gets whatever budget remains, entry by entry, with an accurate overflow marker.
         listing_budget = (
             self.settings.max_context_chars
             - len(LISTING_HEADER)
             - len(contents_text)
             - len(missing_text)
-            - 64  # room for the overflow marker line
+            - 64
         )
         if not listing_paths:
-            # Still grounded: the simulator must answer with an EMPTY observation in the
-            # dataset's format (e.g. exactly "Observation:"), never invented paths.
             listing_text = (
                 "(no files in this repository match the command's filters — "
                 "the exploration output is empty)"
@@ -663,8 +610,6 @@ class RepoContextService:
         return _truncate(block, self.settings.max_context_chars)
 
     def _read_snapshot_file(self, snapshot_dir: Path, rel_path: str) -> str | None:
-        """Serve ONLY files inside this snapshot: resolve symlinks and reject anything that
-        escapes the snapshot root or is not a regular file."""
         root = snapshot_dir.resolve()
         try:
             target = (snapshot_dir / rel_path).resolve()
@@ -677,7 +622,6 @@ class RepoContextService:
         except OSError:
             return None
 
-    # ── trajectory fallback ───────────────────────────────────────────────────
 
     def _trajectory_block(self, shard_name: str, row_idx: int, turn_idx: int) -> str | None:
         if not self.settings.dataset_root:
@@ -695,8 +639,6 @@ class RepoContextService:
         assistant_positions = [i for i, turn in enumerate(turns) if _role(turn) == "assistant"]
         pairs: list[tuple[str, str]] = []
         for assistant_index, position in enumerate(assistant_positions):
-            # Exchanges before the eval's cut turn are already in the transcript prefix the
-            # simulator sees; the added grounding value is the later reference exploration.
             if assistant_index < turn_idx:
                 continue
             command = _first_command(_content(turns[position]))
@@ -707,8 +649,6 @@ class RepoContextService:
             observation = _content(turns[position + 1]).strip()
             if not observation:
                 continue
-            # The submission exchange's observation is the gold solution diff — it must never
-            # reach the simulator (a leaked fragment in an observation would hand miners the fix).
             if _COMPLETE_MARKER in command or _COMPLETE_MARKER in observation:
                 continue
             pairs.append((command, observation))
@@ -724,7 +664,6 @@ class RepoContextService:
             )
         return _truncate("\n\n".join(parts), self.settings.max_context_chars)
 
-    # ── github http ───────────────────────────────────────────────────────────
 
     def _auth_headers(self) -> dict[str, str]:
         token = (

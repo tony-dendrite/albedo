@@ -26,9 +26,7 @@ _HEARTBEAT_INTERVAL_S = 10.0
 
 # Tunable per host via env, read at import so a redeploy picks up changes.
 OUT_OF_PROCESS = os.environ.get("ALBEDO_DOWNLOAD_OUT_OF_PROCESS", "1") not in ("0", "false", "False", "")
-# HF's CDN streams steadily, so zero byte growth means the transfer is dead — this is a
-# no-progress freeze window, not a total-download timeout (active transfers never expire).
-STALL_SECONDS = float(os.environ.get("ALBEDO_DOWNLOAD_STALL_SECONDS", "30"))
+STALL_SECONDS = float(os.environ.get("ALBEDO_DOWNLOAD_STALL_SECONDS", "180"))
 STALL_RETRIES = int(os.environ.get("ALBEDO_DOWNLOAD_STALL_RETRIES", "3"))
 # Hippius pulls from decentralized storage — slower, with longer *legitimate* gaps between
 # chunks — so it tolerates a wider no-progress window before a kill.
@@ -145,7 +143,7 @@ def supervise_download(
     runs its download; ``args`` become the child's ``sys.argv[1:]``. A watchdog samples
     ``watch_dir``'s byte total every ``_HEARTBEAT_INTERVAL_S``; if it stops growing for
     ``stall_seconds`` the child (its own process group) is terminated and the download
-    retried, resuming from what already landed on disk. An attempt that grew the
+    retried, resuming from what already landed on disk. An attempt that changed the
     directory resets the retry budget, so a transfer that keeps making progress is
     resumed as many times as it needs; ``TimeoutError`` is raised only after
     ``max_attempts`` *consecutive* attempts with zero byte progress. ``RuntimeError``
@@ -163,8 +161,9 @@ def supervise_download(
         baseline = _dir_bytes(watch_dir)
         proc = _spawn(child_call, args, log_path)
         start = time.monotonic()
-        last_bytes = -1
+        last_bytes = baseline
         last_progress = start
+        progressed = False
         stalled = False
         while proc.poll() is None:
             time.sleep(_HEARTBEAT_INTERVAL_S)
@@ -174,9 +173,10 @@ def supervise_download(
                 "download %s attempt=%d elapsed=%.0fs bytes=%d",
                 label, attempt, now - start, current,
             )
-            if current > last_bytes:
+            if current != last_bytes:
                 last_bytes = current
                 last_progress = now
+                progressed = True
             elif now - last_progress >= stall:
                 log.warning(
                     "download %s stalled attempt=%d bytes=%d no_progress=%.0fs — killing",
@@ -186,7 +186,7 @@ def supervise_download(
                 stalled = True
                 break
         if stalled:
-            fruitless = 0 if last_bytes > baseline else fruitless + 1
+            fruitless = 0 if progressed else fruitless + 1
             if fruitless >= attempts:
                 raise TimeoutError(
                     f"download of {label} made no progress for {stall:.0f}s "

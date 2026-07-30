@@ -58,6 +58,26 @@ def _resolve_lock(model_ref: str) -> threading.Lock:
         return _RESOLVE_LOCKS.setdefault(model_ref, threading.Lock())
 
 
+
+_DOWNLOAD_GATE = threading.Lock()
+
+
+@contextmanager
+def _download_slot(label: str):
+    if not _DOWNLOAD_GATE.acquire(blocking=False):
+        print(f"model_download_queued ref={label} waiting_for_active_download", flush=True)
+        wait_start = time.monotonic()
+        _DOWNLOAD_GATE.acquire()
+        print(
+            f"model_download_slot_acquired ref={label} waited_s={time.monotonic() - wait_start:.0f}",
+            flush=True,
+        )
+    try:
+        yield
+    finally:
+        _DOWNLOAD_GATE.release()
+
+
 @contextmanager
 def _download_heartbeat(label: str, watch_dir: Path | None = None):
     """Print every ``_HEARTBEAT_INTERVAL_S`` seconds that ``label`` is still downloading.
@@ -209,7 +229,7 @@ class ModelArtifactResolver:
 
         paginator = client.get_paginator("list_objects_v2")
         found = False
-        with _download_heartbeat(model_ref, watch_dir=cache_dir):
+        with _download_slot(model_ref), _download_heartbeat(model_ref, watch_dir=cache_dir):
             for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
                 for item in page.get("Contents", []):
                     key = item["Key"]
@@ -253,7 +273,8 @@ class ModelArtifactResolver:
         # Resume an interrupted download: snapshot_download skips files already complete
         # in the target dir, so keep .partial instead of wiping it on each retry.
         temp_dir.mkdir(parents=True, exist_ok=True)
-        self._download_hf_snapshot(repo=repo, revision=revision, temp_dir=temp_dir, label=model_ref)
+        with _download_slot(model_ref):
+            self._download_hf_snapshot(repo=repo, revision=revision, temp_dir=temp_dir, label=model_ref)
         _require_loadable_model_files(temp_dir, source="hf")
         (temp_dir / ".albedo-model-cache.json").write_text(
             json.dumps({"source": model_ref, "repo": repo, "revision": revision}, sort_keys=True)
@@ -441,7 +462,9 @@ class ModelArtifactResolver:
 
             if pending:
                 max_workers = max(1, min(self.settings.model_download_concurrency, len(pending)))
-                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                with _download_slot(original_ref), concurrent.futures.ThreadPoolExecutor(
+                    max_workers=max_workers
+                ) as executor:
                     futures = [
                         executor.submit(_download_layer, layer_digest, name)
                         for layer_digest, name in pending
@@ -453,13 +476,14 @@ class ModelArtifactResolver:
                             executor.shutdown(wait=False, cancel_futures=True)
                             raise
         if chunked:
-            self._download_hippius_snapshot(
-                registry=registry,
-                repository=repository,
-                digest=digest,
-                temp_dir=temp_dir,
-                label=original_ref,
-            )
+            with _download_slot(original_ref):
+                self._download_hippius_snapshot(
+                    registry=registry,
+                    repository=repository,
+                    digest=digest,
+                    temp_dir=temp_dir,
+                    label=original_ref,
+                )
         _require_loadable_model_files(temp_dir, source="oci")
         done_marker_payload = {
             "source": original_ref,
@@ -671,27 +695,36 @@ def _run_hf_download_supervised(
     child_entry: str = "_hf_download_child",
 ) -> None:
     log_path = temp_dir.parent / f"{temp_dir.name}.download.log"
-    for attempt in range(1, max_attempts + 1):
+    attempt = 0
+    fruitless = 0
+    while True:
+        attempt += 1
+        baseline = _dir_written_bytes(temp_dir)
         proc = _spawn_hf_download(repo, revision, temp_dir, concurrency, log_path, child_entry)
         start = time.monotonic()
-        last_bytes = -1
+        last_bytes = baseline
         last_progress = start
+        progressed = False
         stalled = False
         while proc.poll() is None:
             time.sleep(_HEARTBEAT_INTERVAL_S)
             current = _dir_written_bytes(temp_dir)
             now = time.monotonic()
             print(
-                f"model_download_progress ref={label} attempt={attempt}/{max_attempts} "
+                f"model_download_progress ref={label} attempt={attempt} "
                 f"elapsed_s={now - start:.0f} bytes={current}",
                 flush=True,
             )
-            if current > last_bytes:
+            if current != last_bytes:
+                # A DECREASE is progress too: fastdl unlinks a failed shard's multi-GB
+                # partial before retrying it, and requiring growth past the old peak
+                # would blind the watchdog for the entire re-download of that shard.
                 last_bytes = current
                 last_progress = now
+                progressed = True
             elif now - last_progress >= stall_seconds:
                 print(
-                    f"model_download_stalled ref={label} attempt={attempt}/{max_attempts} "
+                    f"model_download_stalled ref={label} attempt={attempt} "
                     f"bytes={current} no_progress_s={now - last_progress:.0f}",
                     flush=True,
                 )
@@ -699,6 +732,14 @@ def _run_hf_download_supervised(
                 stalled = True
                 break
         if stalled:
+            # Only consecutive attempts with ZERO byte movement burn the retry budget:
+            # a slow-but-alive transfer is resumed as many times as it needs.
+            fruitless = 0 if progressed else fruitless + 1
+            if fruitless >= max_attempts:
+                raise TimeoutError(
+                    f"snapshot_download for {repo}@{revision} made no progress for "
+                    f"{stall_seconds:.0f}s across {max_attempts} consecutive attempts"
+                )
             continue
         if proc.returncode == 0:
             log_path.unlink(missing_ok=True)
@@ -707,10 +748,6 @@ def _run_hf_download_supervised(
         raise RuntimeError(
             f"snapshot_download exited {proc.returncode} for {repo}@{revision}: {detail}"
         )
-    raise TimeoutError(
-        f"snapshot_download for {repo}@{revision} made no progress for "
-        f"{stall_seconds:.0f}s across {max_attempts} attempts"
-    )
 
 
 def parse_oci_ref(model_ref: str) -> tuple[str, str, str] | None:

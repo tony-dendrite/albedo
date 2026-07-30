@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from typing import Annotated
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, WebSocket
@@ -104,6 +105,8 @@ class ModelPrefetchRequest(BaseModel):
 
 _prefetch_inflight: set[str] = set()
 _prefetch_inflight_guard = threading.Lock()
+_prefetch_failed_at: dict[str, float] = {}
+_PREFETCH_FAILURE_COOLDOWN_S = 900.0
 
 
 @app.post("/model-prefetch")
@@ -119,6 +122,9 @@ def prefetch_model(
     with _prefetch_inflight_guard:
         if model_uri in _prefetch_inflight:
             return {"model_uri": model_uri, "state": "in_progress"}
+        failed_at = _prefetch_failed_at.get(model_uri)
+        if failed_at is not None and time.monotonic() - failed_at < _PREFETCH_FAILURE_COOLDOWN_S:
+            return {"model_uri": model_uri, "state": "failure_cooldown"}
         _prefetch_inflight.add(model_uri)
     background_tasks.add_task(_prefetch_model_artifact, model_uri, settings)
     return {"model_uri": model_uri, "state": "started"}
@@ -127,8 +133,12 @@ def prefetch_model(
 def _prefetch_model_artifact(model_uri: str, settings: RemoteSettings) -> None:
     try:
         resolved = ModelArtifactResolver(settings).resolve(model_uri)
+        with _prefetch_inflight_guard:
+            _prefetch_failed_at.pop(model_uri, None)
         print(f"model_prefetch_done ref={model_uri} cache_hit={resolved.cache_hit}", flush=True)
     except Exception as exc:  # noqa: BLE001 - prefetch is best-effort; the eval retries the download itself
+        with _prefetch_inflight_guard:
+            _prefetch_failed_at[model_uri] = time.monotonic()
         logger.warning(f"[remote-api] model prefetch failed ref={model_uri}: {exc}")
     finally:
         with _prefetch_inflight_guard:

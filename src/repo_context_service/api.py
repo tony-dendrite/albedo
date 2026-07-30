@@ -1,8 +1,3 @@
-"""Repo-context API: serves grounding blocks for the env simulator (runs on the eval host).
-
-Judge-api POSTs {sample_id, assistant_output} per observation simulation; the response carries
-either a repo-snapshot grounding block, a dataset-trajectory fallback block, or null (caller
-keeps the ungrounded prompt)."""
 
 from __future__ import annotations
 
@@ -25,7 +20,7 @@ class RepoContextRequest(BaseModel):
 class RepoContextResponse(BaseModel):
     sample_id: str
     context: str | None
-    kind: str  # "repo" | "trajectory" | "none"
+    kind: str
 
 
 class PrefetchRequest(BaseModel):
@@ -59,8 +54,6 @@ def create_app(
 
     @app.post("/prefetch")
     async def prefetch(request: PrefetchRequest, background_tasks: BackgroundTasks) -> dict:
-        # Called by the eval worker when model resolution starts: snapshots download in the
-        # background alongside the model download; already-cached snapshots are skipped.
         background_tasks.add_task(service.prefetch, request.sample_ids)
         return {"accepted": len(request.sample_ids)}
 
