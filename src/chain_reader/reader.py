@@ -38,11 +38,13 @@ async def run() -> None:
             try:
                 cur = await asyncio.to_thread(subtensor.get_current_block)
                 if cur != last_block:
-                    snapshot = await asyncio.to_thread(chain.metagraph_snapshot, subtensor, config.NETUID)
+                    snapshot = await asyncio.to_thread(chain.metagraph_snapshot, subtensor, config.NETUID, cur)
 
                     # hotkey-swap guard: ledger swapped-in hotkeys BEFORE ingesting commits, so a
                     # same-tick commit from one is rejected by the per-commit used_hotkeys check.
                     swaps = guard_swap.find_swaps(await guard_db.load_uid_state(pool), snapshot)
+                    if swaps:
+                        swaps = await asyncio.to_thread(chain.confirm_swaps, subtensor, swaps, cur)
                     if swaps:
                         n_ledgered = await guard_db.record_swaps(pool, swaps, config.NETUID, cur)
                         log.warning("hotkey swaps detected={} newly_ledgered={}", len(swaps), n_ledgered)

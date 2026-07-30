@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any, Iterator
 
 from loguru import logger as log
+from scalecodec.utils.ss58 import ss58_encode
 
 _BLOCK_HASH_CACHE: dict[int, str] = {}
 # Immutable pin: Hippius 'sha256:<hex64>' or an HF git revision (40/64 hex).
@@ -95,19 +96,43 @@ def _uid_map(subtensor: Any, netuid: int) -> dict[str, int]:
         return {}
 
 
-def metagraph_snapshot(subtensor: Any, netuid: int) -> list[tuple[int, str, int]]:
-    """(uid, hotkey, BlockAtRegistration) for every registered neuron.
-
-    BlockAtRegistration is keyed per uid and only changes on an actual registration —
-    swap_hotkey replaces the hotkey at a uid but leaves it untouched, which is the
-    swap-detection fingerprint (see chain_guard.swap).
-    """
-    meta = subtensor.metagraph(netuid)
+def metagraph_snapshot(subtensor: Any, netuid: int, block: int) -> list[tuple[int, str, int]]:
+    meta = subtensor.metagraph(netuid, block=block)
     reg_blocks: dict[int, int] = {}
-    qm = subtensor.query_map(module="SubtensorModule", name="BlockAtRegistration", params=[netuid])
+    qm = subtensor.query_map(
+        module="SubtensorModule", name="BlockAtRegistration", params=[netuid], block=block
+    )
     for k, v in qm:
         reg_blocks[int(getattr(k, "value", k))] = int(getattr(v, "value", v))
     return [(int(n.uid), str(n.hotkey), reg_blocks.get(int(n.uid), 0)) for n in meta.neurons]
+
+
+_ZERO_ACCOUNT = ss58_encode(b"\x00" * 32, ss58_format=42)
+
+
+def hotkey_owner(subtensor: Any, hotkey: str, block: int | None = None) -> str | None:
+    """Owning coldkey of ``hotkey``, or None if its Owner entry is absent."""
+    owner = subtensor.query_subtensor("Owner", params=[hotkey], block=block)
+    value = getattr(owner, "value", owner)
+    if value is None:
+        return None
+    value = str(value)
+    return None if value == _ZERO_ACCOUNT else value
+
+
+def confirm_swaps(subtensor: Any, swaps: list[Any], block: int) -> list[Any]:
+    confirmed = []
+    for swap in swaps:
+        owner = hotkey_owner(subtensor, swap.old_hotkey, block)
+        if owner is None:
+            confirmed.append(swap)
+        else:
+            log.warning(
+                "[chain-guard] swap candidate REJECTED: uid {} old hotkey {} is still owned "
+                "by coldkey {} — registration churn, not swap_hotkey; skipping ledger",
+                swap.uid, swap.old_hotkey, owner,
+            )
+    return confirmed
 
 
 def _block_hash(subtensor: Any, block: int) -> str | None:
