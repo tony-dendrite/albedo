@@ -1,13 +1,5 @@
-"""Binary yes/no-question judging: an evaluator writes next-step yes/no questions per task; judges
-answer 1/0 for the king and challenger independently; the mean yes-rate is each side's score.
-
-JUDGE_SYSTEM/USER derive from research/judge_yn (CATJUDGE_SYSTEM/USER) with one deliberate change:
-the judge writes each explanation BEFORE its answer bit (prompt example + schema field order), and
-an answer may never contradict its explanation — fixes observed holistic all-0 sheets whose
-explanations said the checks passed. The QUESTION prompt is adapted from CATQ_FLAT_* to score
-next-step quality, not whole-task completion. The judge user message carries a MEASUREMENTS block
-with programmatic word/character/code counts, so size questions are
-answered against computed numbers instead of the judge's own counting.
+"""Binary yes/no-question judging: an evaluator writes next-step yes/no questions per task; the
+judge answers 1/0 for the king and challenger independently; the mean yes-rate is each side's score.
 """
 
 from __future__ import annotations

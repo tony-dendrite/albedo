@@ -441,12 +441,6 @@ class QuestionService:
                     ) from exc
                 reference, reference_model, reference_made_edit = rerolled
         if reference is not None:
-            # No task-only fallback once anchoring was possible: task-only questions are a
-            # DIFFERENT rubric (no size ladder, no read cap) and scored ~+0.09 higher, so a
-            # silent fallback mixes two regimes inside one eval. Instead, pay for ONE reference
-            # re-roll on the samples that actually failed (measured: ~2-3 per 100, ~+$0.4/eval)
-            # and drop the sample only if that fails too — evals already tolerate a handful of
-            # unscored samples, and the 0.8 valid-fraction gate catches systemic breakage.
             try:
                 return await self._prepare_once(
                     sample, reference, reference_model, reference_made_edit
