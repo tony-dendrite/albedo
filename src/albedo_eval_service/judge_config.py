@@ -33,8 +33,9 @@ class JudgeSettings(BaseSettings):
     num_questions: int = 50
     question_max_tokens: int = 20000
     simulation_max_tokens: int = 4096
-    simulation_loop_reruns: int = 2
-    simulation_model: str = ""
+    simulation_loop_reruns: int = 0
+    simulation_model: str = "openai/gpt-5.6-luna"
+    simulation_providers: str = "openai"
     answer_max_tokens: int = 22000
     question_prep_ttl_seconds: float = 14400.0
     repo_context_url: str = ""

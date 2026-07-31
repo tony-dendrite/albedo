@@ -76,13 +76,16 @@ class OpenRouterJudgeClient:
         response_schema: dict[str, Any] | None = None,
         accept: Callable[[str], bool] | None = None,
         purpose: str = "other",
+        parse_retries: int | None = None,
+        retry_count: int | None = None,
     ) -> JudgeRawResponse:
         # Generic completion (e.g. the question evaluator): `response_schema` forces JSON, `provider`
-        # overrides the per-model pins.
+        # overrides the per-model pins. `parse_retries`/`retry_count` override the settings-level
+        # retry budget for callers that do their own fallback (e.g. the observation simulator).
         return await self._call(
             model=model, messages=messages, response_schema=response_schema,
             temperature=temperature, max_tokens=max_tokens, provider=provider, accept=accept,
-            purpose=purpose,
+            purpose=purpose, parse_retries=parse_retries, retry_count=retry_count,
         )
 
     async def _call(
@@ -97,21 +100,26 @@ class OpenRouterJudgeClient:
         provider: dict[str, Any] | None = None,
         accept: Callable[[str], bool] | None = None,
         purpose: str = "other",
+        parse_retries: int | None = None,
+        retry_count: int | None = None,
     ) -> JudgeRawResponse:
         sem = self._semaphores.setdefault(
             model, asyncio.Semaphore(max(1, self.settings.max_concurrency_per_model))
         )
+        parse_budget = self.settings.parse_retries if parse_retries is None else parse_retries
+        transport_budget = self.settings.retry_count if retry_count is None else retry_count
         async with sem:
             # Retry a 200-that-doesn't-parse (accept=False) up to parse_retries times; each retry is a
             # fresh call that may re-route to a different provider via allow_fallbacks.
             last: JudgeRawResponse | None = None
-            for parse_attempt in range(max(1, self.settings.parse_retries)):
+            for parse_attempt in range(max(1, parse_budget)):
                 last = await self._score_with_retries(
                     model=model, messages=messages, response_schema=response_schema,
                     schema_name=schema_name, temperature=temperature, max_tokens=max_tokens,
                     provider=provider,
-                    base_shift=parse_attempt * (self.settings.retry_count + 1),
+                    base_shift=parse_attempt * (transport_budget + 1),
                     purpose=purpose,
+                    retry_count=transport_budget,
                 )
                 if last.error is None and (accept is None or accept(last.raw)):
                     return last
@@ -129,9 +137,11 @@ class OpenRouterJudgeClient:
         provider: dict[str, Any] | None = None,
         base_shift: int = 0,
         purpose: str = "other",
+        retry_count: int | None = None,
     ) -> JudgeRawResponse:
+        transport_budget = self.settings.retry_count if retry_count is None else retry_count
         last_error = ""
-        for attempt in range(self.settings.retry_count + 1):
+        for attempt in range(transport_budget + 1):
             try:
                 return await self._score_once(
                     model=model,
@@ -146,14 +156,14 @@ class OpenRouterJudgeClient:
                 )
             except Exception as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
-                if attempt >= self.settings.retry_count:
+                if attempt >= transport_budget:
                     break
                 await asyncio.sleep(
                     _retry_sleep_seconds(exc, attempt, self.settings.retry_backoff_seconds)
                 )
         logger.warning(
             f"[judge-openrouter] retries exhausted model={model} "
-            f"attempts={self.settings.retry_count + 1}, returning error: {last_error}"
+            f"attempts={transport_budget + 1}, returning error: {last_error}"
         )
         return JudgeRawResponse(
             model=model, provider=_provider_name(model), raw="", error=last_error

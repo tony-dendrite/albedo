@@ -6,7 +6,8 @@
 > commits, validates artifacts, runs a stability pre-eval, then duels each challenger
 > against the reigning king on coding trajectories from two datasets — SWE-ZERO (12M) and
 > mini-coder (400k) — sampled 70/30 across the two. Between turns, tool observations are simulated
-> by an LLM simulator (MiMo 2.5 Pro). An evaluator (GLM 5.2) writes yes/no checklist questions
+> by an LLM simulator (GPT-5.6 Luna, single-shot, with GLM 5.2 as fallback). An evaluator
+> (GLM 5.2) writes yes/no checklist questions
 > about a good next step for each task, anchored on a GLM 5.2 reference trajectory; a single LLM
 > judge (GLM 5.2) answers them 1/0 for the king and challenger responses independently, and the
 > mean yes-rate is each side's score.
@@ -372,8 +373,9 @@ albedo-remote-eval-api  (GPU host)
     one vLLM subprocess per side (tensor_parallel_size = #gpus), generate king+chal in parallel
     multiturn trajectories: ALBEDO_REMOTE_TRAJECTORY_ASSISTANT_TURNS (8) assistant turns per sample;
       between turns the tool observation is simulated by the backend (POST /simulate-observation
-      over the score bridge → judge API, simulator model MiMo 2.5 Pro) so both models roll the
-      trajectory forward turn by turn
+      over the score bridge → judge API; simulator chain: one single-shot GPT-5.6 Luna call →
+      GLM 5.2 fallback with the full retry budget → empty-observation fallback) so both models
+      roll the trajectory forward turn by turn
     score: build batches → send up to ALBEDO_REMOTE_SCORING_BATCH_CONCURRENCY (128) batches concurrently over the WebSocket /score-bridge (multiplexed by request_id)
     emit "verdict" event (scores, win_margin, challenger_won, vllm/judge error counts, artifact URIs)
     upload JSONL transcripts + verdict.json to S3
@@ -603,7 +605,8 @@ Full reference in [.env.example](../.env.example) (backend + GPU host) and [.env
 | `ALBEDO_JUDGE_MIN_VALID_FRACTION` | min fraction of samples scored on both sides (default 0.8) |
 | `ALBEDO_JUDGE_EVALUATOR_MODEL` | evaluator + judge model (default `z-ai/glm-5.2`) |
 | `ALBEDO_JUDGE_SOTA_MODELS` | reference-trajectory model (prod `z-ai/glm-5.2`) |
-| `ALBEDO_JUDGE_SIMULATION_MODEL` | observation-simulator model (prod `xiaomi/mimo-v2.5-pro`; empty → evaluator model) |
+| `ALBEDO_JUDGE_SIMULATION_MODEL` | observation-simulator model (prod `openai/gpt-5.6-luna`, one single-shot call then evaluator-model fallback; empty → evaluator model) |
+| `ALBEDO_JUDGE_SIMULATION_PROVIDERS` | hard provider pin (`only`) for the simulator call (prod `openai`; empty → no pin) |
 | `ALBEDO_JUDGE_NUM_QUESTIONS` | yes/no questions per sample (default 50) |
 
 ### Hippius validation

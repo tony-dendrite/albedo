@@ -258,6 +258,16 @@ def _evaluator_provider(settings: JudgeSettings) -> dict[str, Any]:
     return block
 
 
+def _simulation_provider(settings: JudgeSettings) -> dict[str, Any] | None:
+    """Hard provider pin for the primary simulator model. `only` (unlike `order`) refuses every
+    other provider, so an endpoint outage fails the single primary call fast instead of silently
+    re-routing to another host."""
+    allowed = [p.strip() for p in settings.simulation_providers.split(",") if p.strip()]
+    if not allowed:
+        return None
+    return {"only": allowed}
+
+
 _COMPLETE_MARKER = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 _REROLL_WINDOW_TURNS = 5
 
@@ -583,6 +593,10 @@ class ObservationSimulationService:
 
         observation = ""
         for model, tries in attempts:
+            # The dedicated primary gets exactly ONE HTTP call (no parse/transport retries):
+            # on any failure the chain moves straight to the evaluator model, whose own call
+            # keeps the full retry budget, and finally to the empty-observation fallback.
+            single_shot = model == primary and primary != fallback_model
             messages = [
                 {
                     "role": "system",
@@ -592,6 +606,7 @@ class ObservationSimulationService:
                 },
                 {"role": "user", "content": transcript},
             ]
+            single_shot_kwargs = {"parse_retries": 1, "retry_count": 0} if single_shot else {}
             for attempt in range(tries):
                 response = await self.client.complete(
                     purpose="simulate",
@@ -600,8 +615,10 @@ class ObservationSimulationService:
                     temperature=0.0,
                     max_tokens=self.settings.simulation_max_tokens,
                     provider=(_evaluator_provider(self.settings)
-                              if model == fallback_model else None),
+                              if model == fallback_model
+                              else _simulation_provider(self.settings)),
                     accept=lambda raw: _usable_simulation_output(raw, request.sample_id),
+                    **single_shot_kwargs,
                 )
                 if response.error:
                     if model != fallback_model:

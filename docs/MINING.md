@@ -21,9 +21,9 @@ king earns weight/emissions. So your job is: produce a model that (a) passes val
 
 Evaluation is a multiturn duel: 100 sampled coding-trajectory prefixes (SWE-ZERO + mini-coder,
 70/30), on which your model and the king each generate **8 assistant turns** per sample (tool
-observations are simulated between turns by an LLM simulator — MiMo 2.5 Pro); an LLM judge
-(GLM 5.2) scores both sides on the same per-sample yes/no questions, anchored on a GLM 5.2
-reference trajectory.
+observations are simulated between turns by an LLM simulator — GPT-5.6 Luna, with GLM 5.2 as
+fallback); an LLM judge (GLM 5.2) scores both sides on the same per-sample yes/no questions,
+anchored on a GLM 5.2 reference trajectory.
 
 The whole publish flow is one pipeline:
 
