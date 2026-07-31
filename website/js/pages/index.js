@@ -47,7 +47,7 @@ function renderTables(d) {
   const histRows = d.history.filter(x => matches(x, filter));
   const failRows = d.fails.filter(x => matches(x, filter));
 
-  renderHistory($("history-wrap"), histRows, d.chain.judge_models, netuid, d.reign.members?.[0]?.eval_run_id);
+  renderHistory($("history-wrap"), histRows, netuid, d.reign.members?.[0]?.eval_run_id);
   renderFails($("fails-wrap"), failRows, netuid);
   $("history-meta").textContent = `${histRows.length} shown`;
   $("fails-meta").textContent = `${failRows.length} shown`;

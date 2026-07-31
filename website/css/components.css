@@ -132,6 +132,9 @@ table.data-table td.when .sep { color: var(--color-fg-4); }
 .judge-scores { color: var(--color-fg); white-space: nowrap; }
 .judge-scores .sep { color: var(--color-fg-4); }
 .judge-scores .king-score { color: var(--color-gold); }
+.margin-pct { white-space: nowrap; }
+.margin-pct.ok { color: var(--color-ok); }
+.margin-pct.bad { color: var(--color-bad); }
 .muted-dash { color: var(--color-fg-4); }
 
 .queue-status {
