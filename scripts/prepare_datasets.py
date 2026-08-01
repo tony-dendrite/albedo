@@ -15,10 +15,60 @@ from pathlib import Path
 log = logging.getLogger("prepare_datasets")
 
 
-SOURCES: dict[str, dict[str, str]] = {
-    "swe-zero": {"repo": "AlienKevin/SWE-ZERO-12M-trajectories", "shard_glob": "data/train-*.parquet"},
-    "mini-coder": {"repo": "ricdomolm/mini-coder-trajs-400k", "shard_glob": "data/train-*.parquet"},
+# Benchmark leaks; the mini-coder pair is only found by `.pr_<N>` reprojection, not id intersection.
+_MINI_CODER_LEAKS = ("modin-project__modin.8c7799fd.pr_7434", "scrapy__scrapy.35212ec5.pr_6671")
+# Open-SWE-Traces ids hitting the leaderboard union via the SWE-rebench-V2 leak.
+_OPEN_SWE_LEAKS = (
+    "agronholm__anyio-935", "astropy__ccdproc-901", "beeware__briefcase-2302",
+    "beeware__briefcase-2401", "conan-io__conan-18327", "conan-io__conan-18444",
+    "ethereum__web3.py-3690", "geopandas__geopandas-3591",
+    "matthewwithanm__python-markdownify-230", "pdm-project__pdm-3575", "pydata__sparse-870",
+)
+
+SOURCES: dict[str, dict] = {
+    "mini-coder": {
+        "language": "python",
+        "repos": ["ricdomolm/mini-coder-trajs-400k"],
+        "shard_glob": "data/train-*.parquet",
+        "exclude_ids": _MINI_CODER_LEAKS,
+    },
+    "open-swe-traces": {
+        "repos": ["nvidia/Open-SWE-Traces"],
+        "shard_glob": "data/train-*.parquet",
+        # All four arms as ONE source so instance dedup sees full coverage.
+        "raw_glob": "data/*/train-*.parquet",  # language comes from the row, not a constant
+        "render": True,
+        "family": "pr",  # real GitHub PRs
+        "exclude_ids": _OPEN_SWE_LEAKS,
+    },
+    # Named "mini-coder-*" deliberately: this corpus IS mini-swe-agent format (observations already
+    # <returncode>/<output>), and _simulation_format() picks the observation format by that substring.
+    # Any other name makes the simulator emit `Observation:` into a <returncode> trajectory.
+    "mini-coder-rs": {
+        "language": "rust",
+        "repos": [
+            "AlienKevin/SWE-smith-rs-minimax-m2.5-trajectories",
+            "AlienKevin/SWE-smith-rs-gpt-5-mini-trajectories",
+            "AlienKevin/SWE-smith-rs-gemini-3-flash-trajectories",
+        ],
+        "shard_glob": "data/train-*.parquet",
+        "render": True,  # bash is 100% of calls; family parses from the SWE-smith id grammar
+    },
+    "swe-hero": {
+        "language": "python",
+        "repos": ["nvidia/SWE-Hero-openhands-trajectories"],
+        "shard_glob": "data/train-*.parquet",
+        "render": True,
+        "family": "pr",
+        "exclude_upstream": ("nebius/SWE-rebench",),  # rebench is our benchmark
+        "repo_cap": 200,  # pandas alone is 37.9% of the surviving pool
+    },
 }
+
+
+def _repo_of(name: str) -> str:
+    """Primary repo for a source (download/manifest provenance)."""
+    return SOURCES[name]["repos"][0]
 
 
 def _enable_fast_transfer() -> None:
@@ -47,10 +97,13 @@ def _local_parquet_shards(dest: Path, shard_glob: str) -> set[str]:
     return {f"{prefix}{p.name}" for p in data_dir.glob(name_pat)}
 
 
-def download_source(name: str, repo_id: str, shard_glob: str, root: Path, *, force: bool, max_workers: int) -> Path:
+def download_source(
+    name: str, repo_id: str, shard_glob: str, root: Path, *, force: bool, max_workers: int,
+    dest_name: str | None = None,
+) -> Path:
     from huggingface_hub import hf_hub_download
 
-    dest = root / name
+    dest = root / (dest_name or name)
 
     expected = _expected_parquet_shards(repo_id, shard_glob)
     if not expected:
@@ -138,14 +191,14 @@ def main() -> None:
         help="Dir to download <source>/data/*.parquet into and write manifest.json (local only).",
     )
     parser.add_argument(
+        "--raw-root",
+        default=None,
+        help="Where render sources keep their raw HF snapshot (default: --dataset-root).",
+    )
+    parser.add_argument(
         "--sources",
         default=",".join(SOURCES),
         help=f"Comma-separated source names to fetch (default: all of {','.join(SOURCES)}).",
-    )
-    parser.add_argument(
-        "--weights",
-        default="swe-zero=0.7,mini-coder=0.3",
-        help="Per-source manifest weights (default: swe-zero=0.7,mini-coder=0.3).",
     )
     parser.add_argument("--force", action="store_true", help="Re-download even if shards already exist.")
     parser.add_argument(
@@ -178,9 +231,19 @@ def main() -> None:
 
     for name in names:
         meta = SOURCES[name]
-        download_source(
-            name, meta["repo"], meta["shard_glob"], root, force=args.force, max_workers=args.max_workers
-        )
+        glob = meta.get("raw_glob", meta["shard_glob"])
+        for repo_id in meta["repos"]:
+            download_source(
+                name, repo_id, glob, args.raw_root and Path(args.raw_root) or root,
+                force=args.force, max_workers=args.max_workers,
+                dest_name=repo_id.split("/")[-1] if meta.get("render") else name,
+            )
+        if meta.get("render"):
+            from render_trajectories import render_source
+
+            stats = render_source(name, Path(args.raw_root or root), root)
+            log.info("%s: rendered %s/%s rows -> %s shards",
+                     name, stats["rows_out"], stats["rows_in"], stats["shards_written"])
 
     out_path = Path(args.out) if args.out else root / "manifest.json"
 
@@ -188,16 +251,10 @@ def main() -> None:
         log.info("skipping manifest build (--skip-manifest)")
     else:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from build_manifest import _parse_weights, print_manifest_summary, write_manifest
-
-        all_weights = _parse_weights(args.weights)
-        missing = [n for n in names if n not in all_weights]
-        if missing:
-            raise SystemExit(f"no --weights entry for downloaded source(s): {missing}")
-        weights = {n: all_weights[n] for n in names}
+        from build_manifest import print_manifest_summary, write_manifest
 
         out_path, manifest, digest = write_manifest(
-            root, weights, out_path=out_path, max_workers=args.max_workers
+            root, names, out_path=out_path, max_workers=args.max_workers
         )
         print_manifest_summary(out_path, manifest, digest)
 

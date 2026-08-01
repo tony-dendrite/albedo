@@ -617,14 +617,16 @@ class ObservationSimulationService:
                     provider=(_evaluator_provider(self.settings)
                               if model == fallback_model
                               else _simulation_provider(self.settings)),
-                    accept=lambda raw: _usable_simulation_output(raw, request.sample_id),
+                    accept=lambda raw: _usable_simulation_output(
+                        _repair_simulation_output(raw, request.sample_id), request.sample_id
+                    ),
                     **single_shot_kwargs,
                 )
                 if response.error:
                     if model != fallback_model:
                         break  # primary unavailable: let the fallback model try
                     raise ObservationSimulationUnavailable(response.error)
-                observation = response.raw.strip()
+                observation = _repair_simulation_output(response.raw, request.sample_id)
                 if _usable_simulation_output(observation, request.sample_id):
                     if model != primary:
                         logger.info(
@@ -978,6 +980,17 @@ _ROLE_LEAK_RE = re.compile(r"(?:^|\n)\s*(?:THOUGHT:|### (?:assistant|user|system
 
 def _role_violation(raw: str) -> bool:
     return bool(_ROLE_LEAK_RE.search(raw or ""))
+
+
+def _repair_simulation_output(raw: str, sample_id: str) -> str:
+    text = (raw or "").strip()
+    if _simulation_format(sample_id) != FORMAT_MINI_CODER or not text.startswith("<returncode>"):
+        return text
+    if "<output>" in text and "<output>\n" not in text:
+        text = text.replace("<output>", "<output>\n", 1)
+    if text.endswith("</output>") and not text.endswith("\n</output>"):
+        text = text[: -len("</output>")].rstrip("\n") + "\n</output>"
+    return text
 
 
 def _usable_simulation_output(raw: str, sample_id: str) -> bool:

@@ -9,11 +9,24 @@ from albedo_eval_service.dispatcher import build_eval_request
 from albedo_eval_service.models import DatasetConfig
 
 
+_FAMILIES = ("pr", "lm", "combine", "mechanical")
+
+
 def _shard(source: str, rows: int):
+    # rows_meta must carry family + first_edit: the sampler stratifies by both (sampling.FAMILY_MIX,
+    # sampling.STEP_TRIM), so a single-family fixture makes three of the four strata infeasible.
     return {
         "name": f"{source}/data/train-00000.parquet",
         "rows": rows,
-        "rows_meta": [{"iid": f"{source}-{i}", "asst": 12} for i in range(rows)],
+        "rows_meta": [
+            {
+                "iid": f"{source}-{i}",
+                "asst": 12,
+                "first_edit": 4 + (i % 5),
+                "family": _FAMILIES[i % len(_FAMILIES)],
+            }
+            for i in range(rows)
+        ],
     }
 
 
@@ -78,10 +91,10 @@ def test_build_eval_request_samples_multi_source_manifest(tmp_path):
     manifest = {
         "version": "swe-zero+mini-coder-v1",
         "sources": [
-            {"name": "swe-zero", "weight": 0.7, "shards": [_shard("swe-zero", 50)], "total_rows": 50},
-            {"name": "mini-coder", "weight": 0.3, "shards": [_shard("mini-coder", 50)], "total_rows": 50},
+            {"name": "swe-zero", "shards": [_shard("swe-zero", 400)], "total_rows": 400},
+            {"name": "mini-coder", "shards": [_shard("mini-coder", 400)], "total_rows": 400},
         ],
-        "total_rows": 100,
+        "total_rows": 800,
     }
     payload = json.dumps(manifest, sort_keys=True).encode("utf-8")
     manifest_path = tmp_path / "manifest.json"

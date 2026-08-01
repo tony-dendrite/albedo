@@ -3,17 +3,17 @@ from __future__ import annotations
 import math
 import random
 import re
+from collections import defaultdict
 from typing import Any
 
 _SHARD_RE = re.compile(r"^(?:[A-Za-z0-9_][A-Za-z0-9_.-]*/)?data/train-[A-Za-z0-9_.-]*\.parquet$")
 
-# Prefix buckets: (Y = prefix length in user/assistant turns, count = base #samples at that depth).
-# Y is odd so the prefix ends on a user turn and the model generates the next assistant turn.
-# Counts are scaled to the requested sample_count. Assigned deepest-first with per-source 70/30.
-BUCKETS: list[tuple[int, int]] = [
-    (3, 4), (5, 5), (7, 5), (9, 7), (11, 7),
-    (13, 7), (15, 7), (17, 7), (19, 7), (21, 8),
-]
+STEP_TRIM: list[tuple[str, int]] = [("pre_edit", 45), ("at_edit", 35), ("cold", 20)]
+FAMILY_MIX: list[tuple[str, int]] = [("pr", 50), ("lm", 15), ("combine", 10), ("mechanical", 25)]
+REPO_CAP = 2
+MAX_PREFIX_CHARS = 54_000
+BENCHMARK_LANGUAGE = "python"
+NON_BENCHMARK_LANGUAGE_FRACTION = 0.30
 
 
 def multi_source_manifest_sample_ids(
@@ -21,11 +21,11 @@ def multi_source_manifest_sample_ids(
     *,
     block_hash: str,
     sample_count: int = 64,
-    max_turns_per_sample: int = 10,  # unused with bucket sampling; kept for call-site compatibility
+    max_turns_per_sample: int = 10,  # unused with phase sampling; kept for call-site compatibility
 ) -> list[str]:
-    """Deterministic bucketed sampling: unique instance_ids across sources (70/30 by weight), one
-    random rollout each, prefix length from BUCKETS (deepest-first, feasibility asst >= (Y+1)//2).
-    Returns ``shard:row:turn`` with ``turn = (Y-1)//2``. Requires the enriched manifest (rows_meta)."""
+    """Deterministic phase-anchored sampling: one random rollout per unique instance_id pooled across
+    sources, stratified by STEP_TRIM (phase) x FAMILY_MIX (bug family). Returns ``shard:row:turn``
+    where turn is derived per-instance from rows_meta["first_edit"]. Requires the enriched manifest."""
     if "sources" not in manifest:
         raise ValueError(
             "dataset manifest must define a 'sources' array; single-source manifests are not "
@@ -35,82 +35,123 @@ def multi_source_manifest_sample_ids(
         raise ValueError("block_hash is required for eval dataset sampling")
     if sample_count <= 0:
         raise ValueError("sample_count must be positive")
-    buckets = _scaled_buckets(sample_count)
 
     sources = _normalized_sources(manifest)
     if not sources:
         return []
 
     rng = random.Random(str(block_hash))
-    # Per source: one rollout per unique instance, sorted by depth asc so equal-depth ties keep the
-    # rng-shuffled order (deterministic per block_hash, least-slack-first when we pick).
-    available: dict[str, list[tuple[int, str, int]]] = {
-        source["name"]: _instance_pool(source, rng) for source in sources
-    }
+    pool = _instance_pool(sources, rng)
 
     selected: list[str] = []
-    # deepest buckets first: they are the most feasibility-constrained.
-    for prefix_len, count in sorted(buckets, key=lambda item: item[0], reverse=True):
-        turn_idx = (prefix_len - 1) // 2
-        need_asst = (prefix_len + 1) // 2
-        for name, want in _allocate_by_weight(sources, count).items():
-            pool = available[name]
-            feasible_from = next((i for i, item in enumerate(pool) if item[0] >= need_asst), len(pool))
-            take = pool[feasible_from : feasible_from + want]
-            if len(take) < want:
+    repo_counts: dict[str, int] = defaultdict(int)
+    other_language_budget = round(sample_count * NON_BENCHMARK_LANGUAGE_FRACTION)
+    for phase, wants in _family_grid(sample_count).items():
+        for family, want in wants.items():
+            taken = 0
+            for entry in pool:
+                if taken == want:
+                    break
+                if entry["used"] or entry["family"] != family:
+                    continue
+                if repo_counts[entry["repo"]] >= REPO_CAP:
+                    continue
+                if _prefix_chars(phase, entry) > MAX_PREFIX_CHARS:
+                    continue
+                other_language = entry["language"] != BENCHMARK_LANGUAGE
+                if other_language and other_language_budget <= 0:
+                    continue
+                turn_idx = _turn_idx(phase, entry, rng)
+                if entry["asst"] <= turn_idx:  # need at least one assistant turn after the cut
+                    continue
+                entry["used"] = True
+                repo_counts[entry["repo"]] += 1
+                other_language_budget -= other_language
+                taken += 1
+                selected.append(f"{entry['shard']}:{entry['row']}:{turn_idx}")
+            if taken < want:
                 raise ValueError(
-                    f"infeasible bucket: prefix={prefix_len} source={name} needs {want}, "
-                    f"only {len(take)} instances with >= {need_asst} assistant turns remain"
+                    f"infeasible stratum: phase={phase} family={family} needs {want}, "
+                    f"only {taken} feasible instances remain "
+                    f"(REPO_CAP={REPO_CAP}, MAX_PREFIX_CHARS={MAX_PREFIX_CHARS})"
                 )
-            for _asst, shard_name, row_idx in take:
-                selected.append(f"{shard_name}:{row_idx}:{turn_idx}")
-            del pool[feasible_from : feasible_from + want]
 
     return selected
 
 
-def _scaled_buckets(sample_count: int) -> list[tuple[int, int]]:
-    base_total = sum(count for _, count in BUCKETS)
-    exact = [(index, sample_count * count / base_total) for index, (_, count) in enumerate(BUCKETS)]
-    counts = [math.floor(value) for _, value in exact]
-    remainder = sample_count - sum(counts)
-    ranked = sorted(exact, key=lambda item: (-(item[1] - math.floor(item[1])), BUCKETS[item[0]][0]))
-    for index, _value in ranked[:remainder]:
-        counts[index] += 1
-    return [(prefix_len, count) for (prefix_len, _base_count), count in zip(BUCKETS, counts) if count]
+def _prefix_chars(phase: str, entry: dict[str, Any]) -> int:
+    if phase == "cold":  # cuts at turn 1-2, inherently small
+        return 0
+    return int(entry.get("chars_at" if phase == "at_edit" else "chars_pre") or 0)
 
 
-def _instance_pool(source: dict[str, Any], rng: random.Random) -> list[tuple[int, str, int]]:
-    """One random rollout per unique instance_id (handles any per-instance count: 1, 5, 100…) ->
-    (assistant_turns, shard_name, row_idx), rng-shuffled then depth-sorted (stable)."""
-    by_instance: dict[str, list[tuple[int, str, int]]] = {}
-    for shard in source["shards"]:
-        shard_name = shard["name"]
-        for row_idx, meta in enumerate(shard["rows_meta"]):
-            by_instance.setdefault(meta["iid"], []).append((int(meta["asst"]), shard_name, row_idx))
+def _turn_idx(phase: str, entry: dict[str, Any], rng: random.Random) -> int:
+    """Cut point, anchored on the first edit so every task is cut at the same stage of work."""
+    if phase == "cold":
+        return rng.choice((1, 2))
+    first_edit = entry["first_edit"]
+    if first_edit <= 0:  # no edit detected: fall back to a shallow cut rather than dropping the row
+        return 1
+    return max(1, first_edit - 2) if phase == "pre_edit" else first_edit
 
-    pool: list[tuple[int, str, int]] = []
-    for instance_id in sorted(by_instance):  # sorted for determinism before rng draws
-        # rng.choice is uniform over however many rollouts this instance has (handles 1..N).
-        pool.append(rng.choice(by_instance[instance_id]))
 
+def _apportion(spec: list[tuple[str, int]], count: int) -> dict[str, int]:
+    """Apportion ``count`` across named shares (largest remainder), preserving spec order."""
+    total = sum(share for _, share in spec)
+    if total <= 0:
+        raise ValueError("apportion shares must sum to a positive value")
+    exact = [(name, count * share / total) for name, share in spec]
+    out = {name: math.floor(value) for name, value in exact}
+    remainder = count - sum(out.values())
+    order = sorted(enumerate(exact), key=lambda item: (-(item[1][1] % 1), item[0]))
+    for _, (name, _) in order[:remainder]:
+        out[name] += 1
+    return out
+
+
+def _family_grid(count: int) -> dict[str, dict[str, int]]:
+    """Per-phase family quotas, exact on both margins: allocating each family against the CUMULATIVE
+    phase total cancels the rounding that per-phase apportionment would accumulate."""
+    allocated = {name: 0 for name, _ in FAMILY_MIX}
+    grid: dict[str, dict[str, int]] = {}
+    cumulative = 0
+    for phase, phase_want in _apportion(STEP_TRIM, count).items():
+        cumulative += phase_want
+        target = _apportion(FAMILY_MIX, cumulative)
+        row = {name: max(0, target[name] - allocated[name]) for name, _ in FAMILY_MIX}
+        grid[phase] = row
+        for name, value in row.items():
+            allocated[name] += value
+    return grid
+
+
+def _instance_pool(sources: list[dict[str, Any]], rng: random.Random) -> list[dict[str, Any]]:
+    """One random rollout per unique instance_id, pooled across ALL sources so an instance present in
+    two corpora is never drawn twice."""
+    by_instance: dict[str, list[dict[str, Any]]] = {}
+    for source in sources:
+        for shard in source["shards"]:
+            for row_idx, meta in enumerate(shard["rows_meta"]):
+                if meta.get("blocked"):  # benchmark contamination, flagged at manifest build
+                    continue
+                by_instance.setdefault(str(meta["iid"]), []).append(
+                    {
+                        "asst": int(meta["asst"]),
+                        "first_edit": int(meta.get("first_edit") or 0),
+                        "family": str(meta.get("family") or "mechanical"),
+                        "repo": str(meta.get("repo") or str(meta["iid"]).split(".")[0]),
+                        "language": str(meta.get("language") or BENCHMARK_LANGUAGE),
+                        "chars_at": int(meta.get("chars_at") or 0),
+                        "chars_pre": int(meta.get("chars_pre") or 0),
+                        "shard": shard["name"],
+                        "row": row_idx,
+                        "used": False,
+                    }
+                )
+
+    pool = [rng.choice(by_instance[iid]) for iid in sorted(by_instance)]  # sorted => deterministic
     rng.shuffle(pool)
-    pool.sort(key=lambda item: item[0])  # stable: within-depth order stays rng-shuffled
     return pool
-
-
-def _allocate_by_weight(sources: list[dict[str, Any]], count: int) -> dict[str, int]:
-    """Apportion ``count`` across sources by weight (largest remainder)."""
-    total_weight = sum(source["weight"] for source in sources)
-    if total_weight <= 0:
-        raise ValueError("manifest source weights must sum to a positive value")
-    exact = [(source["name"], count * source["weight"] / total_weight) for source in sources]
-    allocations = {name: math.floor(value) for name, value in exact}
-    remainder = count - sum(allocations.values())
-    ranked = sorted(exact, key=lambda item: (-(item[1] - math.floor(item[1])), item[0]))
-    for name, _ in ranked[:remainder]:
-        allocations[name] += 1
-    return allocations
 
 
 def _normalized_sources(manifest: dict[str, Any]) -> list[dict[str, Any]]:
@@ -125,20 +166,17 @@ def _normalized_sources(manifest: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(source, dict):
             raise ValueError("manifest source entries must be objects")
         name = source.get("name")
-        weight = source.get("weight")
         if not isinstance(name, str) or not name:
             raise ValueError("manifest source name must be a non-empty string")
         if name in seen_names:
             raise ValueError(f"duplicate manifest source name: {name}")
         seen_names.add(name)
-        if not isinstance(weight, (int, float)) or isinstance(weight, bool) or weight < 0:
-            raise ValueError("manifest source weight must be a non-negative number")
         shards = _normalized_shards(source)
         source_total = sum(shard["rows"] for shard in shards)
         declared_source_total = source.get("total_rows")
         if declared_source_total is not None and declared_source_total != source_total:
             raise ValueError(f"manifest source {name} total_rows does not match shard rows")
-        normalized.append({"name": name, "weight": float(weight), "shards": shards})
+        normalized.append({"name": name, "shards": shards})
         grand_total += source_total
 
     declared_total = manifest.get("total_rows")
