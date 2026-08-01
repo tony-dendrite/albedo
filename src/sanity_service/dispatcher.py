@@ -16,6 +16,13 @@ import httpx
 from loguru import logger
 
 from albedo_eval_service.judge_config import JudgeSettings, get_judge_settings
+from albedo_eval_service.observation_format import (
+    detect_format,
+    empty_output,
+    format_block,
+    valid_output,
+    wrap,
+)
 from albedo_eval_service.remote_dataset import format_messages
 from sanity_remote.models import SanityRunRequest
 from sanity_service.dataset import sample_prompts
@@ -61,21 +68,6 @@ STRICT RULES:
   command's filters plausibly match nothing in this project (e.g. a file extension foreign to
   its language), the output is empty.
 """
-
-FORMAT_SWE_ZERO = """OUTPUT FORMAT:
-- Your reply MUST begin with the literal string "Observation:" — no text may come before it.
-- After "Observation: " write exactly the stdout/stderr the command would produce — nothing else.
-- If the command would produce no output, reply with exactly "Observation:" and nothing more."""
-
-FORMAT_MINI_CODER = """OUTPUT FORMAT:
-- Your reply MUST have exactly this shape, with no text before or after:
-<returncode>RC</returncode>
-<output>
-OUTPUT
-</output>
-  where RC is the command's exit code and OUTPUT is exactly the stdout/stderr it would produce
-  (empty if the command prints nothing)."""
-
 
 @dataclass
 class _TrajectoryState:
@@ -532,11 +524,13 @@ async def _append_observations(
             continue
         assistant_output = str(state.turns[-1].get("content") or "")
         if _assistant_submitted(assistant_output):
-            observation = _completion_observation(state.sample_id)
+            observation = _completion_observation(state.sample_id, state.messages)
             _append_observation(state, observation)
             state.stopped = True
         elif not _has_bash_command(assistant_output):
-            _append_observation(state, _missing_command_observation(state.sample_id))
+            _append_observation(
+                state, _missing_command_observation(state.sample_id, state.messages)
+            )
         else:
             active.append((state, assistant_output))
     if not active:
@@ -607,10 +601,11 @@ async def _simulate_observation(
     messages: list[dict[str, str]],
     assistant_output: str,
 ) -> str:
+    fmt = detect_format(sample_id, messages)
     response = await client.complete(
         model=settings.evaluator_model,
         messages=[
-            {"role": "system", "content": _simulation_system_prompt(sample_id)},
+            {"role": "system", "content": _simulation_system_prompt(fmt)},
             {
                 "role": "user",
                 "content": _simulation_transcript(
@@ -623,18 +618,19 @@ async def _simulate_observation(
         temperature=0.0,
         max_tokens=settings.simulation_max_tokens,
         provider=_evaluator_provider(settings),
-        accept=lambda raw: _valid_simulation_output(raw, sample_id),
+        accept=lambda raw: valid_output(raw, fmt),
     )
     if response.error:
         raise RuntimeError(response.error)
     observation = response.raw.strip()
-    if not _valid_simulation_output(observation, sample_id):
-        fallback = _empty_simulation_output(sample_id)
+    if not valid_output(observation, fmt):
+        fallback = empty_output(fmt)
         logger.warning(
             "[sanity-dispatch] observation_simulation_invalid_format eval_run_id={} "
-            "sample_id={} fallback={!r}",
+            "sample_id={} fmt={} fallback={!r}",
             eval_run_id,
             sample_id,
+            fmt,
             fallback,
         )
         return fallback
@@ -709,30 +705,8 @@ def _simulation_transcript(
     return "\n\n".join(sections).rstrip()
 
 
-def _simulation_system_prompt(sample_id: str) -> str:
-    return f"{BASE_PROMPT}\n{_simulation_format(sample_id)}"
-
-
-def _simulation_format(sample_id: str) -> str:
-    return FORMAT_MINI_CODER if "mini-coder" in sample_id.casefold() else FORMAT_SWE_ZERO
-
-
-def _empty_simulation_output(sample_id: str) -> str:
-    if _simulation_format(sample_id) == FORMAT_MINI_CODER:
-        return "<returncode>0</returncode>\n<output>\n</output>"
-    return "Observation:"
-
-
-def _valid_simulation_output(raw: str, sample_id: str) -> bool:
-    text = raw.strip()
-    if _simulation_format(sample_id) == FORMAT_MINI_CODER:
-        return (
-            text.startswith("<returncode>")
-            and "</returncode>" in text
-            and "<output>\n" in text
-            and text.endswith("\n</output>")
-        )
-    return text.startswith("Observation:")
+def _simulation_system_prompt(fmt: str) -> str:
+    return f"{BASE_PROMPT}\n{format_block(fmt)}"
 
 
 def _evaluator_provider(settings: JudgeSettings) -> dict[str, Any]:
@@ -752,14 +726,15 @@ def _has_bash_command(output: str) -> bool:
     return bool(_BASH_BLOCK_RE.search(output))
 
 
-def _completion_observation(sample_id: str) -> str:
-    if "mini-coder" in sample_id.casefold():
-        return f"<returncode>0</returncode>\n<output>\n{_COMPLETE_MARKER}\n</output>"
-    return f"Observation: {_COMPLETE_MARKER}"
+def _completion_observation(sample_id: str, messages: list[dict[str, str]] | None = None) -> str:
+    return wrap(_COMPLETE_MARKER, detect_format(sample_id, messages))
 
 
-def _missing_command_observation(sample_id: str) -> str:
-    message = "No bash command found in assistant message."
-    if "mini-coder" in sample_id.casefold():
-        return f"<returncode>2</returncode>\n<output>\n{message}\n</output>"
-    return f"Observation: {message}"
+def _missing_command_observation(
+    sample_id: str, messages: list[dict[str, str]] | None = None
+) -> str:
+    return wrap(
+        "No bash command found in assistant message.",
+        detect_format(sample_id, messages),
+        returncode=2,
+    )

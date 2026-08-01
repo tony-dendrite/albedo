@@ -15,6 +15,14 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from .judge_config import JudgeSettings, get_judge_settings
+from .observation_format import (
+    detect_format,
+    empty_output,
+    format_block,
+    repair_output,
+    valid_output,
+    wrap,
+)
 from .judge_core import (
     JUDGE_MODELS,
     aggregate_scores,
@@ -152,100 +160,6 @@ STRICT RULES:
   its language), the output is empty.
 """
 
-GROUNDED_BASE_PROMPT = """You are the ENVIRONMENT (execution harness) in a SWE-agent session. You are NOT the assistant and you must never act as the assistant.
-
-You will receive a transcript with "### system", "### user" and "### assistant" section markers.
-The transcript ends with the assistant's latest message containing one command. Mentally execute
-that command against the repository state described in the grounding material below and reply
-with the environment's next message: the terminal output of that command.
-
-STRICT RULES:
-- Reply ONLY with the environment message in the exact format specified below — nothing else.
-- NEVER write "THOUGHT:", never write a bash command, never write "### user" or "### assistant"
-  headers, never use markdown code fences, never explain or comment. You are not solving the
-  task; you are only the terminal returning the command's output.
-- NEVER give task tips, hints, suggestions, next steps, encouragement, or any part of the
-  solution. A terminal has no opinion: it only prints what the command outputs, even if the
-  assistant is on the wrong track or asked a question.
-- Emulate realistic tool behavior: sed -i, cp, mv, mkdir, rm print nothing on success; echo
-  prints its argument; cat/sed -n print file content; grep -n prefixes matches with "NN:"
-  (context lines with "NN-"); find/ls list paths one per line; failed commands print realistic
-  error messages.
-- If the assistant message contains MORE THAN ONE bash code block, only the FIRST block is
-  executed — simulate the first command and ignore all later blocks.
-- Respect pipe limits exactly: "| head -N" outputs at most N lines, "| tail -N" the last N.
-  Count your output lines before replying.
-- Ground your output in the repository material below (file listing, file contents, reference
-  exchanges): derive paths and contents from it and do not invent paths or contents it
-  contradicts.
-- Commands earlier in the transcript may have created, modified or deleted files; those effects
-  take precedence over the grounding material below, which describes the repository at the
-  initial commit.
-"""
-
-STRICT_SIMULATOR_PROMPT = """You are a UNIX TERMINAL. You are a machine, not an assistant.
-You print command output and nothing else.
-
-You receive a transcript with "### system", "### user" and "### assistant" markers. The last
-"### assistant" message contains one command. Print exactly what that command would print when run
-against the repository state described below.
-
-ABSOLUTE PROHIBITIONS — violating any of these makes your reply invalid:
-- NEVER write "THOUGHT:", "### assistant", "### user", or any markdown code fence. You are not
-  continuing the session; you produce ONE command's output and stop.
-- NEVER suggest a next command, explain, comment, or help. A terminal has no intent.
-- NEVER print a path that does not appear in the repository material below. If the command names a
-  path that is absent, print the exact error a shell would print
-  (e.g. "cat: X: No such file or directory") and nothing more.
-- NEVER invent a diff, patch or hunk. `git diff` / `git status` output may only reflect edits that
-  are visible in this transcript's earlier commands. If no edit is visible, the diff is EMPTY.
-- If the command contains COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT, the ONLY output is that literal
-  marker line, whatever the command chains after it.
-
-EXACTNESS RULES:
-- Output only paths that appear verbatim in the listing below, in the listing's order. Include
-  EVERY path matching the command's filters; omitting a matching path is as wrong as adding one.
-- Apply the command's filters literally: a `-name '*.go'` filter prints ONLY names matching it; a
-  path/directory argument restricts output to that subtree.
-- `grep -n` prints `path:LINE:content` with a real line number for every match; `grep` without -n
-  prints `path:content`. Never drop the line number when -n is present.
-- `| head -N` prints at most N lines and `| tail -N` the last N. COUNT your lines before replying.
-- `sed -i`, `cp`, `mv`, `mkdir`, `rm`, `touch` print NOTHING on success. `echo` prints exactly its
-  argument. `cat` / `sed -n` print file content verbatim from the material below.
-- Commands that fail print only the realistic error, with a non-zero exit status where the format
-  includes one.
-- Multiple bash blocks: only the FIRST is executed; ignore the rest.
-- Commands earlier in the transcript may have changed files; those effects override the base
-  material below, which describes the repository at the initial commit.
-- If the command produces no output, produce the empty observation exactly as the OUTPUT FORMAT
-  specifies.
-"""
-
-STRICT_SIMULATOR_CHECK = """
-BEFORE REPLYING, VERIFY:
-1. My reply matches the OUTPUT FORMAT exactly and contains no "THOUGHT:", no "### assistant", no
-   code fence.
-2. Every path I printed appears in the repository material above, and every path matching the
-   command's filters is present.
-3. I invented no diff, no file contents, and no success message the material does not support.
-4. If the command was a submission, my output is the marker line alone.
-"""
-
-FORMAT_SWE_ZERO = """OUTPUT FORMAT:
-- Your reply MUST begin with the literal string "Observation:" — no text may come before it.
-- After "Observation: " write exactly the stdout/stderr the command would produce — nothing else.
-- If the command would produce no output, reply with exactly "Observation:" and nothing more."""
-
-FORMAT_MINI_CODER = """OUTPUT FORMAT:
-- Your reply MUST have exactly this shape, with no text before or after:
-<returncode>RC</returncode>
-<output>
-OUTPUT
-</output>
-  where RC is the command's exit code and OUTPUT is exactly the stdout/stderr it would produce
-  (empty if the command prints nothing)."""
-
-
 def _evaluator_provider(settings: JudgeSettings) -> dict[str, Any]:
     """Evaluator provider block: always fp8. With an `order` list, fallbacks are disabled — failover
     happens by rotating the order across retries (deterministic provenance, ~3x less draw-to-draw
@@ -272,10 +186,8 @@ _COMPLETE_MARKER = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 _REROLL_WINDOW_TURNS = 5
 
 
-def _reference_completion_observation(sample_id: str) -> str:
-    if "mini-coder" in sample_id.casefold():
-        return f"<returncode>0</returncode>\n<output>\n{_COMPLETE_MARKER}\n</output>"
-    return f"Observation: {_COMPLETE_MARKER}"
+def _reference_completion_observation(fmt: str) -> str:
+    return wrap(_COMPLETE_MARKER, fmt)
 
 
 class ReferenceTrajectoryService:
@@ -353,6 +265,7 @@ class ReferenceTrajectoryService:
             {"role": m.get("role", "user"), "content": m.get("content", "")}
             for m in (sample.messages or [])
         ]
+        fmt = detect_format(sample.sample_id, sample.messages)
         turns: list[dict[str, Any]] = []
         for turn_index in range(turn_count):
             response = await self.client.complete(
@@ -378,7 +291,7 @@ class ReferenceTrajectoryService:
                     turns.append(
                         {
                             "role": "user",
-                            "content": _reference_completion_observation(sample.sample_id),
+                            "content": _reference_completion_observation(fmt),
                             "environment_observation": True,
                         }
                     )
@@ -583,6 +496,8 @@ class ObservationSimulationService:
             prompt=request.prompt,
             assistant_output=request.assistant_output,
         )
+        # The simulated turn has to speak the observation format this trajectory already uses.
+        fmt = detect_format(request.sample_id, request.messages)
         primary = self.settings.simulation_model or self.settings.evaluator_model
         fallback_model = self.settings.evaluator_model
         attempts: list[tuple[str, int]] = [
@@ -600,9 +515,7 @@ class ObservationSimulationService:
             messages = [
                 {
                     "role": "system",
-                    "content": _simulation_system_prompt(
-                        request.sample_id, context_block, strict=model != fallback_model
-                    ),
+                    "content": _simulation_system_prompt(fmt, context_block),
                 },
                 {"role": "user", "content": transcript},
             ]
@@ -617,17 +530,15 @@ class ObservationSimulationService:
                     provider=(_evaluator_provider(self.settings)
                               if model == fallback_model
                               else _simulation_provider(self.settings)),
-                    accept=lambda raw: _usable_simulation_output(
-                        _repair_simulation_output(raw, request.sample_id), request.sample_id
-                    ),
+                    accept=lambda raw: _usable_simulation_output(repair_output(raw, fmt), fmt),
                     **single_shot_kwargs,
                 )
                 if response.error:
                     if model != fallback_model:
                         break  # primary unavailable: let the fallback model try
                     raise ObservationSimulationUnavailable(response.error)
-                observation = _repair_simulation_output(response.raw, request.sample_id)
-                if _usable_simulation_output(observation, request.sample_id):
+                observation = repair_output(response.raw, fmt)
+                if _usable_simulation_output(observation, fmt):
                     if model != primary:
                         logger.info(
                             "observation_simulation_fallback_used eval_run_id={} sample_id={} "
@@ -639,9 +550,9 @@ class ObservationSimulationService:
                     "observation_simulation_unusable eval_run_id={} sample_id={} model={} "
                     "attempt={}/{} reason={}",
                     request.eval_run_id, request.sample_id, model, attempt + 1, tries,
-                    _unusable_reason(observation, request.sample_id),
+                    _unusable_reason(observation, fmt),
                 )
-            if _usable_simulation_output(observation, request.sample_id):
+            if _usable_simulation_output(observation, fmt):
                 break
         if _looping_output(observation):
             collapsed = _collapse_looping(observation).strip()
@@ -653,12 +564,14 @@ class ObservationSimulationService:
                 len(collapsed),
             )
             observation = collapsed
-        if not _valid_simulation_output(observation, request.sample_id):
-            fallback = _empty_simulation_output(request.sample_id)
+        if not valid_output(observation, fmt):
+            fallback = empty_output(fmt)
             logger.warning(
-                "observation_simulation_invalid_format eval_run_id={} sample_id={} fallback={!r}",
+                "observation_simulation_invalid_format eval_run_id={} sample_id={} fmt={} "
+                "fallback={!r}",
                 request.eval_run_id,
                 request.sample_id,
+                fmt,
                 fallback,
             )
             return fallback
@@ -896,19 +809,11 @@ def _simulation_transcript(
     return "\n\n".join(sections).rstrip()
 
 
-def _simulation_system_prompt(
-    sample_id: str, context_block: str | None = None, strict: bool = False
-) -> str:
-    fmt = _simulation_format(sample_id)
+def _simulation_system_prompt(fmt: str, context_block: str | None = None) -> str:
+    block = format_block(fmt)
     if not context_block:
-        return f"{BASE_PROMPT}\n{fmt}"
-    if strict:
-        return f"{STRICT_SIMULATOR_PROMPT}\n{context_block}\n{fmt}\n{STRICT_SIMULATOR_CHECK}"
-    return f"{GROUNDED_BASE_PROMPT}\n{context_block}\n{fmt}"
-
-
-def _simulation_format(sample_id: str) -> str:
-    return FORMAT_MINI_CODER if "mini-coder" in sample_id.casefold() else FORMAT_SWE_ZERO
+        return f"{BASE_PROMPT}\n{block}"
+    return f"{BASE_PROMPT}\n{context_block}\n{block}"
 
 
 _LOOP_LINE_RUN = 25  # consecutive identical non-empty lines
@@ -969,12 +874,6 @@ def _collapse_looping(text: str) -> str:
     return collapsed
 
 
-def _empty_simulation_output(sample_id: str) -> str:
-    if _simulation_format(sample_id) == FORMAT_MINI_CODER:
-        return "<returncode>0</returncode>\n<output>\n</output>"
-    return "Observation:"
-
-
 _ROLE_LEAK_RE = re.compile(r"(?:^|\n)\s*(?:THOUGHT:|### (?:assistant|user|system)\b)")
 
 
@@ -982,45 +881,18 @@ def _role_violation(raw: str) -> bool:
     return bool(_ROLE_LEAK_RE.search(raw or ""))
 
 
-def _repair_simulation_output(raw: str, sample_id: str) -> str:
-    text = (raw or "").strip()
-    if _simulation_format(sample_id) != FORMAT_MINI_CODER or not text.startswith("<returncode>"):
-        return text
-    if "<output>" in text and "<output>\n" not in text:
-        text = text.replace("<output>", "<output>\n", 1)
-    if text.endswith("</output>") and not text.endswith("\n</output>"):
-        text = text[: -len("</output>")].rstrip("\n") + "\n</output>"
-    return text
+def _usable_simulation_output(raw: str, fmt: str) -> bool:
+    return valid_output(raw, fmt) and not _role_violation(raw) and not _looping_output(raw)
 
 
-def _usable_simulation_output(raw: str, sample_id: str) -> bool:
-    return (
-        _valid_simulation_output(raw, sample_id)
-        and not _role_violation(raw)
-        and not _looping_output(raw)
-    )
-
-
-def _unusable_reason(raw: str, sample_id: str) -> str:
-    if not _valid_simulation_output(raw, sample_id):
+def _unusable_reason(raw: str, fmt: str) -> str:
+    if not valid_output(raw, fmt):
         return "invalid_format"
     if _role_violation(raw):
         return "role_violation"
     if _looping_output(raw):
         return "looping"
     return "ok"
-
-
-def _valid_simulation_output(raw: str, sample_id: str) -> bool:
-    text = raw.strip()
-    if _simulation_format(sample_id) == FORMAT_MINI_CODER:
-        return (
-            text.startswith("<returncode>")
-            and "</returncode>" in text
-            and "<output>\n" in text
-            and text.endswith("\n</output>")
-        )
-    return text.startswith("Observation:")
 
 
 async def _judge_side(

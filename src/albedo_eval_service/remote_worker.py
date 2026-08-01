@@ -18,6 +18,7 @@ from .judge_core import CHALLENGER_WIN_MARGIN, challenger_beats_king
 from .models import EvalRequest
 from .remote_artifacts import ArtifactUploader, RunArtifactSpool, build_artifact_uploader
 from .remote_config import RemoteSettings
+from .observation_format import detect_format, wrap
 from .remote_dataset import EvalSample, format_messages, load_swe_zero_samples
 from .remote_generation import (
     GenerationResult,
@@ -388,7 +389,7 @@ class RemoteEvalWorker:
                     observations[key] = ObservationResult(result.sample_id, "", result.error)
                 elif _assistant_submitted(result.text):
                     observations[key] = ObservationResult(
-                        result.sample_id, _completion_observation(result.sample_id)
+                        result.sample_id, _completion_observation(sample)
                     )
                 else:
                     jobs.append((side, sample, result))
@@ -860,10 +861,8 @@ def _assistant_submitted(output: str) -> bool:
     return _COMPLETE_MARKER in output
 
 
-def _completion_observation(sample_id: str) -> str:
-    if "mini-coder" in sample_id.casefold():
-        return f"<returncode>0</returncode>\n<output>\n{_COMPLETE_MARKER}\n</output>"
-    return f"Observation: {_COMPLETE_MARKER}"
+def _completion_observation(sample: EvalSample) -> str:
+    return wrap(_COMPLETE_MARKER, detect_format(sample.sample_id, sample.messages))
 
 
 def _cleanup_stale_vllm_resources() -> None:
