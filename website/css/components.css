@@ -56,15 +56,21 @@
   color: var(--color-fg);
   white-space: nowrap;
 }
-.datasets-table .ds-weight {
-  min-width: 96px;
+.datasets-table .ds-lang {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-fg-2);
+  white-space: nowrap;
+}
+.datasets-table .ds-mix {
+  min-width: 128px;
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--color-gold);
   white-space: nowrap;
 }
-.datasets-table .ds-weight > span:first-child { display: inline-block; min-width: 34px; }
-.datasets-table .ds-bar {
+.datasets-table .ds-mix > span:first-child { display: inline-block; min-width: 64px; }
+.datasets-table .ds-mixbar {
   display: inline-block;
   width: 48px;
   height: 3px;
@@ -73,9 +79,18 @@
   background: var(--color-border);
   overflow: hidden;
   vertical-align: middle;
+  font-size: 0; /* kill inline-block whitespace between segments */
 }
-.datasets-table .ds-bar > i { display: block; height: 100%; background: var(--color-gold); }
+.datasets-table .ds-mixbar > i { display: inline-block; height: 100%; }
 .datasets-table .ds-num { color: var(--color-fg-2); white-space: nowrap; }
+.ds-sampling {
+  margin-top: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-fg-3);
+  white-space: nowrap;
+  overflow-x: auto;
+}
 .datasets-table .ds-source a {
   display: inline-block; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   vertical-align: bottom; color: var(--color-fg);
