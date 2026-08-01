@@ -34,7 +34,7 @@ class DatasetConfig(BaseModel):
 class ScoringConfig(BaseModel):
     judge_config_hash: str
     judge_count: int = 3
-    allowed_scores: list[float] = Field(default_factory=lambda: [0, 0.5, 1])
+    allowed_scores: list[float] = Field(default_factory=lambda: [0, 1])
 
 
 class GpuRequest(BaseModel):

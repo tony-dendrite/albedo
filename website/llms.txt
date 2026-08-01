@@ -102,7 +102,7 @@ albedo/
 │   │   ├── remote_worker.py            run eval: load samples → vLLM king+chal → score over bridge → verdict
 │   │   ├── remote_generation.py        one vLLM subprocess per model, CUDA_VISIBLE_DEVICES per side
 │   │   ├── remote_scoring.py           build score batches, request judging back over the WS bridge
-│   │   ├── remote_artifacts.py         upload JSONL transcripts + verdict.json to S3
+│   │   ├── remote_artifacts.py         upload generated-samples/scoring-results JSONL + verdict.json to S3
 │   │   ├── sampling.py                 deterministic bucketed sampling: unique instance_ids, one rollout each, 70/30, prefix buckets
 │   │   ├── dataset_manifest.py         load + sha256-verify the dataset shard manifest
 │   │   ├── canonical_model_config.py   pin the genesis model / generation / processor configs over the challenger's before eval (anti-tamper)
@@ -378,7 +378,7 @@ albedo-remote-eval-api  (GPU host)
       roll the trajectory forward turn by turn
     score: build batches → send up to ALBEDO_REMOTE_SCORING_BATCH_CONCURRENCY (128) batches concurrently over the WebSocket /score-bridge (multiplexed by request_id)
     emit "verdict" event (scores, win_margin, challenger_won, vllm/judge error counts, artifact URIs)
-    upload JSONL transcripts + verdict.json to S3
+    upload request.json, progress/generated-samples/scoring-results JSONL, remote-logs.txt + verdict.json to S3
 
 score bridge (backend-initiated WebSocket, GPU→backend)
   remote sends {type:"score_request", request_id, payload}
@@ -560,7 +560,7 @@ The whole system is a durable state machine in one database. Key tables:
 | `eval_runs` | one duel: king/challenger hashes, scores, win_margin, sample/turn/error counts |
 | `king_versions` / `reigns` / `reign_members` | the 5-slot king chain + reign history |
 | `weight_epochs` / `weight_transactions` | weight intents + their on-chain submissions |
-| `artifacts` | S3 / Hippius / local-cache pointers (eval transcripts, verdict.json, fingerprints, `SANITY_RESULT` fault reports) |
+| `artifacts` | S3 / Hippius / local-cache pointers (eval samples/scoring JSONL, verdict.json, fingerprints, `SANITY_RESULT` fault reports) |
 | `events` | append-only audit log per submission / stage_attempt |
 | `sanity_results` | pre-eval verdict cache keyed by `digest` |
 

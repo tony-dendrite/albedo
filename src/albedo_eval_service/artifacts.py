@@ -5,13 +5,17 @@ from uuid import UUID
 
 
 VERDICT_ARTIFACT_TYPES = {
-    "transcript": "EVAL_TRANSCRIPT",
     "generated_samples": "GENERATED_SAMPLES",
     "scoring_results": "SCORING_RESULTS",
-    "judge_results": "JUDGE_RESULTS",
     "verdict": "EVAL_VERDICT",
     "remote_logs": "REMOTE_LOGS",
     "progress": "REMOTE_PROGRESS",
+    "request": "EVAL_REQUEST",
+    # Legacy: no longer written (duel-transcript.jsonl duplicated generated-samples.jsonl, and
+    # judge-results.jsonl duplicated scoring-results.jsonl). Kept so a re-delivered verdict from
+    # before the change still maps to the artifact rows historical runs already have.
+    "transcript": "EVAL_TRANSCRIPT",
+    "judge_results": "JUDGE_RESULTS",
 }
 
 

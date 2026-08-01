@@ -232,6 +232,7 @@ class EvalDispatcher:
                 fault_code=fault.fault_code,
                 fault_message=fault.fault_message,
                 retryable=fault.retryable,
+                verdict=verdict,
             )
             _notify_dispatch_failure(
                 submission_id=submission_id,

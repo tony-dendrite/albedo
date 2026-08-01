@@ -59,6 +59,25 @@ def test_artifact_records_from_verdict_carries_metadata():
     assert records[0].content_type == "application/x-ndjson"
 
 
+def test_artifact_records_from_verdict_tracks_the_request_and_legacy_names():
+    records = artifact_records_from_verdict(
+        submission_id=uuid4(),
+        stage_attempt_id=uuid4(),
+        artifacts={
+            "request": "s3://albedo-artifacts/submissions/1/eval/2/request.json",
+            # no longer written, but a re-delivered pre-change verdict must still map
+            "transcript": "s3://albedo-artifacts/submissions/1/eval/2/duel-transcript.jsonl",
+            "judge_results": "s3://albedo-artifacts/submissions/1/eval/2/judge-results.jsonl",
+        },
+    )
+
+    assert sorted(record.artifact_type for record in records) == [
+        "EVAL_REQUEST",
+        "EVAL_TRANSCRIPT",
+        "JUDGE_RESULTS",
+    ]
+
+
 def test_artifact_records_from_verdict_marks_local_cache():
     records = artifact_records_from_verdict(
         submission_id=uuid4(),

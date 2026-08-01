@@ -571,6 +571,90 @@ def test_record_remote_progress_and_verdict_artifacts_update_eval_run(db_url: st
     )
 
 
+def test_mark_eval_failed_records_artifacts_uploaded_by_a_soft_fault(db_url: str):
+    """A soft fault (no_valid_generated_pairs, judge_provider_exhausted) still uploads a full
+    artifact set; those objects need DB rows or they are orphaned in the bucket."""
+    repo = EvalRepository(db_url)
+    _seed_eval_ready_submission(db_url)
+    claimed = repo.claim_next_eval(
+        worker_id="worker-a", lease_seconds=60, request_builder=_request_builder
+    )
+    assert claimed is not None
+
+    repo.mark_eval_failed(
+        submission_id=claimed.submission_id,
+        attempt_id=claimed.attempt_id,
+        eval_run_id=claimed.eval_run_id,
+        fault_class="REMOTE_EVAL_FAULT",
+        fault_code="no_valid_generated_pairs",
+        fault_message="No sample pair had both king and challenger output",
+        retryable=True,
+        verdict={
+            "state": "failed",
+            "artifacts": {
+                "generated_samples": "s3://albedo-artifacts/submissions/1/eval/2/generated-samples.jsonl",
+            },
+            "artifact_metadata": {
+                "generated_samples": {
+                    "sha256": "sha256:" + "c" * 64,
+                    "size_bytes": 456,
+                    "content_type": "application/x-ndjson",
+                },
+            },
+        },
+    )
+
+    with psycopg.connect(db_url) as conn:
+        rows = conn.execute(
+            """
+            SELECT artifact_type, uri, sha256, size_bytes
+            FROM artifacts
+            WHERE stage_attempt_id = %s
+            """,
+            (claimed.attempt_id,),
+        ).fetchall()
+        eval_state = conn.execute(
+            "SELECT state FROM eval_runs WHERE id = %s", (claimed.eval_run_id,)
+        ).fetchone()[0]
+
+    assert eval_state == "FAILED_RETRYABLE"
+    assert rows == [
+        (
+            "GENERATED_SAMPLES",
+            "s3://albedo-artifacts/submissions/1/eval/2/generated-samples.jsonl",
+            "sha256:" + "c" * 64,
+            456,
+        )
+    ]
+
+
+def test_mark_eval_failed_without_a_verdict_records_no_artifacts(db_url: str):
+    """A hard failure carries no verdict (broken stream) or artifacts={} (run.fail)."""
+    repo = EvalRepository(db_url)
+    _seed_eval_ready_submission(db_url)
+    claimed = repo.claim_next_eval(
+        worker_id="worker-a", lease_seconds=60, request_builder=_request_builder
+    )
+    assert claimed is not None
+
+    repo.mark_eval_failed(
+        submission_id=claimed.submission_id,
+        attempt_id=claimed.attempt_id,
+        eval_run_id=claimed.eval_run_id,
+        fault_class="REMOTE_EVAL_FAULT",
+        fault_code="remote_worker_failed",
+        fault_message="RuntimeError: boom",
+        retryable=True,
+    )
+
+    with psycopg.connect(db_url) as conn:
+        count = conn.execute(
+            "SELECT count(*) FROM artifacts WHERE stage_attempt_id = %s", (claimed.attempt_id,)
+        ).fetchone()[0]
+
+    assert count == 0
+
+
 def _request_builder(submission, king, _remote_host, eval_run_id):
     settings = Settings(
         database_url="postgresql://unused",

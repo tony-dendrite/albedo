@@ -491,11 +491,6 @@ async def main_async() -> None:
                 },
             )
 
-    judge_rows = [
-        {"sample_id": record["sample_id"], **judge_result}
-        for record in records
-        for judge_result in record.get("judge_results", [])
-    ]
     summary = aggregate_scores(records)
     summary["eval_run_id"] = args.eval_run_id
     summary["judge_count"] = args.judge_count
@@ -505,7 +500,6 @@ async def main_async() -> None:
 
     write_jsonl(args.out_dir / "generated-samples.jsonl", generated_rows)
     write_jsonl(args.out_dir / "scoring-results.jsonl", records)
-    write_jsonl(args.out_dir / "judge-results.jsonl", judge_rows)
     (args.out_dir / "verdict.json").write_text(json.dumps(summary, indent=2, sort_keys=True))
     append_progress(progress_path, {"type": "run_done", "summary": summary})
     log(
@@ -515,7 +509,6 @@ async def main_async() -> None:
     )
     log(f"wrote {args.out_dir / 'generated-samples.jsonl'}")
     log(f"wrote {args.out_dir / 'scoring-results.jsonl'}")
-    log(f"wrote {args.out_dir / 'judge-results.jsonl'}")
     log(f"wrote {args.out_dir / 'verdict.json'}")
     log(f"wrote {progress_path}")
     print(json.dumps(summary, indent=2, sort_keys=True), flush=True)

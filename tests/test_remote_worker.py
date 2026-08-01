@@ -183,14 +183,13 @@ def test_remote_worker_loads_parquet_and_runs_paired_generation(tmp_path, monkey
     assert run.state == "succeeded"
     verdict = run.final_verdict()
     assert verdict is not None
+    # duel-transcript.jsonl and judge-results.jsonl are gone: each duplicated another artifact.
     assert set(verdict["artifacts"]) == {
         "generated_samples",
-        "judge_results",
         "progress",
         "remote_logs",
         "request",
         "scoring_results",
-        "transcript",
         "verdict",
     }
     assert verdict["artifact_metadata"]["generated_samples"]["sha256"].startswith("sha256:")

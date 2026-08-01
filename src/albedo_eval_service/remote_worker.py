@@ -659,36 +659,22 @@ class RemoteEvalWorker:
         king_by_id = {result.sample_id: result for result in king_results}
         challenger_by_id = {result.sample_id: result for result in challenger_results}
         generated_rows = []
-        transcript_rows = []
         for sample in samples:
             king = king_by_id.get(sample.sample_id)
             challenger = challenger_by_id.get(sample.sample_id)
-            generated_row = {
-                "eval_run_id": str(request.eval_run_id),
-                "sample_id": sample.sample_id,
-                "prompt": sample.prompt,
-                "previous_king_output": king.text if king else "",
-                "challenger_output": challenger.text if challenger else "",
-                "previous_king_turns": king.turns if king else None,
-                "challenger_turns": challenger.turns if challenger else None,
-                "king_error": king.error if king else "missing_generation",
-                "chal_error": challenger.error if challenger else "missing_generation",
-            }
-            generated_rows.append(generated_row)
-            transcript_rows.append({**generated_row, "target": sample.target})
-        judge_rows = []
-        for record in scoring_records:
-            for result in record.get("judge_results", []):
-                if isinstance(result, dict):
-                    judge_rows.append(
-                        {
-                            "eval_run_id": str(request.eval_run_id),
-                            "sample_id": record.get("sample_id"),
-                            "order": record.get("order"),
-                            "sample_score": record.get("sample_score"),
-                            **result,
-                        }
-                    )
+            generated_rows.append(
+                {
+                    "eval_run_id": str(request.eval_run_id),
+                    "sample_id": sample.sample_id,
+                    "prompt": sample.prompt,
+                    "previous_king_output": king.text if king else "",
+                    "challenger_output": challenger.text if challenger else "",
+                    "previous_king_turns": king.turns if king else None,
+                    "challenger_turns": challenger.turns if challenger else None,
+                    "king_error": king.error if king else "missing_generation",
+                    "chal_error": challenger.error if challenger else "missing_generation",
+                }
+            )
         progress_rows = [
             {"sequence": idx, **event} for idx, event in enumerate(run.events, start=1)
         ]
@@ -698,9 +684,7 @@ class RemoteEvalWorker:
             "request": spool.write_json("request.json", request.model_dump(mode="json")),
             "progress": spool.write_jsonl("progress.jsonl", progress_rows),
             "generated_samples": spool.write_jsonl("generated-samples.jsonl", generated_rows),
-            "transcript": spool.write_jsonl("duel-transcript.jsonl", transcript_rows),
             "scoring_results": spool.write_jsonl("scoring-results.jsonl", scoring_records),
-            "judge_results": spool.write_jsonl("judge-results.jsonl", judge_rows),
             "remote_logs": spool.write_text("remote-logs.txt", remote_log_text),
         }
         uploads = self._artifact_uploader.upload_run_artifacts(

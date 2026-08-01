@@ -687,6 +687,7 @@ class EvalRepository:
         fault_code: str,
         fault_message: str,
         retryable: bool,
+        verdict: dict[str, Any] | None = None,
     ) -> None:
         attempt_state = "FAILED_RETRYABLE" if retryable else "FAILED_TERMINAL"
         submission_state = "EVAL_RETRYABLE" if retryable else "TERMINAL_INVALID"
@@ -738,6 +739,13 @@ class EvalRepository:
                         "retryable": retryable,
                     },
                 )
+                if verdict is not None:
+                    # A soft fault (no_valid_generated_pairs, judge_provider_exhausted) still
+                    # uploads a full artifact set; without this those objects have no DB row.
+                    # Hard failures carry artifacts={} and insert nothing.
+                    self._insert_artifacts_from_verdict_inside_tx(
+                        conn, submission_id, attempt_id, verdict
+                    )
 
     @staticmethod
     def _apply_remote_event_to_eval_run_inside_tx(
