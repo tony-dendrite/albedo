@@ -19,11 +19,19 @@ near-duplicate dedup), and finally **evaluate** the model. A model that beats th
 king earns weight/emissions. So your job is: produce a model that (a) passes validation and
 (b) scores higher than the incumbent by at least the **3% win margin**.
 
-Evaluation is a multiturn duel: 100 sampled coding-trajectory prefixes (SWE-ZERO + mini-coder,
-70/30), on which your model and the king each generate **8 assistant turns** per sample (tool
-observations are simulated between turns by an LLM simulator — GPT-5.6 Luna, with GLM 5.2 as
-fallback); an LLM judge (GLM 5.2) scores both sides on the same per-sample yes/no questions,
-anchored on a GLM 5.2 reference trajectory.
+Evaluation is a multiturn duel: 100 sampled coding-trajectory prefixes drawn from four real-agent
+corpora (`mini-coder`, `mini-coder-rs`, `open-swe-traces`, `swe-hero`), on which your model and the
+king each generate **8 assistant turns** per sample; tool observations between turns are produced by
+an LLM simulator in whatever observation format that trajectory natively uses. Judges then score
+both sides on the same per-sample yes/no checklist, anchored on a SOTA reference trajectory for that
+exact task.
+
+Two documents cover this in detail:
+
+- **[SCORING.md](SCORING.md)** — the checklist, the weights, the size multiplier and measurement
+  gate, the 3-point win margin, and the anti-gaming rules.
+- **[DATASETS.md](DATASETS.md)** — the four corpora, how samples are drawn (seeded by your
+  submission's block hash), and the observation formats the simulator must speak.
 
 The whole publish flow is one pipeline:
 
@@ -311,3 +319,17 @@ CHAIN_NETWORK=test albedo check-commit
   `auto_map` or `quantization_config`.
 - **Registration is required to commit.** Both `commit` and `publish` verify your hotkey is in the
   netuid metagraph and abort if not.
+- **Beating the king by a hair is a loss.** The challenger needs `score_challenger - score_king >=
+  0.03`; see [SCORING.md](SCORING.md) for how those scores are built.
+- **You cannot pre-compute the checklist.** Questions are generated per sample from a reference
+  trajectory produced at eval time, and your sample set is seeded by your submission's block hash —
+  see [DATASETS.md](DATASETS.md).
+
+---
+
+## Further reading
+
+| document | covers |
+|---|---|
+| [SCORING.md](SCORING.md) | checklist construction, answer weighting, size multiplier, measurement gate, win margin, anti-gaming |
+| [DATASETS.md](DATASETS.md) | the four corpora, trajectory rendering, observation formats, the simulator chain, sampling and the manifest pin |
