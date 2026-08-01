@@ -355,7 +355,7 @@ def test_submit_echo_bypasses_observation_simulator(tmp_path):
     )
 
     assert observations[("challenger", sample.sample_id)].observation == _completion_observation(
-        sample.sample_id
+        sample
     )
 
 
@@ -444,3 +444,40 @@ def test_vllm_worker_stops_on_qwen_im_end(monkeypatch):
     assert captured["params"]["stop_token_ids"] == [248046]
     assert captured["llm"]["enable_prefix_caching"] is True
     assert queue.payload == {"results": [{"sample_id": "sample-1", "text": "done", "error": None}]}
+
+
+def test_prefetch_repo_context_fires_only_when_configured(monkeypatch):
+    import threading
+
+    import albedo_eval_service.remote_worker as remote_worker_module
+    from albedo_eval_service.remote_dataset import EvalSample
+
+    recorded: dict[str, object] = {}
+    posted = threading.Event()
+
+    def fake_post(url, json=None, timeout=None):
+        recorded["url"] = url
+        recorded["json"] = json
+        posted.set()
+
+    monkeypatch.setattr(remote_worker_module.httpx, "post", fake_post)
+    samples = [EvalSample(sample_id="data/train-00000.parquet:0:0", prompt="p")]
+
+    enabled = RemoteEvalWorker(
+        RemoteSettings(
+            repo_context_url="http://127.0.0.1:8093/",
+            upload_artifacts=False,
+            scoring_backend="mock",
+        )
+    )
+    enabled._prefetch_repo_context(_request(), samples)
+    assert posted.wait(2.0)
+    assert recorded["url"] == "http://127.0.0.1:8093/prefetch"
+    assert recorded["json"] == {"sample_ids": ["data/train-00000.parquet:0:0"]}
+
+    posted.clear()
+    disabled = RemoteEvalWorker(
+        RemoteSettings(upload_artifacts=False, scoring_backend="mock")
+    )
+    disabled._prefetch_repo_context(_request(), samples)
+    assert not posted.wait(0.2)  # url unset -> no prefetch call

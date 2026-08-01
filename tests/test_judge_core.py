@@ -36,61 +36,49 @@ def test_judge_panel_allows_any_fp8_provider():
 
 
 def test_question_prompt_requires_trajectory_coverage():
-    prompt = build_question_messages(task="Fix bug", n=50)[0]["content"]
+    system, user = (m["content"] for m in build_question_messages(task="Fix bug", n=50))
 
-    assert "quality of CANDIDATE OUTPUT 1" in prompt
-    assert "CONTEXT SYSTEM instructions" in prompt
-    assert "reaction to" in prompt and "ENVIRONMENT OBSERVATION" in prompt
-    assert "concrete progress between adjacent candidate outputs" in prompt
-    assert "uses the immediately prior" in prompt
-    assert "no looping/repeated commands" in prompt
-    assert "grounding" in prompt
-    assert "correct SWE-agent workflow" in prompt
+    assert "The full checklist for this task is 50 yes/no questions" in system
+    assert "===== RULE 1: EVERY QUESTION MUST BE UNIQUE (the most important rule) =====" in system
+    assert "===== RULE 2: PUT THE TARGET IN THE FIRST THREE WORDS =====" in system
+    assert "===== RULE 3: EVERY QUESTION MUST BE FAILABLE =====" in system
+    assert '"tag":"explore|verification|action|economy"' in system
+    # section counts at n=50: 48/12/8/22/10 percent -> 24/6/4/11/5 questions
+    assert "SECTION 1 of 5 — WORKFLOW AND VERIFICATION BACKBONE. Write EXACTLY 24 questions." in user
+    assert "SECTION 2 of 5 — TERMINAL INTEGRITY. Write EXACTLY 6 questions." in user
+    assert "SECTION 3 of 5 — FAILURE REACTION. Write EXACTLY 4 questions." in user
+    assert "SECTION 4 of 5 — GROUNDING AND CORRECTNESS. Write EXACTLY 11 questions." in user
+    assert "SECTION 5 of 5 — OUTPUT ECONOMY. Write EXACTLY 5 questions." in user
+    assert "Return STRICT JSON only, exactly 50 questions" in user
 
 
 def test_question_prompt_prioritizes_observed_failure_modes():
-    prompt = build_question_messages(task="Fix bug", n=50)[0]["content"]
+    system, user = (m["content"] for m in build_question_messages(task="Fix bug", n=50))
 
-    assert "Make positive, outcome-critical checks dominate the list" in prompt
-    assert "Do NOT reward mere activity" in prompt
-    assert "mere absence of mistakes" in prompt
-    assert "command/edit correctness" in prompt
-    assert "unconditional trajectory-level checks" in prompt
-    assert "Do-no-harm outcome" in prompt
-    assert "Stop after success" in prompt
-    assert "System-prompt compliance" in prompt
-    assert "Turn-to-turn progress" in prompt
-    assert 'without "if the response..." wording' in prompt
-    assert "repository damage" in prompt
-    assert "Invented IDs, paths, symbols, or tool arguments should fail" in prompt
-    assert "do not award passive credit" in prompt
-    assert "failing to submit is a workflow failure" in prompt
-    assert "FINAL-STATE / TERMINAL-GATE checks" in prompt
-    assert "TERMINAL-GATE checks" in prompt
-    assert "roughly a quarter of the list" in prompt
-    assert "sane final state" in prompt
-    assert "Failed-command recovery" in prompt
-    assert "Lockfile/checksum safety" in prompt
-    assert "broken active trajectories" in prompt
-    assert "cannot score well by passing many narrow" in prompt
-    assert "clean finishers with weak work" in prompt
-    assert "without grounded progress scores poorly" in prompt
-    assert "BOUNDED-HORIZON trajectory score" in prompt
-    assert "not finishing within the fixed turn budget" in prompt
-    assert "Does the trajectory submit after observations show the task is solved or verified?" in prompt
-    assert "never like" in prompt and "Does the trajectory submit?" in prompt
+    assert "THE GOAL/TOOL TRAP" in system
+    assert "NO STAGE-SPLITTING" in system
+    assert "AT MOST 14 WORDS" in system
+    assert "NEVER ADDRESS A TURN BY NUMBER" in system
+    assert "NO UNIVERSAL QUANTIFIERS" in system
+    assert "ONLY THE CANDIDATE'S OWN OUTPUT COUNTS" in system
+    assert "NEAR-MISS of at least one full sentence" in system
+    assert "Do not reward mere activity" in system
+    assert "FAMILY W2 — SEEING THE FAILURE BEFORE THE FIX" in user
+    assert "FAMILY W4 — VERIFICATION AFTER THE LAST EDIT" in user
+    assert "FAMILY W6 — EDIT INTEGRITY AND PROGRESS" in user
+    assert "FAMILY B — IS THE EDIT ITSELF RIGHT" in user
 
 
 def test_question_prompt_limits_easy_hygiene_checks():
-    prompt = build_question_messages(task="Fix bug", n=50)[0]["content"]
+    system, user = (m["content"] for m in build_question_messages(task="Fix bug", n=50))
 
-    assert "NO STYLE FILLER" in prompt
-    assert "do not generate questions about tone" in prompt
-    assert "Word/character count checks are allowed" in prompt
-    assert "concrete system-prompt requirement" in prompt
-    assert "do not create a word-count ladder" in prompt
-    assert "questions 1 through 15" not in prompt
-    assert "Questions 1-6 are the WORD-COUNT LADDER" not in prompt
+    assert "ECONOMY VOCABULARY" in system
+    assert '5 requires:"read" and 6 negative-form questions across all 50' in system
+    assert "This is the ONLY section where economy vocabulary is allowed" in user
+    assert "Write exactly 2 word-count bounds" in user
+    assert "the first at TEN TIMES and the second at TWENTY TIMES" in user
+    assert "add NO further rungs" in user
+    assert "do NOT ask about tone" in user
 
 
 def test_judge_prompt_scores_only_candidate_outputs():
@@ -121,8 +109,19 @@ def test_judge_prompt_is_strict_on_workflow_and_grounding_failures():
     assert "making no useful progress from the prior turn" in prompt
     assert "inventing an unseen path/ID/parameter" in prompt
     assert "continuing to explore after success" in prompt
-    assert "terminal-gate questions" in prompt
+    assert "Any listed unresolved terminal failure is enough for 0" in prompt
     assert "partially correct" in prompt
+
+
+def test_build_judge_messages_shows_tag():
+    messages = build_judge_messages(
+        response="FULL CANDIDATE TRAJECTORY\nCANDIDATE OUTPUT 1:\nls",
+        questions=[{"id": "q_01", "text": "Does it inspect?", "example_bad": "no",
+                    "category": "grounding", "tag": "explore"}],
+    )
+
+    assert '"tag": "explore"' in messages[1]["content"]
+    assert "TAG VALIDATION" in messages[0]["content"]
 
 
 def test_parse_questions_assigns_ids_and_category():
@@ -421,11 +420,41 @@ def test_parse_questions_caps_negative_form_questions():
     assert texts[-5:] == positive
 
 
+def test_parse_questions_keeps_validated_tag_and_blanks_invalid():
+    raw = json.dumps(
+        {"questions": [
+            {"text": "Does `install()` return `False` when render is missing?",
+             "example_bad": "b", "tag": "action"},
+            {"text": "Is the reproduction script re-run after the edit?",
+             "example_bad": "b", "tag": " Verification "},
+            {"text": "Does the opening move grep a task-named symbol?",
+             "example_bad": "b", "tag": "bogus"},
+            {"text": "Are the candidate outputs, all turns combined, under roughly 900 words?",
+             "example_bad": "b", "tag": "economy"},
+            {"text": "Does the final turn submit after the verification succeeds?",
+             "example_bad": "b"},
+        ]}
+    )
+    out, _ok = parse_questions(raw, 10)
+
+    # valid tags survive (case/whitespace normalized), unknown or missing tags become ""
+    assert [q["tag"] for q in out] == ["action", "verification", "", "economy", ""]
+
+
 def test_question_schema_floor_does_not_force_padding():
     # Floor sits well under the evaluator's real supply of distinct checks (~25-35 per task):
     # a floor near n forces quota-padding with paraphrase/template repeats.
     schema = question_schema(50)["properties"]["questions"]
     assert schema["minItems"] == 11 and schema["maxItems"] == 50
+
+
+def test_question_schema_includes_tag_enum():
+    items = question_schema(50)["properties"]["questions"]["items"]
+    assert items["properties"]["tag"] == {
+        "type": "string",
+        "enum": ["explore", "verification", "action", "economy"],
+    }
+    assert "tag" in items["required"]
 
 
 def test_parse_questions_accepts_slightly_short_and_truncates_extra():

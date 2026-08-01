@@ -41,6 +41,62 @@ def test_supervise_kills_stalled_child(tmp_path, monkeypatch):
         assert proc.poll() is not None  # every stalled child was terminated
 
 
+def test_supervise_progress_resets_retry_budget(tmp_path, monkeypatch):
+    monkeypatch.setattr(_supervise, "_HEARTBEAT_INTERVAL_S", 0.05)
+    monkeypatch.setattr(_supervise, "STALL_SECONDS", 0.2)
+    monkeypatch.setattr(_supervise, "STALL_RETRIES", 2)
+    watch = tmp_path / "m"
+    watch.mkdir()
+    launched: list[subprocess.Popen] = []
+
+    def fake_spawn(child_call, args, log_path):
+        # Attempt 2 lands new bytes before wedging; every other attempt writes nothing.
+        if len(launched) == 1:
+            (watch / f"shard{len(launched)}").write_bytes(b"x" * 4096)
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(600)"],
+            start_new_session=True,
+        )
+        launched.append(proc)
+        return proc
+
+    monkeypatch.setattr(_supervise, "_spawn", fake_spawn)
+
+    with pytest.raises(TimeoutError, match="consecutive"):
+        _supervise.supervise_download(child_call="x", args=[], watch_dir=watch, label="ns/m")
+
+    # fruitless(1) → progress resets(2) → fruitless(3) → fruitless(4) = 2 consecutive → give up
+    assert len(launched) == 4
+    for proc in launched:
+        assert proc.poll() is not None
+
+
+_HF_404_LOG = """\
+Fetching 11 files:   0%|          | 0/11 [00:00<?, ?it/s]
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "/x/huggingface_hub/_snapshot_download.py", line 326, in snapshot_download
+    raise api_call_error
+huggingface_hub.errors.RepositoryNotFoundError: 404 Client Error. (Request ID: Root=1-abc)
+
+Repository Not Found for url: https://huggingface.co/api/models/ns/m/revision/beef.
+Please make sure you specified the correct `repo_id` and `repo_type`.
+"""
+
+
+def test_summarize_error_log_keeps_final_exception_only():
+    summary = _supervise._summarize_error_log(_HF_404_LOG)
+    assert "Traceback" not in summary
+    assert "File \"" not in summary
+    assert summary.startswith("huggingface_hub.errors.RepositoryNotFoundError: 404")
+    assert "Repository Not Found for url" in summary
+    assert "Please make sure" not in summary
+    assert len(summary) <= 300
+    # No exception line at all -> last line, capped.
+    assert _supervise._summarize_error_log("plain output\nlast line") == "last line"
+    assert _supervise._summarize_error_log("") == "(no output captured)"
+
+
 def test_supervise_raises_on_child_error(tmp_path, monkeypatch):
     monkeypatch.setattr(_supervise, "_HEARTBEAT_INTERVAL_S", 0.05)
     monkeypatch.setattr(_supervise, "STALL_SECONDS", 5.0)

@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 
 import pyarrow as pa
@@ -7,12 +8,16 @@ import pyarrow.parquet as pq
 from albedo_eval_service.sampling import multi_source_manifest_sample_ids
 
 
-def _load_build_manifest():
-    path = Path(__file__).resolve().parents[1] / "scripts" / "build_manifest.py"
-    spec = importlib.util.spec_from_file_location("build_manifest", path)
+def _load_script(name: str):
+    path = Path(__file__).resolve().parents[1] / "scripts" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _load_build_manifest():
+    return _load_script("build_manifest")
 
 
 _STRATEGIES = ["pr_1", "lm_rewrite__a", "combine_file__b", "func_pm_remove_cond__c"]
@@ -78,6 +83,44 @@ def test_build_source_counts_rows_and_enriches_row_meta(tmp_path):
         "chars_pre": 5,
     }
     assert [m["family"] for m in first["rows_meta"]] == ["pr", "lm", "combine"]
+
+
+def test_build_meta_dict_strips_rows_meta_and_aggregates(tmp_path):
+    bm = _load_build_manifest()
+    bmm = _load_script("build_manifest_meta")
+    _write_shard(tmp_path / "mini-coder" / "data", "train-00000.parquet", 4)
+
+    source = bm._build_source("mini-coder", tmp_path)
+    source["shards"][0]["rows_meta"][3]["blocked"] = True
+    meta = bmm.build_meta_dict({"version": "t", "sources": [source], "total_rows": 4})
+
+    assert meta["version"] == "t" and meta["total_rows"] == 4
+    src = meta["sources"][0]
+    assert all("rows_meta" not in shard for shard in src["shards"])
+    assert src["shards"][0]["rows"] == 4 and len(src["shards"][0]["sha256"]) == 64
+    # blocked rows never enter the sampler pool, so they are excluded from instance stats
+    assert src["stats"] == {
+        "instances": 3,
+        "instances_with_edit": 3,
+        "blocked_rows": 1,
+        "families": {"pr": 1, "lm": 1, "combine": 1},
+        "languages": {"python": 3},
+    }
+    assert meta["unique_instances"] == 3
+    # ordered pair lists (sort_keys would scramble dict keys), mirroring the sampler constants
+    assert [p[0] for p in meta["sampling"]["phases"]] == ["pre_edit", "at_edit", "cold"]
+    assert [f[0] for f in meta["sampling"]["families"]] == ["pr", "lm", "combine", "mechanical"]
+
+
+def test_write_manifest_emits_meta_alongside(tmp_path):
+    bm = _load_build_manifest()
+    _write_shard(tmp_path / "mini-coder" / "data", "train-00000.parquet", 3)
+
+    out_path, _manifest, _digest = bm.write_manifest(tmp_path, ["mini-coder"])
+
+    meta = json.loads(out_path.with_name("manifest.meta.json").read_text())
+    assert meta["sources"][0]["stats"]["instances"] == 3
+    assert "rows_meta" not in meta["sources"][0]["shards"][0]
 
 
 def test_built_manifest_is_sampler_compatible(tmp_path):

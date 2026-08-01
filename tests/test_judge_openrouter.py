@@ -12,21 +12,21 @@ from albedo_eval_service.judge_openrouter import OpenRouterJudgeClient
 def test_openrouter_payload_respects_provider_structured_output_support():
     payloads = asyncio.run(_capture_payloads())
 
-    glm_payload = payloads[0]
-    assert glm_payload["model"] == "z-ai/glm-5.2"
-    assert "order" not in glm_payload["provider"]
-    assert glm_payload["provider"]["quantizations"] == ["fp8"]
-    assert glm_payload["provider"]["allow_fallbacks"] is True
-    assert glm_payload["provider"]["require_parameters"] is True
-    assert "response_format" not in glm_payload
+    plain_payload = payloads[0]
+    assert plain_payload["model"] == "z-ai/glm-5.2"
+    assert "order" not in plain_payload["provider"]
+    assert plain_payload["provider"]["quantizations"] == ["fp8"]
+    assert plain_payload["provider"]["allow_fallbacks"] is True
+    assert plain_payload["provider"]["require_parameters"] is True
+    assert "response_format" not in plain_payload
 
-    qwen_payload = payloads[1]
-    assert qwen_payload["model"] == "qwen/qwen3.5-397b-a17b"
-    assert "order" not in qwen_payload["provider"]
-    assert qwen_payload["provider"]["quantizations"] == ["fp8"]
-    assert qwen_payload["provider"]["allow_fallbacks"] is True
-    assert qwen_payload["provider"]["require_parameters"] is True
-    assert qwen_payload["response_format"]["type"] == "json_schema"
+    schema_payload = payloads[1]
+    assert schema_payload["model"] == "qwen/qwen3.5-397b-a17b"
+    assert "order" not in schema_payload["provider"]
+    assert schema_payload["provider"]["quantizations"] == ["fp8"]
+    assert schema_payload["provider"]["allow_fallbacks"] is True
+    assert schema_payload["provider"]["require_parameters"] is True
+    assert schema_payload["response_format"]["type"] == "json_schema"
 
 
 async def _capture_payloads():

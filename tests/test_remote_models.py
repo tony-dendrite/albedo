@@ -330,7 +330,7 @@ def test_download_supervisor_kills_stalled_child(tmp_path, monkeypatch):
     monkeypatch.setattr(remote_models, "_HEARTBEAT_INTERVAL_S", 0.05)
     launched: list[subprocess.Popen] = []
 
-    def fake_spawn(repo, revision, temp_dir, concurrency, log_path):
+    def fake_spawn(repo, revision, temp_dir, concurrency, log_path, child_entry="_hf_download_child"):
         # A child that never writes to temp_dir and refuses to exit — a wedged transfer.
         proc = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(600)"],
@@ -362,7 +362,7 @@ def test_download_supervisor_kills_stalled_child(tmp_path, monkeypatch):
 def test_download_supervisor_raises_on_child_error(tmp_path, monkeypatch):
     monkeypatch.setattr(remote_models, "_HEARTBEAT_INTERVAL_S", 0.05)
 
-    def fake_spawn(repo, revision, temp_dir, concurrency, log_path):
+    def fake_spawn(repo, revision, temp_dir, concurrency, log_path, child_entry="_hf_download_child"):
         Path(log_path).write_text("RepositoryNotFoundError: 404\n", encoding="utf-8")
         return subprocess.Popen([sys.executable, "-c", "import sys; sys.exit(3)"])
 
@@ -382,10 +382,50 @@ def test_download_supervisor_raises_on_child_error(tmp_path, monkeypatch):
         )
 
 
+def test_download_supervisor_budget_resets_on_progress(tmp_path, monkeypatch):
+    monkeypatch.setattr(remote_models, "_HEARTBEAT_INTERVAL_S", 0.05)
+    launched: list[subprocess.Popen] = []
+
+    def fake_spawn(repo, revision, temp_dir, concurrency, log_path, child_entry="_hf_download_child"):
+        attempt = len(launched) + 1
+        marker = Path(temp_dir) / "model-00001.safetensors"
+        if attempt == 1:
+            marker.write_bytes(b"x" * 4096)  # bytes grow, then the transfer wedges
+        elif attempt == 2:
+            marker.unlink()  # shard retry deletes its partial: bytes DROP, then wedge
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(600)"],
+            start_new_session=True,
+        )
+        launched.append(proc)
+        return proc
+
+    monkeypatch.setattr(remote_models, "_spawn_hf_download", fake_spawn)
+    temp_dir = tmp_path / "m.partial"
+    temp_dir.mkdir()
+
+    with pytest.raises(TimeoutError, match="consecutive"):
+        remote_models._run_hf_download_supervised(
+            repo="ns/m",
+            revision="d" * 40,
+            temp_dir=temp_dir,
+            label="ns/m",
+            concurrency=1,
+            stall_seconds=0.2,
+            max_attempts=2,
+        )
+
+    # Attempts 1 (growth) and 2 (deletion) both moved bytes, so neither burned the
+    # retry budget; only the two final zero-movement attempts did.
+    assert len(launched) == 4
+    for proc in launched:
+        assert proc.poll() is not None
+
+
 def test_download_supervisor_succeeds(tmp_path, monkeypatch):
     monkeypatch.setattr(remote_models, "_HEARTBEAT_INTERVAL_S", 0.05)
 
-    def fake_spawn(repo, revision, temp_dir, concurrency, log_path):
+    def fake_spawn(repo, revision, temp_dir, concurrency, log_path, child_entry="_hf_download_child"):
         (Path(temp_dir) / "model.safetensors").write_bytes(b"x" * 1024)
         return subprocess.Popen([sys.executable, "-c", "import sys; sys.exit(0)"])
 
