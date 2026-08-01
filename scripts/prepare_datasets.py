@@ -79,12 +79,7 @@ def _expected_parquet_shards(repo_id: str, shard_glob: str) -> set[str]:
 
 
 def _local_parquet_shards(dest: Path, shard_glob: str) -> set[str]:
-    subdir, _, name_pat = shard_glob.rpartition("/")
-    data_dir = dest / subdir if subdir else dest
-    if not data_dir.is_dir():
-        return set()
-    prefix = f"{subdir}/" if subdir else ""
-    return {f"{prefix}{p.name}" for p in data_dir.glob(name_pat)}
+    return {p.relative_to(dest).as_posix() for p in dest.glob(shard_glob)}
 
 
 def download_source(
@@ -217,7 +212,8 @@ def main() -> None:
         glob = meta.get("raw_glob", meta["shard_glob"])
         for repo_id in meta["repos"]:
             download_source(
-                name, repo_id, glob, args.raw_root and Path(args.raw_root) or root,
+                name, repo_id, glob,
+                Path(args.raw_root) if args.raw_root and meta.get("render") else root,
                 force=args.force, max_workers=args.max_workers,
                 dest_name=repo_id.split("/")[-1] if meta.get("render") else name,
             )
