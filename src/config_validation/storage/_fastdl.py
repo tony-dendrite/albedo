@@ -129,6 +129,25 @@ def _sha256(path: Path, heartbeat: Path | None = None) -> str:
     return digest.hexdigest()
 
 
+def _resolve_signed_url(url: str, headers: dict[str, str]) -> str:
+    import urllib.error
+    import urllib.request
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            return None
+
+    request = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.build_opener(_NoRedirect).open(request, timeout=30):
+            return url  # served directly, no redirect to follow
+    except urllib.error.HTTPError as err:
+        location = err.headers.get("Location") if 300 <= err.code < 400 else None
+        if location is None:
+            raise
+        return location
+
+
 def _fetch_one(url: str, tmp: Path, spec: ShardSpec, headers: dict[str, str]) -> None:
     import hf_transfer
 
@@ -164,7 +183,8 @@ def fetch_shards(repo: str, revision: str, dest: Path, token: str | None) -> Non
         last_err: Exception | None = None
         for attempt in range(1, FILE_RETRIES + 1):
             try:
-                _fetch_one(url, tmp, spec, headers)
+                # Re-resolve per attempt: signed URLs expire and throttling windows pass.
+                _fetch_one(_resolve_signed_url(url, headers), tmp, spec, headers)
                 actual = _sha256(tmp, heartbeat=dest / f"verify-progress{_TMP_SUFFIX}")
                 if actual != spec.sha256:
                     raise RuntimeError(f"{spec.name}: sha256 {actual} != {spec.sha256}")
