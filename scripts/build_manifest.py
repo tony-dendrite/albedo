@@ -13,7 +13,7 @@ import pyarrow.parquet as pq
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from albedo_eval_service.sampling import _SHARD_RE
+from albedo_eval_service.sampling import _SHARD_RE, SAMPLING_ALGO
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -176,7 +176,7 @@ def print_manifest_summary(out_path: Path, manifest: dict, digest: str) -> None:
     print("Update these to pin the new manifest:")
     print(f"  ALBEDO_EVAL_DATASET_MANIFEST_HASH={digest}")
     print(f"  SANITY_DISPATCH_DATASET_MANIFEST_HASH={digest}")
-    print("  ALBEDO_EVAL_SAMPLING_ALGO=swe-zero-multi-source-sample-v1")
+    print(f"  ALBEDO_EVAL_SAMPLING_ALGO={SAMPLING_ALGO}")
     print("  src/albedo_eval_service/config.py  -> dataset_manifest_hash default")
     print("  src/sanity_service/settings.py     -> dataset_manifest_hash default")
 
