@@ -1,15 +1,3 @@
-"""Warm vLLM engine that serves the current king and hot-swaps on coronation.
-
-Differs from the preeval worker (sanity_remote/worker.py) in two ways:
-  - it stays warm (no per-run teardown), and
-  - the model is downloaded *before* the old one is killed, so the old king keeps serving through the
-    (multi-minute) download; only the short kill->boot window is down, and the gateway covers it with an
-    in-chat reload notice.
-
-The vLLM process lifecycle (port-squatter reclaim, launch, health, kill) is copied from the preeval
-worker and adapted for a stable served-model-name + persistent server. The stateless helpers
-(download/seed-inject/config-strip/ref-parse) are imported from it so we don't diverge.
-"""
 
 from __future__ import annotations
 
@@ -39,9 +27,6 @@ from mirror import MirrorNotReady, mirror_repo_id, mirror_revision
 
 
 def _model_complete(model_dir: str) -> bool:
-    """``_model_present`` only checks the weights, but the HF download path fetches weights and
-    config files in separate calls — a shard-complete dir with no config.json boots vLLM straight
-    into "Invalid repository ID or local directory"."""
     return _model_present(model_dir) and (Path(model_dir) / "config.json").exists()
 
 
@@ -126,12 +111,10 @@ class KingVllmEngine:
 
 
     async def _materialize(self, king: King) -> str:
-        """Stage the king's weights locally, from our own HF mirror of it (see mirror.py). Raises
-        MirrorNotReady while the mirror is still uploading, so the current king keeps serving."""
         from model_validation.storage import cache_dir, download_config, download_full, make_ref
 
         original_repo, original_digest = _model_ref_parts(king.model_uri, king.digest)
-        if self._s.king_override_uri:  # manual override: take the operator's ref as given
+        if self._s.king_override_uri:
             repo, ref_digest = original_repo, original_digest
         else:
             repo = mirror_repo_id(king.roman, self._s)
@@ -143,15 +126,12 @@ class KingVllmEngine:
         else:
             logger.info("[king-chat] downloading {} rev={:.16} to {}", repo, ref_digest, dest)
             await asyncio.to_thread(self._prune_models, {self._loaded_dir, self._prev_dir})
-            await asyncio.to_thread(download_config, ref)  # download_full fetches weights only
+            await asyncio.to_thread(download_config, ref)
             dest = await asyncio.to_thread(download_full, ref)
         await asyncio.to_thread(_inject_seed_processor_files, dest)
         return dest
 
     def _prune_models(self, keep: set[str]) -> None:
-        """Keep only the current and the previous king's weights under models_dir — a coronation that
-        fails to boot otherwise leaves 60G+ behind on every attempt. Dirs without weights (the seed
-        processor's config staging) are left alone."""
         root = Path(self._s.models_dir)
         keep_real = {os.path.realpath(p) for p in keep if p}
         for weights_dir in {p.parent for p in root.rglob("*.safetensors")}:

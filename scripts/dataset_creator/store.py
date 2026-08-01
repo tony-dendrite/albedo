@@ -1,11 +1,3 @@
-"""Working sample buffer (JSON) and exact-size chunk cutting.
-
-pending/<model>.json holds the rows still waiting to fill the next
-`chunk_size` chunk. Rows are appended on ingest and DELETED from the buffer
-the moment they are written into a chunk parquet; an empty buffer file is
-removed. Everything permanent (which chunks exist / were uploaded) lives in
-SQLite (see state.py).
-"""
 
 from __future__ import annotations
 
@@ -42,7 +34,6 @@ def _save_pending(cfg: Config, model: str, rows: list[dict]) -> None:
 
 
 def append_rows(cfg: Config, model: str, rows: list[dict]) -> None:
-    """Add freshly extracted rows to the buffer; a re-ingested run replaces its rows."""
     pending = _load_pending(cfg, model)
     run_id = rows[0]["_run_id"]
     pending = [r for r in pending if r["_run_id"] != run_id] + rows
@@ -64,9 +55,6 @@ def _write_chunk(cfg: Config, model: str, no: int, rows: list[dict]) -> str:
 
 
 def _reconcile_orphans(cfg: Config, state: State, model: str, pending: list[dict]) -> list[dict]:
-    """Heal a crash between chunk-file write and ledger insert: a chunk file on
-    disk that is not in SQLite gets its rows dropped from the buffer (if still
-    there) and is recorded."""
     model_dir = cfg.out_dir / model
     if not model_dir.is_dir():
         return pending
@@ -91,7 +79,6 @@ def _next_chunk_no(cfg: Config, model: str) -> int:
 
 
 def cut_chunks(cfg: Config, state: State) -> None:
-    """Cut every full chunk_size slice from each buffer, deleting used rows."""
     models = sorted({p.stem for p in cfg.pending_dir.glob("*.json")}
                     | set(state.chunk_models())) if cfg.pending_dir.exists() \
         else state.chunk_models()

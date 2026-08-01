@@ -1,4 +1,3 @@
-"""Check candidate metadata against the pinned genesis metadata hashes."""
 from __future__ import annotations
 
 import hashlib

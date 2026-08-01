@@ -1,4 +1,3 @@
-"""Stateless sanity worker API - the dispatcher POSTs a job and polls events; no DB, no judges."""
 
 from __future__ import annotations
 
@@ -17,7 +16,6 @@ store = SanityRunStore()
 
 
 def require_auth(authorization: Annotated[str | None, Header()] = None, settings: SanityRemoteSettings = Depends(get_remote_settings),) -> None:
-    # Bearer-token gate; open when no token is configured (local/dev).
     if not settings.auth_token:
         return
     if authorization != f"Bearer {settings.auth_token}":
@@ -26,13 +24,11 @@ def require_auth(authorization: Annotated[str | None, Header()] = None, settings
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    # Liveness probe (unauthenticated).
     return {"status": "ok"}
 
 
 @app.get("/ready")
 def ready(settings: SanityRemoteSettings = Depends(get_remote_settings), _: None = Depends(require_auth)) -> dict[str, object]:
-    # Reports readiness + host identity for the dispatcher's host selection.
     return {
         "ready": settings.ready,
         "host_id": settings.host_id,
@@ -43,7 +39,6 @@ def ready(settings: SanityRemoteSettings = Depends(get_remote_settings), _: None
 
 @app.get("/capacity")
 def capacity(settings: SanityRemoteSettings = Depends(get_remote_settings), _: None = Depends(require_auth)) -> dict[str, object]:
-    # Current load so the dispatcher avoids piling work on a busy host.
     return {
         "host_id": settings.host_id,
         "role": settings.host_role,
@@ -53,10 +48,8 @@ def capacity(settings: SanityRemoteSettings = Depends(get_remote_settings), _: N
 
 @app.post("/sanity-runs")
 async def start_run(request: SanityRunRequest, background_tasks: BackgroundTasks, settings: SanityRemoteSettings = Depends(get_remote_settings), _: None = Depends(require_auth),) -> dict[str, str]:
-    # Accepts a generation job (idempotent on run_id) and runs it in the background.
     if not settings.ready:
         raise HTTPException(status_code=503, detail="sanity worker is not ready")
-    # One sanity run at a time: refuse a new run while another is active (same run_id is idempotent).
     active = store.list_active()
     incoming = getattr(request, "run_id", None)
     if active and (incoming is None or all(r.run_id != incoming for r in active)):
@@ -73,7 +66,6 @@ async def start_run(request: SanityRunRequest, background_tasks: BackgroundTasks
 
 @app.get("/sanity-runs/{run_id}")
 def get_run(run_id: str, _: None = Depends(require_auth)) -> dict[str, object]:
-    # Status snapshot (or the final result once done).
     run = store.get(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="run not found")
@@ -82,7 +74,6 @@ def get_run(run_id: str, _: None = Depends(require_auth)) -> dict[str, object]:
 
 @app.get("/sanity-runs/{run_id}/events")
 def get_run_events(run_id: str, _: None = Depends(require_auth)) -> dict[str, list[dict[str, object]]]:
-    # Full event list for the dispatcher to poll until a result appears.
     run = store.get(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="run not found")
@@ -91,7 +82,6 @@ def get_run_events(run_id: str, _: None = Depends(require_auth)) -> dict[str, li
 
 @app.post("/sanity-runs/{run_id}/cancel")
 def cancel_run(run_id: str, _: None = Depends(require_auth)) -> dict[str, str]:
-    # Marks a run failed/retryable on dispatcher request.
     run = store.get(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="run not found")
@@ -102,20 +92,16 @@ def cancel_run(run_id: str, _: None = Depends(require_auth)) -> dict[str, str]:
 
 @app.post("/teardown")
 async def teardown_worker(_: None = Depends(require_auth)) -> dict[str, str]:
-    # Explicitly frees the warm vLLM process after dispatcher-side multi-turn orchestration.
     await teardown()
     return {"state": "ok"}
 
 
 def main() -> None:
-    # Console entrypoint: serve the worker API on the configured port.
     import os
 
     import uvicorn
 
     settings = get_remote_settings()
-    # model_validation.config reads ALBEDO_MODEL_CACHE_DIR at first import (inside _materialize).
-    # Propagate our setting now so the lazy import picks up the right cache root.
     os.environ.setdefault("ALBEDO_MODEL_CACHE_DIR", settings.model_cache_dir)
     uvicorn.run(
         "sanity_remote.api:app",

@@ -183,7 +183,6 @@ def test_remote_worker_loads_parquet_and_runs_paired_generation(tmp_path, monkey
     assert run.state == "succeeded"
     verdict = run.final_verdict()
     assert verdict is not None
-    # duel-transcript.jsonl and judge-results.jsonl are gone: each duplicated another artifact.
     assert set(verdict["artifacts"]) == {
         "generated_samples",
         "progress",
@@ -479,4 +478,4 @@ def test_prefetch_repo_context_fires_only_when_configured(monkeypatch):
         RemoteSettings(upload_artifacts=False, scoring_backend="mock")
     )
     disabled._prefetch_repo_context(_request(), samples)
-    assert not posted.wait(0.2)  # url unset -> no prefetch call
+    assert not posted.wait(0.2)

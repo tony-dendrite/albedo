@@ -1,4 +1,3 @@
-"""Check #0: the committed repo id matches the required naming pattern."""
 from __future__ import annotations
 
 import re
@@ -11,7 +10,6 @@ NAME = "repo_pattern"
 
 
 def check(ref: ModelRef) -> CheckOutcome:
-    """Confirm the committed repo id matches ``REPO_PATTERN`` from chain.toml."""
     if not REPO_PATTERN:
         return CheckOutcome(name=NAME, ok=True, details={"pattern": ""})
 

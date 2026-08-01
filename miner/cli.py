@@ -1,8 +1,3 @@
-"""`albedo` CLI — miner entrypoint.
-
-Headless subcommands: upload, check-model, commit, check-commit, publish.
-Interactive: `albedo on` launches the Rich Live TUI. Bare `albedo` prints help.
-"""
 from __future__ import annotations
 
 import argparse
@@ -11,7 +6,7 @@ import sys
 
 from miner import env
 
-env.load()  # populate os.environ from .env before reading any defaults below
+env.load()
 
 _NETUID = int(os.environ.get("CHAIN_NETUID", "97"))
 _NETWORK = os.environ.get("CHAIN_NETWORK", "finney")
@@ -21,7 +16,6 @@ _NAMESPACE = os.environ.get("ALBEDO_NAMESPACE")
 
 
 def _wallet_arg(parser, name: str, default, help_: str) -> None:
-    """Add a wallet arg that defaults from .env and is only required when unset there."""
     parser.add_argument(f"--{name}", default=default, required=default is None, help=help_)
 
 
@@ -94,7 +88,7 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\naborted.", file=sys.stderr)
         return 130
-    except Exception as exc:  # noqa: BLE001 — show what's wrong, not a traceback
+    except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 

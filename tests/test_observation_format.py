@@ -16,8 +16,6 @@ from albedo_eval_service.observation_format import (
     wrap,
 )
 
-# Shapes copied from the corpora themselves (mini-coder-trajs-400k / SWE-smith-rs,
-# Open-SWE-Traces sweagent + openhands arms, SWE-Hero).
 RC_OBS = "<returncode>0</returncode>\n<output>\ntotal 228\ndrwxr-xr-x 12 root root\n</output>"
 SWE_AGENT_OBS = "OBSERVATION:\nHere's the files and directories up to 2 levels deep in /testbed:"
 OPENHANDS_BASH_OBS = (
@@ -48,15 +46,12 @@ def test_detect_format_reads_the_trajectorys_own_observation():
     assert detect_format("open-swe-traces/x:0:1", _prefix(RC_OBS)) == RETURNCODE
     assert detect_format("open-swe-traces/x:0:1", _prefix(SWE_AGENT_OBS)) == SWE_AGENT
     assert detect_format("open-swe-traces/x:0:1", _prefix(OPENHANDS_BASH_OBS)) == OPENHANDS
-    # the two arms merged under one source name must not be told apart by that name
     assert detect_format("open-swe-traces/x:0:1", _prefix(SWE_AGENT_OBS)) != detect_format(
         "open-swe-traces/x:0:1", _prefix(OPENHANDS_BASH_OBS)
     )
 
 
 def test_detect_format_ignores_the_leading_task_message():
-    # the first user turn is the task, not an observation; taking it would read every sample as
-    # OpenHands
     task_only = [
         {"role": "system", "content": "sys"},
         {"role": "user", "content": "Fix the bug in foo.py"},

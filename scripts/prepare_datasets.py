@@ -15,9 +15,7 @@ from pathlib import Path
 log = logging.getLogger("prepare_datasets")
 
 
-# Benchmark leaks; the mini-coder pair is only found by `.pr_<N>` reprojection, not id intersection.
 _MINI_CODER_LEAKS = ("modin-project__modin.8c7799fd.pr_7434", "scrapy__scrapy.35212ec5.pr_6671")
-# Open-SWE-Traces ids hitting the leaderboard union via the SWE-rebench-V2 leak.
 _OPEN_SWE_LEAKS = (
     "agronholm__anyio-935", "astropy__ccdproc-901", "beeware__briefcase-2302",
     "beeware__briefcase-2401", "conan-io__conan-18327", "conan-io__conan-18444",
@@ -35,15 +33,11 @@ SOURCES: dict[str, dict] = {
     "open-swe-traces": {
         "repos": ["nvidia/Open-SWE-Traces"],
         "shard_glob": "data/train-*.parquet",
-        # All four arms as ONE source so instance dedup sees full coverage.
-        "raw_glob": "data/*/train-*.parquet",  # language comes from the row, not a constant
+        "raw_glob": "data/*/train-*.parquet",
         "render": True,
-        "family": "pr",  # real GitHub PRs
+        "family": "pr",
         "exclude_ids": _OPEN_SWE_LEAKS,
     },
-    # Named "mini-coder-*" deliberately: this corpus IS mini-swe-agent format (observations already
-    # <returncode>/<output>), and _simulation_format() picks the observation format by that substring.
-    # Any other name makes the simulator emit `Observation:` into a <returncode> trajectory.
     "mini-coder-rs": {
         "language": "rust",
         "repos": [
@@ -52,7 +46,7 @@ SOURCES: dict[str, dict] = {
             "AlienKevin/SWE-smith-rs-gemini-3-flash-trajectories",
         ],
         "shard_glob": "data/train-*.parquet",
-        "render": True,  # bash is 100% of calls; family parses from the SWE-smith id grammar
+        "render": True,
     },
     "swe-hero": {
         "language": "python",
@@ -60,14 +54,13 @@ SOURCES: dict[str, dict] = {
         "shard_glob": "data/train-*.parquet",
         "render": True,
         "family": "pr",
-        "exclude_upstream": ("nebius/SWE-rebench",),  # rebench is our benchmark
-        "repo_cap": 200,  # pandas alone is 37.9% of the surviving pool
+        "exclude_upstream": ("nebius/SWE-rebench",),
+        "repo_cap": 200,
     },
 }
 
 
 def _repo_of(name: str) -> str:
-    """Primary repo for a source (download/manifest provenance)."""
     return SOURCES[name]["repos"][0]
 
 
@@ -79,8 +72,6 @@ def _enable_fast_transfer() -> None:
 
 
 def _expected_parquet_shards(repo_id: str, shard_glob: str) -> set[str]:
-    """Repo-relative paths of every shard matching shard_glob (one metadata call, no
-    file content) so we can fetch only what is missing."""
     from huggingface_hub import HfApi
 
     files = HfApi().list_repo_files(repo_id, repo_type="dataset")
@@ -88,7 +79,6 @@ def _expected_parquet_shards(repo_id: str, shard_glob: str) -> set[str]:
 
 
 def _local_parquet_shards(dest: Path, shard_glob: str) -> set[str]:
-    """Repo-relative paths of shards already present under dest/ (matched by shard_glob)."""
     subdir, _, name_pat = shard_glob.rpartition("/")
     data_dir = dest / subdir if subdir else dest
     if not data_dir.is_dir():
@@ -120,8 +110,6 @@ def download_source(
     )
 
     def _one(rel: str) -> None:
-        # Resumes partial files and skips already-complete ones; writes to dest/<rel>.
-        # HF_TOKEN (if set) is picked up from the env automatically.
         hf_hub_download(
             repo_id, rel, repo_type="dataset", local_dir=str(dest),
             force_download=force, token=os.environ.get("HF_TOKEN"),
@@ -131,7 +119,7 @@ def download_source(
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = [pool.submit(_one, rel) for rel in to_fetch]
         for fut in as_completed(futures):
-            fut.result()  # re-raise the first download failure
+            fut.result()
             done += 1
             if done % 50 == 0 or done == len(to_fetch):
                 log.info("%s: %d/%d downloaded", name, done, len(to_fetch))
@@ -147,11 +135,6 @@ def download_source(
 
 
 def _upload_manifest_to_hippius(manifest_path: Path, key: str) -> str:
-    """Upload manifest.json to Hippius S3 (public-read) and return the s3:// URI.
-
-    Uploads the exact on-disk bytes so the object's sha256 equals the pinned manifest hash.
-    Reuses the validators' ALBEDO_S3_* Hippius credentials (auto-loaded from albedo/.env).
-    """
     import boto3
     from botocore.config import Config
 

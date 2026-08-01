@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Generate an OpenRouter challenger trajectory and score it against stored king output."""
 
 from __future__ import annotations
 

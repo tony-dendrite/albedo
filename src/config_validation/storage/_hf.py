@@ -1,8 +1,3 @@
-"""HuggingFace hub backend — fetch + inspect model repos pinned to a git revision.
-
-Transfer acceleration is handled by Xet (``HF_XET_HIGH_PERFORMANCE``), enabled in the package
-``__init__``; the legacy ``hf_transfer`` is inert on huggingface_hub>=1.0.
-"""
 from __future__ import annotations
 
 import logging
@@ -34,16 +29,10 @@ def _token() -> str | None:
         tok = os.environ.get(env)
         if tok:
             return tok
-    return None  # public repos + the on-disk token cache work; never pass ""
+    return None
 
 
 def _download_child() -> None:
-    """Child-process entry point for a supervised full HF download (see _supervise).
-
-    Invoked as ``python -c "...; _download_child()" <repo> <revision> <local_dir> <max_workers>``.
-    Shards go through _fastdl (parallel ranged requests, sha256-verified, only
-    missing/broken files re-fetched); the index stays on snapshot_download.
-    """
     from pathlib import Path
 
     from huggingface_hub import snapshot_download
@@ -97,27 +86,23 @@ def _download(ref: ModelRef, *, config_only: bool, max_workers: int) -> str:
 
 
 def download_config(ref: ModelRef) -> str:
-    """Download only the JSON config files for ``ref``; return the local dir path."""
     return _download(ref, config_only=True, max_workers=8)
 
 
 def download_full(ref: ModelRef) -> str:
-    """Download the full model snapshot for ``ref``; return the local dir path."""
     return _download(ref, config_only=False, max_workers=8)
 
 
 def list_files(ref: ModelRef) -> list[str]:
-    """List filenames present in the HF repo at the pinned revision."""
     from huggingface_hub import list_repo_files
 
     return list(list_repo_files(repo_id=ref.repo, revision=ref.digest, token=_token()))
 
 
 def revision_resolves(ref: ModelRef) -> tuple[bool, str]:
-    """Confirm the committed revision is a real revision on HuggingFace. Returns (ok, detail)."""
     try:
         files = list_files(ref)
-    except Exception as exc:  # noqa: BLE001 — surface any hub error as a check failure
+    except Exception as exc:
         log.error(f"revision {ref.digest} did not resolve on HuggingFace repo={ref.repo}: {exc}")
         return False, f"revision {ref.digest} did not resolve on HuggingFace: {exc}"
     if not files:

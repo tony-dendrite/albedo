@@ -1,4 +1,3 @@
-"""sanity_service configuration - loaded from albedo/.env + process environment."""
 
 from __future__ import annotations
 
@@ -11,7 +10,6 @@ _ENV_PATH = _ROOT / ".env"
 
 
 def _load_dotenv(path: Path) -> None:
-    # Minimal .env loader - KEY=VALUE lines, # comments, no external dependency.
     if not path.exists():
         return
     for line in path.read_text().splitlines():
@@ -26,7 +24,6 @@ _load_dotenv(_ENV_PATH)
 
 
 def _db_url() -> str:
-    # Postgres DSN from ALBEDO_POSTGRES_* vars; empty string disables DB features.
     user = os.environ.get("ALBEDO_POSTGRES_USER", "")
     password = os.environ.get("ALBEDO_POSTGRES_PASSWORD", "")
     db = os.environ.get("ALBEDO_POSTGRES_DB", "")
@@ -37,5 +34,4 @@ def _db_url() -> str:
     return f"postgresql://{quote_plus(user)}:{quote_plus(password)}@{host}:{port}/{db}"
 
 
-# Postgres DSN consumed by the dispatcher settings; empty string disables DB features.
 DB_URL: str = _db_url()

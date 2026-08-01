@@ -1,4 +1,3 @@
-"""storage — model download/listing, backend-dispatched (reuses config_validation)."""
 
 from model_validation.storage.download import (
     cache_dir,

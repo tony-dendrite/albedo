@@ -1,4 +1,3 @@
-"""OpenSearch connection, health check, and lazy index setup for the dedup corpus."""
 from __future__ import annotations
 
 import functools
@@ -25,12 +24,11 @@ def get_client():
 
 
 def health() -> bool:
-    """True if the cluster is reachable and green/yellow."""
     try:
         status = get_client().cluster.health().get("status")
         log.info("opensearch health: {}", status)
         return status in ("green", "yellow")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.warning("opensearch health check failed: {}", exc)
         return False
 
@@ -46,15 +44,12 @@ def _mapping(dim: int) -> dict:
                 "digest": {"type": "keyword"},
                 "model_uri": {"type": "keyword"},
                 "created_at": {"type": "date"},
-                # Backend-independent exact-content key (sha256 over the weight files'
-                # content sha256s) — exact-duplicate gate ahead of the saturable kNN.
                 "weights_hash": {"type": "keyword"},
                 "norm_vector": {
                     "type": "knn_vector",
                     "dimension": dim,
                     "method": {"name": "hnsw", "space_type": "cosinesimil", "engine": "lucene"},
                 },
-                # Full fingerprint (incl. tensor_samples) — stored for exact rerank, not indexed.
                 "fingerprint": {"type": "object", "enabled": False},
             }
         },
@@ -62,21 +57,15 @@ def _mapping(dim: int) -> dict:
 
 
 def index_name(dim: int) -> str:
-    """Per-architecture index name. knn_vector has a fixed dimension, and models with a
-    different tensor count are a different architecture that must never be cross-compared,
-    so each norm-vector length gets its own index."""
     return f"{config.OPENSEARCH_INDEX}_{dim}"
 
 
 def ensure_index(dim: int) -> str:
-    """Create the per-dimension dedup index if it does not exist; return its name."""
     name = index_name(dim)
     c = get_client()
     if not c.indices.exists(index=name):
         c.indices.create(index=name, body=_mapping(dim))
         log.info("created opensearch index {} (knn dim={})", name, dim)
     else:
-        # Indices created before weights_hash existed need the field mapped explicitly, or a
-        # dynamic text mapping would break the exact term query. put_mapping is idempotent.
         c.indices.put_mapping(index=name, body={"properties": {"weights_hash": {"type": "keyword"}}})
     return name

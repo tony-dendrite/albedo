@@ -1,11 +1,3 @@
-"""`albedo on` — full-screen TUI (prompt_toolkit).
-
-A pinned `albedo>` input bar at the bottom, a scrollable log (command history + background
-output) in the middle, and the publish steps checklist (✓/✗) up top. The same subcommands run
-inside the TUI and headless. Background chatter (e.g. "connecting to finney", download progress)
-is captured into the log instead of corrupting the screen. PgUp/PgDn + mouse wheel scroll the log;
-↑/↓ recall command history. Ctrl+C / Ctrl+Q / `off` exits.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -38,7 +30,6 @@ class _State:
 
 
 class _LogWriter:
-    """File-like sink that turns stray stdout/stderr/loguru into log lines."""
 
     def __init__(self, log):
         self._log = log
@@ -59,8 +50,6 @@ class _LogWriter:
 
 
 def _clipboard_text() -> str:
-    """Read the system clipboard (for Ctrl+V). Handles WSL (Windows clipboard via PowerShell),
-    Wayland (wl-paste), and X11 (xclip/xsel). Returns '' if none available."""
     import shutil
     import subprocess
 
@@ -73,7 +62,7 @@ def _clipboard_text() -> str:
                 r = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
                 if r.returncode == 0 and r.stdout:
                     return r.stdout.rstrip("\r\n")
-            except Exception:  # noqa: BLE001
+            except Exception:
                 continue
     return ""
 
@@ -95,7 +84,6 @@ def _parse_opts(tokens: list[str]) -> dict:
 
 
 def _dispatch(cmd, opts, state, log, confirm, refresh, netuid, network):
-    """Run one command. log(str) appends to the log; refresh() repaints the steps; confirm(text)->bool."""
 
     def on_step(key, status, detail=""):
         state.steps[key] = status
@@ -179,7 +167,7 @@ def run() -> None:
     confirming = {"on": False}
     cresult = {"v": False}
     cevent = threading.Event()
-    follow = {"on": True}  # auto-scroll to newest output unless the user scrolled up
+    follow = {"on": True}
 
     log_area = TextArea(text="welcome — type a command (`help`), `off` to quit.\n",
                         read_only=True, scrollbar=True, focusable=True, wrap_lines=True)
@@ -188,8 +176,6 @@ def run() -> None:
 
     def _ui_append(line: str):
         text = log_area.text + line + "\n"
-        # When following, keep the cursor at the end so the view tracks newest output;
-        # when the user has scrolled up, leave the cursor put so the view stays still.
         pos = len(text) if follow["on"] else log_area.buffer.cursor_position
         log_area.buffer.set_document(Document(text, cursor_position=pos), bypass_readonly=True)
         if ref["app"]:
@@ -228,7 +214,7 @@ def run() -> None:
         with contextlib.redirect_stdout(writer), contextlib.redirect_stderr(writer):
             try:
                 _dispatch(cmd, opts, state, log, confirm, refresh, netuid, network)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 log(f"error: {exc}")
 
     def accept(buff) -> bool:
@@ -238,11 +224,11 @@ def run() -> None:
         if line in ("off", "quit", "exit"):
             ref["app"].exit()
             return False
-        follow["on"] = True  # snap back to newest output for the new command
+        follow["on"] = True
         log(f"albedo> {line}")
         ref["loop"] = asyncio.get_running_loop()
         ref["loop"].run_in_executor(None, run_command, line)
-        return False  # clear the input
+        return False
 
     input_area.accept_handler = accept
 
@@ -262,16 +248,13 @@ def run() -> None:
     def _(event):
         event.app.exit()
 
-    @kb.add("c-v")   # works if the terminal forwards Ctrl+V (most do; VS Code grabs it)
-    @kb.add("c-y")   # always reaches the app — use this in VS Code
+    @kb.add("c-v")
+    @kb.add("c-y")
     def _(event):
         text = _clipboard_text().replace("\r", "").replace("\n", " ").strip()
         if text:
             event.current_buffer.insert_text(text)
 
-    # VS Code's Ctrl+V / Ctrl+Shift+V / right-click send the clipboard as a *bracketed paste*.
-    # Insert it into the focused input with newlines collapsed to spaces, so a copied value with
-    # a trailing newline is inserted instead of submitting (which looked like "it clears everything").
     from prompt_toolkit.keys import Keys
 
     @kb.add(Keys.BracketedPaste)
@@ -294,7 +277,6 @@ def run() -> None:
     def _(event):
         buf = log_area.buffer
         buf.cursor_down(count=_page(event))
-        # back at the last line → resume auto-scroll to newest output
         if buf.document.cursor_position_row >= buf.document.line_count - 1:
             follow["on"] = True
             buf.cursor_position = len(buf.text)
@@ -317,9 +299,6 @@ def run() -> None:
     def _(event):
         confirming["on"] = False; cresult["v"] = False; cevent.set()
 
-    # Mouse wheel over the log pane scrolls the log (not the terminal scrollback). We move the
-    # buffer cursor — the renderer keeps the cursor on screen, so scrolling sticks — and detach
-    # follow so new output doesn't yank the view back to the bottom.
     _orig_log_mouse = log_area.control.mouse_handler
 
     def _log_mouse(mouse_event):
@@ -345,9 +324,6 @@ def run() -> None:
         Frame(log_area, title="log (history + output) — PgUp/PgDn or Ctrl+↑/↓ scroll · Home/End jump"),
         Frame(input_area),
     ])
-    # mouse_support ON so the wheel scrolls the log pane (above). Trade-off: the app captures the
-    # mouse, so native click-select is off — hold SHIFT while dragging to select/copy via the
-    # terminal, and use Ctrl+Y to paste.
     app = Application(layout=Layout(body, focused_element=input_area), key_bindings=kb,
                       full_screen=True, mouse_support=True)
     ref["app"] = app
@@ -356,5 +332,5 @@ def run() -> None:
         app.run()
     finally:
         confirming["on"] = False
-        cevent.set()  # release any waiting worker
+        cevent.set()
     print("albedo off — bye.")

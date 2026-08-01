@@ -1,11 +1,3 @@
-"""Hippius S3 upload for pre-eval (sanity) failure reports.
-
-On a terminal pre-eval rejection the dispatcher publishes a per-submission fault.json (the reason,
-fault_code, and the full per-judge injection/viability evidence) so it can be linked from the dashboard.
-
-Env-gated and best-effort: when ALBEDO_S3_* is unset the uploader is disabled and calls are no-ops,
-so pre-eval still runs without publishing. Mirrors model_validation/uploads/artifacts.py.
-"""
 
 from __future__ import annotations
 
@@ -45,7 +37,6 @@ def _safe_digest(digest: str) -> str:
 
 
 def put_sanity_fault(submission_id: str, digest: str, detail: dict) -> str | None:
-    """Upload a terminal pre-eval fault report. Returns the s3:// URI, or None if disabled/failed."""
     if not ENABLED:
         log.debug("S3 disabled (ALBEDO_S3_* unset); skipping sanity fault upload for {}", submission_id)
         return None
@@ -61,6 +52,6 @@ def put_sanity_fault(submission_id: str, digest: str, detail: dict) -> str | Non
         uri = f"s3://{S3_BUCKET}/{key}"
         log.info("uploaded sanity fault {}", uri)
         return uri
-    except Exception as exc:  # noqa: BLE001 — never wedge pre-eval on an upload
+    except Exception as exc:
         log.warning("S3 put({}) failed: {}", key, exc)
         return None

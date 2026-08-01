@@ -1,4 +1,3 @@
-"""Killable, stall-aware supervised downloads for the sanity/validation storage path."""
 from __future__ import annotations
 
 import subprocess
@@ -21,7 +20,6 @@ def test_supervise_kills_stalled_child(tmp_path, monkeypatch):
     launched: list[subprocess.Popen] = []
 
     def fake_spawn(child_call, args, log_path):
-        # Never writes to watch_dir and refuses to exit — a wedged transfer.
         proc = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(600)"],
             start_new_session=True,
@@ -36,9 +34,9 @@ def test_supervise_kills_stalled_child(tmp_path, monkeypatch):
     with pytest.raises(TimeoutError, match="made no progress"):
         _supervise.supervise_download(child_call="x", args=[], watch_dir=watch, label="ns/m")
 
-    assert len(launched) == 2  # stalled once, retried, then gave up
+    assert len(launched) == 2
     for proc in launched:
-        assert proc.poll() is not None  # every stalled child was terminated
+        assert proc.poll() is not None
 
 
 def test_supervise_progress_resets_retry_budget(tmp_path, monkeypatch):
@@ -50,7 +48,6 @@ def test_supervise_progress_resets_retry_budget(tmp_path, monkeypatch):
     launched: list[subprocess.Popen] = []
 
     def fake_spawn(child_call, args, log_path):
-        # Attempt 2 lands new bytes before wedging; every other attempt writes nothing.
         if len(launched) == 1:
             (watch / f"shard{len(launched)}").write_bytes(b"x" * 4096)
         proc = subprocess.Popen(
@@ -65,7 +62,6 @@ def test_supervise_progress_resets_retry_budget(tmp_path, monkeypatch):
     with pytest.raises(TimeoutError, match="consecutive"):
         _supervise.supervise_download(child_call="x", args=[], watch_dir=watch, label="ns/m")
 
-    # fruitless(1) → progress resets(2) → fruitless(3) → fruitless(4) = 2 consecutive → give up
     assert len(launched) == 4
     for proc in launched:
         assert proc.poll() is not None
@@ -92,7 +88,6 @@ def test_summarize_error_log_keeps_final_exception_only():
     assert "Repository Not Found for url" in summary
     assert "Please make sure" not in summary
     assert len(summary) <= 300
-    # No exception line at all -> last line, capped.
     assert _supervise._summarize_error_log("plain output\nlast line") == "last line"
     assert _supervise._summarize_error_log("") == "(no output captured)"
 
@@ -147,7 +142,6 @@ def test_hf_full_download_routes_through_supervisor(tmp_path, monkeypatch):
 
     assert "_download_child" in calls["child_call"]
     assert calls["args"][0] == "ns/m" and calls["args"][1] == _GIT_SHA1
-    # HF uses the module-default limits (no override passed).
     assert calls["stall_seconds"] is None and calls["max_attempts"] is None
 
 
@@ -188,7 +182,6 @@ def test_hippius_full_download_routes_through_supervisor(tmp_path, monkeypatch):
 
     assert "config_validation.storage._hippius" in calls["child_call"]
     assert calls["args"][0] == "ns/m" and calls["args"][1] == _SHA256
-    # Hippius passes its own wider limits, higher than the HF defaults.
     assert calls["stall_seconds"] == _supervise.HIPPIUS_STALL_SECONDS
     assert calls["max_attempts"] == _supervise.HIPPIUS_STALL_RETRIES
     assert _supervise.HIPPIUS_STALL_SECONDS > _supervise.STALL_SECONDS

@@ -1,4 +1,3 @@
-"""Fast shard downloads: planning, skip/verify logic, and file-granular retries."""
 from __future__ import annotations
 
 import hashlib
@@ -54,7 +53,7 @@ def test_fetch_skips_complete_files(tmp_path, monkeypatch):
 def test_fetch_redownloads_wrong_size_or_bad_sidecar(tmp_path, monkeypatch):
     payload = b"weights"
     spec = _spec("model.safetensors", payload)
-    (tmp_path / spec.name).write_bytes(b"trunc")  # wrong size, no sidecar
+    (tmp_path / spec.name).write_bytes(b"trunc")
     monkeypatch.setattr(_fastdl, "plan_shards", lambda *a, **k: [spec])
     fetched = []
 
@@ -78,14 +77,13 @@ def test_fetch_retries_then_succeeds_on_sha_mismatch(tmp_path, monkeypatch):
 
     def flaky_fetch(url, tmp, s, headers):
         calls.append(1)
-        # First attempt: right size, wrong bytes (corrupt transfer). Then correct.
         Path(tmp).write_bytes(b"wrights" if len(calls) == 1 else payload)
 
     monkeypatch.setattr(_fastdl, "_fetch_one", flaky_fetch)
     _fastdl.fetch_shards("ns/m", _REV, tmp_path, token=None)
     assert len(calls) == 2
     assert (tmp_path / spec.name).read_bytes() == payload
-    assert not list(tmp_path.glob("*.fastdl"))  # failed tmp cleaned up
+    assert not list(tmp_path.glob("*.fastdl"))
 
 
 def test_fetch_raises_after_file_retries(tmp_path, monkeypatch):
@@ -113,7 +111,7 @@ def test_sha256_heartbeat_writes_blocks_and_correct_digest(tmp_path):
     pulse = tmp_path / "verify-progress.fastdl"
     digest = _fastdl._sha256(target, heartbeat=pulse)
     assert digest == hashlib.sha256(payload).hexdigest()
-    assert pulse.stat().st_size >= 4096  # watchdog sees allocated blocks growing
+    assert pulse.stat().st_size >= 4096
 
 
 def test_clean_stale_removes_temp_corpses(tmp_path):

@@ -18,8 +18,6 @@ class FakeMeta:
 
 
 def _reveal(payload: str) -> str:
-    # Hex-serialized SCALE bytes as RevealedCommitments returns them: a mode-0
-    # compact-length prefix byte, then the utf-8 payload.
     return "0x" + (b"\x00" + payload.encode()).hex()
 
 
@@ -58,7 +56,6 @@ def test_scan_commitments_accepts_only_three_part_v7_payloads():
         "spoofed": False,
     }
 
-    # An HF git-revision pin (bare 40-hex) is a valid v7 digest; a mutable ref is not.
     hf_commit = by_hotkey["hk-hf"]
     assert hf_commit.uid == 10
     assert hf_commit.model_uri == "alice/model-hf@" + "d" * 40

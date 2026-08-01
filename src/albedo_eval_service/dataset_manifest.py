@@ -7,7 +7,6 @@ from typing import Any
 
 
 def load_manifest_file(path: str | Path, *, expected_sha256: str) -> dict[str, Any]:
-    """Load and verify a SWE-ZERO manifest JSON file from local disk."""
 
     manifest_path = Path(path)
     payload = manifest_path.read_bytes()

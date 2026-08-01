@@ -65,7 +65,6 @@ def test_artifact_records_from_verdict_tracks_the_request_and_legacy_names():
         stage_attempt_id=uuid4(),
         artifacts={
             "request": "s3://albedo-artifacts/submissions/1/eval/2/request.json",
-            # no longer written, but a re-delivered pre-change verdict must still map
             "transcript": "s3://albedo-artifacts/submissions/1/eval/2/duel-transcript.jsonl",
             "judge_results": "s3://albedo-artifacts/submissions/1/eval/2/judge-results.jsonl",
         },

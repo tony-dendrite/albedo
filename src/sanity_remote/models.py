@@ -1,4 +1,3 @@
-"""Request/response shapes for the sanity GPU worker API."""
 
 from __future__ import annotations
 
@@ -6,7 +5,6 @@ from pydantic import BaseModel
 
 
 class SanityRunRequest(BaseModel):
-    # A pre-eval generation job: the dispatcher supplies the model and the pre-sampled prompts.
     run_id: str
     model_uri: str
     digest: str

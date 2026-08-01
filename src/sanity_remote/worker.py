@@ -1,4 +1,3 @@
-"""Sanity GPU worker - loads a challenger model, generates responses, runs heuristics."""
 
 from __future__ import annotations
 
@@ -58,8 +57,6 @@ def _warn_if_generation_budget_consumes_context(
 
 
 def _strip_thinking(text: str) -> str:
-    # Qwen may return only the tail of its thinking block (content + </think> + answer).
-    # Keep only the answer after the final close tag so CoT never reaches gates/artifacts.
     if "</think>" in text:
         return text.rsplit("</think>", 1)[1].strip()
     if "<think>" in text:
@@ -72,8 +69,6 @@ def _has_bash_command(text: str) -> bool:
 
 
 def _strip_model_config(model_dir: str) -> None:
-    # Removes keys that can redirect model loading or force unexpected quantization modes.
-    # Also strips from text_config (nested HF layout used by Qwen3.5/3.6 MoE models).
     config_path = Path(model_dir) / "config.json"
     if not config_path.exists():
         return
@@ -128,7 +123,7 @@ _HIPPIUS_REGISTRY = "https://registry.hippius.com"
 async def _audit_hippius_blobs(model_uri: str, digest: str) -> str:
     repo, ref_digest = _model_ref_parts(model_uri, digest)
     if not ref_digest.startswith("sha256:"):
-        return ""  # HF-backend model — its download errors are already explicit
+        return ""
     try:
         async with asyncio.timeout(60):
             async with httpx.AsyncClient(timeout=10.0) as c:
@@ -160,13 +155,12 @@ async def _audit_hippius_blobs(model_uri: str, digest: str) -> str:
                     names = ", ".join(sorted(dead)[:4]) + ("…" if len(dead) > 4 else "")
                     return f"; blob audit: {len(dead)}/{len(layers)} blobs missing on hippius (404: {names})"
                 return f"; blob audit: all {len(layers)} blobs present"
-    except Exception as exc:  # noqa: BLE001 - audit is best-effort; never mask the original error
+    except Exception as exc:
         logger.debug(f"[sanity-remote] blob audit failed: {exc}")
         return ""
 
 
 class WorkerFault(Exception):
-    # Carries a fault code + retryability for the run's failure event.
     def __init__(self, code: str, message: str, *, retryable: bool = True) -> None:
         super().__init__(message)
         self.code = code
@@ -177,9 +171,6 @@ _SEED_PROCESSOR_FILES = ("preprocessor_config.json", "video_preprocessor_config.
 
 
 def _inject_seed_processor_files(model_dir: str) -> None:
-    """Copy canonical multimodal processor files from the genesis seed into a model dir when
-    absent. Qwen3.6 declares a vision config, so vLLM refuses to construct the model without an
-    image processor even for text-only sanity generation; miner repos often omit these files."""
     if all((Path(model_dir) / f).exists() for f in _SEED_PROCESSOR_FILES):
         return
     try:
@@ -195,7 +186,7 @@ def _inject_seed_processor_files(model_dir: str) -> None:
             for _name in _SEED_PROCESSOR_FILES:
                 if (Path(staged) / _name).exists():
                     shutil.copy2(Path(staged) / _name, Path(seed_dir) / _name)
-    except Exception as exc:  # noqa: BLE001 - never block a run on the inject helper
+    except Exception as exc:
         logger.warning("[sanity-remote] seed processor inject skipped: {}", exc)
         return
     for name in _SEED_PROCESSOR_FILES:
@@ -206,7 +197,6 @@ def _inject_seed_processor_files(model_dir: str) -> None:
 
 
 class VllmEngine:
-    # One warm vLLM process; swaps the model only when the digest changes (ported from runner.py).
 
     def __init__(self, settings: SanityRemoteSettings) -> None:
         self._s = settings
@@ -218,7 +208,6 @@ class VllmEngine:
         self._kill_port_squatter()
 
     async def run_job(self, model_uri: str, digest: str, prompts: list[str], max_tokens: int, prompt_messages: list[list[dict[str, str]]] | None = None,) -> list[str]:
-        # Serializes one generation job: ensure the model is loaded, then generate the prompts.
         n = len(prompt_messages) if prompt_messages is not None else len(prompts)
         logger.info("[sanity-remote] run_job digest={:.16} prompts={} max_tokens={}", digest, n, max_tokens)
         _warn_if_generation_budget_consumes_context(
@@ -235,25 +224,19 @@ class VllmEngine:
             return await self._run_prompts(digest, prompts, max_tokens)
 
     async def teardown(self) -> None:
-        # Frees the GPUs after a run by killing vLLM and forcing a cold load next time.
-        # Mirrors the eval server's per-run fresh-process pattern (remote_generation.py).
         async with self._lock:
             await self._kill_vllm()
             self._loaded_digest = ""
 
     def _kill_port_squatter(self) -> None:
-        # On startup, kill any orphaned vLLM process that may still hold the configured port.
-        # Without this, a restart of the worker process leaves _proc=None so _kill_vllm() is
-        # a no-op, _wait_healthy() immediately returns True against the old server, and the new
-        # digest is written to _loaded_digest while vLLM still serves the previous model → 404.
         import socket
 
         try:
             with socket.socket() as s:
                 s.settimeout(0.5)
                 if s.connect_ex(("127.0.0.1", self._s.vllm_port)) != 0:
-                    return  # port is free, nothing to kill
-        except Exception as exc:  # noqa: BLE001 - port probe is best-effort
+                    return
+        except Exception as exc:
             logger.debug(f"[sanity-remote] port squatter socket check failed: {exc}")
             return
         try:
@@ -267,17 +250,15 @@ class VllmEngine:
                 try:
                     os.kill(int(pid_str), signal.SIGKILL)
                     logger.info("[sanity-remote] killed orphan vLLM pid={} on port {}", pid_str, self._s.vllm_port,)
-                except Exception as exc:  # noqa: BLE001 - best-effort kill of orphan pid
+                except Exception as exc:
                     logger.debug(f"[sanity-remote] failed to kill orphan pid={pid_str}: {exc}")
-        except Exception as exc:  # noqa: BLE001 - best-effort lsof + pid parse
+        except Exception as exc:
             logger.debug(f"[sanity-remote] lsof/pid parse for port squatter failed: {exc}")
 
     def forget(self) -> None:
-        # Forces a reload next time; keeps _loaded_dir so a stale model stays reclaimable.
         self._loaded_digest = ""
 
     async def _ensure_model(self, model_uri: str, digest: str) -> None:
-        # Reuses a healthy warm model, otherwise downloads + swaps vLLM to the new digest.
         if digest == self._loaded_digest and await self._healthy():
             logger.info("[sanity-remote] reusing warm model {:.16}", digest)
             return
@@ -286,7 +267,7 @@ class VllmEngine:
             model_dir = await asyncio.wait_for(self._materialize(model_uri, digest), timeout=self._s.download_timeout_s)
         except asyncio.TimeoutError as exc:
             raise WorkerFault("download_timeout", f"download exceeded {self._s.download_timeout_s}s") from exc
-        except Exception as exc:  # noqa: BLE001 - download failures are retryable infra by default
+        except Exception as exc:
             detail = await _audit_hippius_blobs(model_uri, digest)
             raise WorkerFault("download_failed", f"model download failed: {exc}{detail}") from exc
 
@@ -297,14 +278,13 @@ class VllmEngine:
         await asyncio.to_thread(_strip_model_config, model_dir)
         try:
             await self._start_vllm(model_dir, digest)
-        except Exception as exc:  # noqa: BLE001 - boot failures are retryable infra
+        except Exception as exc:
             raise WorkerFault("vllm_boot_failed", f"vLLM did not start: {exc}") from exc
         self._loaded_digest = digest
         if old_dir and old_dir != model_dir:
             await asyncio.to_thread(shutil.rmtree, old_dir, True)
 
     async def _materialize(self, model_uri: str, digest: str) -> str:
-        # Reuse an already-downloaded copy if present; otherwise download from Hippius.
         from model_validation.storage import cache_dir, download_full, make_ref
 
         repo, ref_digest = _model_ref_parts(model_uri, digest)
@@ -317,8 +297,6 @@ class VllmEngine:
             try:
                 dest = await asyncio.to_thread(download_full, ref)
             except Exception:
-                # A failed download leaves a partial dir that would pass _model_present's
-                # shard check on old copies without an index and poison every retry.
                 await asyncio.to_thread(shutil.rmtree, dest, True)
                 raise
         from albedo_eval_service.canonical_model_config import apply_canonical_model_config
@@ -328,7 +306,6 @@ class VllmEngine:
         return dest
 
     async def _start_vllm(self, model_dir: str, model_name: str) -> None:
-        # Launches a vLLM subprocess (no --trust-remote-code) and waits until it reports healthy.
         logger.info("[sanity-remote] starting vLLM port={} model={:.40}", self._s.vllm_port, model_name)
         cmd = [
             self._s.vllm_python,
@@ -377,8 +354,6 @@ class VllmEngine:
             env={
                 **os.environ,
                 "CUDA_VISIBLE_DEVICES": self._s.gpu_ids,
-                # Disables the FlashInfer sampler; required on A6000 (CUB version mismatch),
-                # harmless on 5090/B200 (falls back to PyTorch-native sampler).
                 "VLLM_USE_FLASHINFER_SAMPLER": "0",
             },
             start_new_session=True,
@@ -391,7 +366,6 @@ class VllmEngine:
         )
 
     async def _healthy(self) -> bool:
-        # True only if the process is alive AND its health endpoint responds 200.
         if self._proc is None or self._proc.poll() is not None:
             return False
         try:
@@ -399,20 +373,17 @@ class VllmEngine:
                 return (
                     await c.get(f"http://localhost:{self._s.vllm_port}/health")
                 ).status_code == 200
-        except Exception as exc:  # noqa: BLE001 - any probe failure means not healthy
+        except Exception as exc:
             logger.debug(f"[sanity-remote] health probe failed: {exc}")
             return False
 
     async def _wait_healthy(self, timeout: float) -> None:
-        # Polls the vLLM health endpoint until 200, the process dies, or the timeout expires.
         url = f"http://localhost:{self._s.vllm_port}/health"
         start = time.monotonic()
         deadline = start + timeout
         async with httpx.AsyncClient(timeout=5.0) as c:
             while time.monotonic() < deadline:
                 if self._proc is not None and self._proc.poll() is not None:
-                    # Fail fast with the real story: a model with missing/corrupt files kills
-                    # vLLM in seconds; waiting out the full timeout misreports it as a hang.
                     raise RuntimeError(
                         f"vLLM process exited rc={self._proc.returncode}"
                         f" after {time.monotonic() - start:.0f}s (crashed before becoming healthy)"
@@ -420,16 +391,12 @@ class VllmEngine:
                 try:
                     if (await c.get(url)).status_code == 200:
                         return
-                except Exception as exc:  # noqa: BLE001 - keep polling until the deadline
+                except Exception as exc:
                     logger.debug(f"[sanity-remote] health poll retry: {exc}")
                 await asyncio.sleep(2.0)
         raise RuntimeError(f"vLLM did not become healthy within {timeout}s")
 
     async def _run_prompts(self, model_name: str, prompts: list[str], max_tokens: int) -> list[str]:
-        # Per prompt: HTTP-error/malformed -> "" (model fault); transport error -> raise (infra).
-        #
-        # Keep this aligned with the full eval worker: SWE-ZERO prompts are already formatted
-        # with the Qwen chat template, so they should be sent as raw completions.
         url = f"http://localhost:{self._s.vllm_port}/v1/completions"
         timeout = httpx.Timeout(connect=5.0, read=self._s.gen_read_timeout_s, write=5.0, pool=5.0)
 
@@ -483,13 +450,12 @@ class VllmEngine:
         return list(results)
 
     async def _kill_vllm(self) -> None:
-        # Kills the vLLM process group; retries once if it doesn't exit within 5 seconds.
         if not self._proc:
             return
         logger.info("[sanity-remote] killing vLLM pid={}", self._proc.pid)
         try:
             os.killpg(os.getpgid(self._proc.pid), signal.SIGKILL)
-        except Exception as exc:  # noqa: BLE001 - process may already be gone
+        except Exception as exc:
             logger.debug(f"[sanity-remote] killpg failed (process may be gone): {exc}")
         try:
             self._proc.wait(timeout=5)
@@ -498,9 +464,9 @@ class VllmEngine:
             try:
                 self._proc.kill()
                 self._proc.wait(timeout=5)
-            except Exception as exc:  # noqa: BLE001 - best-effort kill
+            except Exception as exc:
                 logger.debug(f"[sanity-remote] retry kill failed: {exc}")
-        except Exception as exc:  # noqa: BLE001 - best-effort reap
+        except Exception as exc:
             logger.debug(f"[sanity-remote] reap failed: {exc}")
         self._proc = None
 
@@ -509,7 +475,6 @@ _ENGINE: VllmEngine | None = None
 
 
 def _engine() -> VllmEngine:
-    # Lazily builds the process-wide vLLM engine singleton.
     global _ENGINE
     if _ENGINE is None:
         _ENGINE = VllmEngine(get_remote_settings())
@@ -517,7 +482,6 @@ def _engine() -> VllmEngine:
 
 
 def _heuristics(responses: list[str], req: Any, skip: bool = False) -> list[dict[str, Any]]:
-    # Per-response heuristic verdicts; a set-level collapse signal fails all responses.
     if skip:
         logger.info("[sanity-remote] heuristics skipped for {} responses", len(responses))
         return [{"passed": True, "reason": "heuristics disabled"} for _ in responses]
@@ -550,7 +514,6 @@ def _heuristics(responses: list[str], req: Any, skip: bool = False) -> list[dict
 
 
 async def generate(run: SanityRun, settings: SanityRemoteSettings | None = None) -> None:
-    # Executes one run: ensure model -> generate -> heuristics -> emit result (or a fault).
     s = settings or get_remote_settings()
     req = run.request
     logger.info("[sanity-remote] generate start run={} digest={:.16} uri={}", run.run_id, req.digest, req.model_uri,)
@@ -590,21 +553,18 @@ async def generate(run: SanityRun, settings: SanityRemoteSettings | None = None)
             fault,
         )
         run.fail(fault_code=fault.code, fault_message=str(fault), retryable=fault.retryable)
-    except Exception as exc:  # noqa: BLE001 - never let a worker crash strand the run
+    except Exception as exc:
         engine.forget()
         logger.exception("[sanity-remote] generation failed for {}", req.digest)
         run.fail(fault_code="worker_error", fault_message=str(exc), retryable=True)
     finally:
-        # Tear down vLLM so both GPUs free up between preevals (eval-server parity);
-        # the next run cold-loads. Best-effort: never let teardown strand the run.
         if req.teardown_after_run:
             try:
                 await engine.teardown()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception("[sanity-remote] vLLM teardown after run failed (best-effort)")
 
 
 async def teardown(settings: SanityRemoteSettings | None = None) -> None:
-    # Dispatcher-side multi-turn runs keep vLLM warm between turns, then call this once at the end.
     engine = _engine()
     await engine.teardown()

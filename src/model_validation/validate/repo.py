@@ -1,9 +1,3 @@
-"""Strict file-manifest check for a Hippius model repo.
-
-A repo must contain every required file, at least one *.safetensors, only allowlisted
-extras (exact names or globs), no forbidden files, and nothing unexpected. Allowlist comes
-from config.py.
-"""
 from __future__ import annotations
 
 import fnmatch
@@ -16,7 +10,6 @@ def _matches_any(name: str, globs: tuple[str, ...]) -> bool:
 
 
 def check(files: list[str]) -> tuple[bool, str]:
-    """Return (ok, message). message is empty when ok."""
     present = set(files)
 
     missing = [f for f in config.REQUIRED_FILES if f not in present]

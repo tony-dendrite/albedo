@@ -1,4 +1,3 @@
-"""Block-paced loop: scan the chain each new block and persist the diff to Postgres."""
 from __future__ import annotations
 
 import asyncio
@@ -17,15 +16,13 @@ async def run() -> None:
     log.info("chain_reader started — netuid={} network={} start_block={} ignore_commits_to_block={} (startup: full scan, diff-only insert)",
              config.NETUID, config.NETWORK, config.START_BLOCK, config.IGNORE_COMMITS_TO_BLOCK)
 
-    # chain_guard startup backfill: seed used_hotkeys with every hotkey that committed at/before
-    # IGNORE_COMMITS_TO_BLOCK, so those hotkeys are blocked from eval. Idempotent across restarts.
     if config.IGNORE_COMMITS_TO_BLOCK > 0:
         log.info("chain_guard backfill — starting (ignore_commits_to_block={})", config.IGNORE_COMMITS_TO_BLOCK)
         try:
             raw = await asyncio.to_thread(guard_scan.scan_all_raw, subtensor, config.NETUID)
             seeded = await guard_db.record_legacy(pool, raw, config.IGNORE_COMMITS_TO_BLOCK)
             log.info("chain_guard backfill — finished: scanned={} seeded_blocked_hotkeys={}", len(raw), seeded)
-        except Exception as exc:  # noqa: BLE001 — a backfill failure must not silently leave hotkeys unblocked
+        except Exception as exc:
             log.exception(f"[chain-reader] startup backfill failed, hotkeys may be unblocked: {exc}")
     else:
         log.info("chain_guard backfill — skipped (IGNORE_COMMITS_TO_BLOCK unset/0; no hotkeys blocked)")
@@ -40,8 +37,6 @@ async def run() -> None:
                 if cur != last_block:
                     snapshot = await asyncio.to_thread(chain.metagraph_snapshot, subtensor, config.NETUID, cur)
 
-                    # hotkey-swap guard: ledger swapped-in hotkeys BEFORE ingesting commits, so a
-                    # same-tick commit from one is rejected by the per-commit used_hotkeys check.
                     swaps = guard_swap.find_swaps(await guard_db.load_uid_state(pool), snapshot)
                     if swaps:
                         swaps = await asyncio.to_thread(chain.confirm_swaps, subtensor, swaps, cur)
@@ -55,7 +50,7 @@ async def run() -> None:
                     n_new = await db.insert_new_commits(pool, commits)
                     log.info("block={} scanned={} new={}", cur, len(commits), n_new)
                     last_block = cur
-            except Exception as exc:  # noqa: BLE001 — keep the loop alive across RPC/DB blips
+            except Exception as exc:
                 log.opt(exception=True).warning("tick failed ({}) — retrying", exc)
             await asyncio.sleep(config.POLL_INTERVAL_S)
     finally:

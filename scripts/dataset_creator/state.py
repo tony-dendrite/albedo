@@ -1,13 +1,3 @@
-"""Permanent pipeline ledger in SQLite — records of things CREATED, never reused.
-
-Tables (state.db in the data dir):
-  processed_runs(run_id PK, rows, source, ingested_at, started_at)
-  chunks(path PK, model, created_at, uploaded_at)   -- path is repo-relative
-  meta(key PK, value)                               -- anchor, hf_repo, watcher timestamps
-
-The working buffer of samples still waiting to fill a 100-row chunk lives in
-JSON (see store.py) and is deleted as soon as the rows are consumed.
-"""
 
 from __future__ import annotations
 
@@ -47,7 +37,6 @@ class State:
         self.conn.executescript(_SCHEMA)
         self.conn.commit()
 
-    # --- processed runs ---
     def is_processed(self, run_id: str) -> bool:
         cur = self.conn.execute("SELECT 1 FROM processed_runs WHERE run_id=?", (run_id,))
         return cur.fetchone() is not None
@@ -63,7 +52,6 @@ class State:
     def processed_count(self) -> int:
         return self.conn.execute("SELECT count(*) FROM processed_runs").fetchone()[0]
 
-    # --- chunks ---
     def chunk_exists(self, path: str) -> bool:
         cur = self.conn.execute("SELECT 1 FROM chunks WHERE path=?", (path,))
         return cur.fetchone() is not None
@@ -79,7 +67,6 @@ class State:
         self.conn.commit()
 
     def pending_uploads(self) -> list[tuple[str, str]]:
-        """[(path, model)] of chunks not yet uploaded, oldest first."""
         cur = self.conn.execute(
             "SELECT path, model FROM chunks WHERE uploaded_at IS NULL ORDER BY path")
         return cur.fetchall()
@@ -92,7 +79,6 @@ class State:
         return self.conn.execute(
             "SELECT count(*) FROM chunks WHERE model=?", (model,)).fetchone()[0]
 
-    # --- meta ---
     def get_meta(self, key: str) -> str | None:
         row = self.conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
         return row[0] if row else None

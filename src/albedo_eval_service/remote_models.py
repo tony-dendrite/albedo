@@ -24,13 +24,11 @@ from .remote_config import RemoteSettings
 
 
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
-_HF_GIT_REVISION_RE = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")  # HF git commit (sha1 or sha256 era)
+_HF_GIT_REVISION_RE = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")
 _DEFAULT_OCI_REGISTRY = "registry.hippius.com"
 _HEARTBEAT_INTERVAL_S = 10.0
 _MODEL_PAYLOAD_PATTERNS = ["*.safetensors", "model.safetensors.index.json"]
 
-# hippius chunked-v2 layout markers (hippius-hub >= 0.6.0 writes these by default for
-# files >= 256 MiB): a titled pointer.v2 layer maps a file's bytes onto shared pack blobs.
 _POINTER_MEDIA_TYPE_V2 = "application/vnd.hippius.pointer.v2"
 _LAYOUT_ANNOTATION_KEY = "com.hippius.layout"
 
@@ -80,12 +78,6 @@ def _download_slot(label: str):
 
 @contextmanager
 def _download_heartbeat(label: str, watch_dir: Path | None = None):
-    """Print every ``_HEARTBEAT_INTERVAL_S`` seconds that ``label`` is still downloading.
-
-    Model fetches block with no progress output, so a daemon thread emits a periodic
-    heartbeat until the download finishes. When ``watch_dir`` is given, the current
-    on-disk byte total is included so a stalled transfer is visible in the logs.
-    """
     stop = threading.Event()
     start = time.monotonic()
 
@@ -138,8 +130,6 @@ class ModelArtifactResolver:
         self.cache_root = Path(settings.model_cache_dir)
 
     def resolve(self, model_ref: str) -> ResolvedModel:
-        # Serialize concurrent resolves of the same ref (e.g. a background prefetch
-        # racing the eval worker) so they never write the same cache dir at once.
         with _resolve_lock(model_ref):
             return self._resolve_unlocked(model_ref)
 
@@ -270,8 +260,6 @@ class ModelArtifactResolver:
             shutil.rmtree(cache_dir, ignore_errors=True)
 
         temp_dir = cache_dir.with_suffix(".partial")
-        # Resume an interrupted download: snapshot_download skips files already complete
-        # in the target dir, so keep .partial instead of wiping it on each retry.
         temp_dir.mkdir(parents=True, exist_ok=True)
         with _download_slot(model_ref):
             self._download_hf_snapshot(repo=repo, revision=revision, temp_dir=temp_dir, label=model_ref)
@@ -291,8 +279,6 @@ class ModelArtifactResolver:
         self, *, repo: str, revision: str, temp_dir: Path, label: str
     ) -> None:
         if not self.settings.model_download_out_of_process:
-            # In-process fetch — used by tests that monkeypatch snapshot_download, and
-            # any environment where spawning a child interpreter is undesirable.
             os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
             from huggingface_hub import snapshot_download
 
@@ -320,15 +306,13 @@ class ModelArtifactResolver:
     def _download_hippius_snapshot(
         self, *, registry: str, repository: str, digest: str, temp_dir: Path, label: str
     ) -> None:
-        """Download a chunked-v2 hippius artifact by delegating to hippius_hub, which
-        owns the pointer→pack reassembly (and digest-verifies the reassembled files)."""
         if registry != _DEFAULT_OCI_REGISTRY:
             raise RuntimeError(
                 f"chunked OCI manifest served by unsupported registry {registry!r}; "
                 f"hippius_hub only targets {_DEFAULT_OCI_REGISTRY}"
             )
         try:
-            from hippius_hub._oci import group_files  # noqa: F401 — chunked-capable marker
+            from hippius_hub._oci import group_files
         except ImportError as exc:
             raise RuntimeError(
                 "chunked hippius artifact requires hippius-hub>=0.6.0 on this host; "
@@ -382,14 +366,8 @@ class ModelArtifactResolver:
             shutil.rmtree(cache_dir, ignore_errors=True)
 
         temp_dir = cache_dir.with_suffix(".partial")
-        # Resume an interrupted download: keep shards already fetched into .partial instead of
-        # wiping and re-downloading everything on each retry. A shard's final filename only
-        # appears after it is fully streamed and digest-verified, so anything present is complete.
         temp_dir.mkdir(parents=True, exist_ok=True)
 
-        # A finite read timeout so a dead CDN socket raises (retryable) instead of
-        # blocking a blob stream forever. Only the per-read wait is bounded; a healthy
-        # multi-GB blob keeps resetting it as chunks arrive.
         oci_timeout = httpx.Timeout(
             connect=30.0,
             read=self.settings.model_download_read_timeout_seconds,
@@ -415,9 +393,6 @@ class ModelArtifactResolver:
             if response.request.headers.get("Authorization", "").startswith("Bearer "):
                 token = response.request.headers["Authorization"].removeprefix("Bearer ")
             pending: list[tuple[str, str]] = []
-            # Chunked-v2 manifests are delegated to hippius_hub below: the per-layer
-            # streamer would write the ~200-byte pointer blob AS the model file (its
-            # digest check passes — the pointer blob matches its own digest).
             layers = [] if chunked else manifest.get("layers", [])
             for index, layer in enumerate(layers):
                 layer_digest = layer.get("digest")
@@ -447,7 +422,6 @@ class ModelArtifactResolver:
                 )
                 if auth_response is not None:
                     with token_lock:
-                        # Another worker may have refreshed the token while we streamed.
                         if token == current:
                             token = _bearer_token(client, auth_response, repository)
                         current = token
@@ -555,9 +529,6 @@ def _hf_download_child() -> None:
     except ImportError:
         _fastdl = None
     if _fastdl is not None and _fastdl.available():
-        # Shards via parallel ranged requests, sha256-verified, file-granular restart;
-        # see config_validation/storage/_fastdl.py for why snapshot_download alone
-        # can neither sustain throughput nor resume after a kill.
         snapshot_download(
             repo_id=repo,
             revision=revision,
@@ -621,7 +592,6 @@ def _spawn_hf_download(
             start_new_session=True,
         )
     finally:
-        # Popen holds its own dup of the fd; the parent's copy is no longer needed.
         log_handle.close()
 
 
@@ -664,12 +634,6 @@ _ERROR_LINE = re.compile(r"[A-Za-z_][\w.]*(?:Error|Exception|Interrupt)\b")
 
 
 def _summarize_error_log(text: str, max_chars: int = 300) -> str:
-    """Compress a child's log tail to one human-readable failure reason.
-
-    This string becomes ``fault_message`` and is shown verbatim on the public
-    dashboard — keep the final exception line (plus its explanatory follow-up when
-    present) instead of a raw traceback.
-    """
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if not lines:
         return "(no output captured)"
@@ -716,9 +680,6 @@ def _run_hf_download_supervised(
                 flush=True,
             )
             if current != last_bytes:
-                # A DECREASE is progress too: fastdl unlinks a failed shard's multi-GB
-                # partial before retrying it, and requiring growth past the old peak
-                # would blind the watchdog for the entire re-download of that shard.
                 last_bytes = current
                 last_progress = now
                 progressed = True
@@ -732,8 +693,6 @@ def _run_hf_download_supervised(
                 stalled = True
                 break
         if stalled:
-            # Only consecutive attempts with ZERO byte movement burn the retry budget:
-            # a slow-but-alive transfer is resumed as many times as it needs.
             fruitless = 0 if progressed else fruitless + 1
             if fruitless >= max_attempts:
                 raise TimeoutError(
@@ -856,13 +815,6 @@ def _tree_stats(path: Path) -> tuple[int, int]:
 
 
 def _dir_written_bytes(path: Path) -> int:
-    """Bytes *actually written* under ``path`` (allocated blocks, not apparent size).
-
-    The download watchdog needs a signal that reflects real transfer progress. Some
-    backends (e.g. xet) preallocate a file to its full size before streaming into it,
-    so ``st_size`` sits flat during a healthy download and would trip a false stall;
-    ``st_blocks`` counts blocks actually allocated, which climbs as data lands.
-    """
     total = 0
     for item in path.rglob("*"):
         try:

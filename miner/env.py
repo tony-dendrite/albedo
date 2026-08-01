@@ -1,15 +1,9 @@
-"""Load miner configuration from a ``.env`` file (no external dependency).
-
-Miners copy ``.env.example_miners`` → ``.env`` and fill in their wallet / Hippius / chain
-values. Real process environment variables always win (we only ``setdefault``), so exported
-vars or one-off ``CHAIN_NETWORK=test albedo …`` overrides still take precedence.
-"""
 from __future__ import annotations
 
 import os
 from pathlib import Path
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent  # the albedo repo root
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _load_file(path: Path) -> None:
@@ -27,7 +21,6 @@ def _load_file(path: Path) -> None:
 
 
 def load() -> None:
-    """Load ``.env`` from the repo root and the current working directory (root first)."""
     _load_file(_REPO_ROOT / ".env")
     cwd_env = Path.cwd() / ".env"
     if cwd_env != _REPO_ROOT / ".env":

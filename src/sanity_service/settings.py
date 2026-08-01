@@ -1,4 +1,3 @@
-"""Dispatcher settings for the sanity pre-eval service (SANITY_DISPATCH_* env / .env)."""
 
 from __future__ import annotations
 
@@ -10,7 +9,6 @@ from sanity_service.config import DB_URL as _DEFAULT_DB_URL
 
 
 class SanitySettings(BaseSettings):
-    # Stable-side dispatcher config; the judge key comes from ALBEDO_JUDGE_* (get_judge_settings).
     model_config = SettingsConfigDict(env_file=".env", env_prefix="SANITY_DISPATCH_", extra="ignore")
 
     database_url: str = _DEFAULT_DB_URL
@@ -38,5 +36,4 @@ class SanitySettings(BaseSettings):
 
 @lru_cache
 def get_settings() -> SanitySettings:
-    # Cached settings singleton.
     return SanitySettings()

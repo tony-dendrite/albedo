@@ -1,4 +1,3 @@
-"""Route model storage operations to the HF or Hippius backend per ``ModelRef.backend``."""
 from __future__ import annotations
 
 from config_validation.models import BACKEND_HF, BACKEND_HIPPIUS, ModelRef
@@ -16,22 +15,18 @@ def _impl(ref: ModelRef):
 
 
 def download_config(ref: ModelRef) -> str:
-    """Download only the JSON config files for ``ref``; return the local dir path."""
     return _impl(ref).download_config(ref)
 
 
 def download_full(ref: ModelRef) -> str:
-    """Download the full model snapshot for ``ref``; return the local dir path."""
     return _impl(ref).download_full(ref)
 
 
 def list_files(ref: ModelRef) -> list[str]:
-    """List filenames present in the repo at the pinned revision."""
     return _impl(ref).list_files(ref)
 
 
 def revision_resolves(ref: ModelRef) -> tuple[bool, str]:
-    """Confirm the committed revision resolves on the model's backend. Returns (ok, detail)."""
     return _impl(ref).revision_resolves(ref)
 
 

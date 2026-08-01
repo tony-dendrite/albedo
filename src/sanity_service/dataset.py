@@ -1,4 +1,3 @@
-"""Sanity dataset sampling - reuses the eval SWE-ZERO manifest sampler + loader (stable side)."""
 
 from __future__ import annotations
 
@@ -18,23 +17,18 @@ _FALLBACK_SYSTEM = (
 
 @dataclass(frozen=True)
 class SanitySample:
-    # One sampled prompt to send to the GPU worker (decoupled from the eval EvalSample type).
     prompt: str
     messages: list[dict[str, str]] | None = None
     sample_id: str = ""
 
 
 def sample_prompts(*, seed: str, n: int = 3, max_turns: int = 10, manifest_path: str = "", manifest_hash: str = "", dataset_root: str = "", ) -> list[SanitySample]:
-    # Deterministically samples n SWE-ZERO prompts for a challenger; falls back to prompts.json.
     if manifest_path and dataset_root:
-        # Heavy deps (pyarrow via remote_dataset) load only when a real manifest is configured.
         from albedo_eval_service.dataset_manifest import load_manifest_file
         from albedo_eval_service.remote_dataset import load_swe_zero_samples
         from albedo_eval_service.sampling import multi_source_manifest_sample_ids
 
         manifest = load_manifest_file(manifest_path, expected_sha256=manifest_hash)
-        # The eval sampler emits a fixed 64-id bucket set; the pre-eval only needs n of them
-        # (turn depth is baked into the buckets, so max_turns is no longer threaded through).
         ids = multi_source_manifest_sample_ids(manifest, block_hash=str(seed))
         sample_ids = random.Random(str(seed)).sample(ids, min(n, len(ids)))
         loaded = load_swe_zero_samples(dataset_root=dataset_root, sample_ids=sample_ids)
@@ -43,7 +37,6 @@ def sample_prompts(*, seed: str, n: int = 3, max_turns: int = 10, manifest_path:
 
 
 def _fallback_prompts(n: int) -> list[SanitySample]:
-    # Static prompts.json fallback for local/dev when no SWE-ZERO manifest is configured.
     prompts: list[str] = json.loads(_PROMPTS_FILE.read_text())[:n]
     return [
         SanitySample(

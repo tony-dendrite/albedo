@@ -37,7 +37,6 @@ from albedo_eval_service.judge_openrouter import JudgeRawResponse, OpenRouterJud
 
 
 _RC_OBSERVATION = "<returncode>0</returncode>\n<output>\nok\n</output>"
-# a prefix whose environment turn is mini-swe-agent, so the simulator detects that format
 _RC_PREFIX = [
     {"role": "user", "content": "task"},
     {"role": "assistant", "content": "```bash\nls\n```"},
@@ -46,7 +45,6 @@ _RC_PREFIX = [
 
 
 class FakeClient:
-    """Evaluator returns N questions; judges answer all-1 for the challenger, all-0 for the king."""
 
     def __init__(self, n_questions: int = 3):
         self.n_questions = n_questions
@@ -63,11 +61,9 @@ class FakeClient:
 
 
 def test_evaluator_provider_is_always_fp8():
-    # order list -> fallbacks off; failover is the retry-rotation over the list.
     settings = JudgeSettings(evaluator_providers="prov-a, prov-b")
     provider = _evaluator_provider(settings)
     assert provider == {"allow_fallbacks": False, "quantizations": ["fp8"], "order": ["prov-a", "prov-b"]}
-    # no providers listed -> still fp8 + allow_fallbacks (OpenRouter fails over across fp8 providers)
     bare = _evaluator_provider(JudgeSettings(evaluator_providers=""))
     assert bare == {"allow_fallbacks": True, "quantizations": ["fp8"]}
 
@@ -127,7 +123,6 @@ def test_observation_simulation_primary_single_shot_then_fallback():
         assistant_output="```bash\npwd\n```",
     )
 
-    # Primary succeeds: exactly one single-shot primary call, the fallback is never consulted.
     client = SimClient()
     service = ObservationSimulationService(settings, client)
     observation = asyncio.run(service.simulate(request))
@@ -139,10 +134,8 @@ def test_observation_simulation_primary_single_shot_then_fallback():
     assert primary_call["retry_count"] == 0
     assert primary_call["max_tokens"] == 123
     assert primary_call["accept"](_RC_OBSERVATION) is True
-    # the transcript is mini-swe-agent, so another corpus's dialect is rejected
     assert primary_call["accept"]("Observation: ok") is False
 
-    # Primary errors (e.g. provider pin rejected): fallback runs with the full retry budget.
     client = SimClient(fail_first=True)
     service = ObservationSimulationService(settings, client)
     observation = asyncio.run(service.simulate(request))
@@ -157,7 +150,6 @@ def test_observation_simulation_primary_single_shot_then_fallback():
 def test_observation_simulation_falls_back_on_invalid_format():
     class BadSimClient:
         async def complete(self, **kwargs):
-            # a foreign corpus's dialect: invalid under every format we still simulate
             return JudgeRawResponse(model=kwargs["model"], provider="fake", raw="Observation: nope")
 
     async def run(sample_id):
@@ -212,13 +204,11 @@ def test_scoring_scores_both_sides_independently():
     assert record["scored"] is True
     assert record["challenger_score"] == 1.0
     assert record["king_score"] == 0.0
-    # 2 sides x 3 judges
     assert len(record["judge_results"]) == 6
     assert {r["side"] for r in record["judge_results"]} == {"previous_king", "challenger"}
 
 
 def test_call_retries_until_accept_passes():
-    # _score_with_retries returns bad, bad, good; accept passes only on "good" -> 3rd call wins.
     settings = JudgeSettings(openrouter_api_key="x", parse_retries=3)
     client = OpenRouterJudgeClient(settings)
     calls = {"n": 0}
@@ -256,12 +246,11 @@ def test_call_gives_up_after_parse_retries():
         return r
 
     result = asyncio.run(run())
-    assert result.raw == "bad"        # returns last attempt
-    assert calls["n"] == 3            # bounded at parse_retries
+    assert result.raw == "bad"
+    assert calls["n"] == 3
 
 
 class OneJudgeBrokenClient:
-    """Evaluator ok; JUDGE_MODELS[0] always returns unparseable output; the other judges are fine."""
 
     def __init__(self, n_questions=3):
         self.n_questions = n_questions
@@ -288,7 +277,6 @@ def test_sample_unscored_if_a_judge_never_parses():
         samples=[JudgeSample(sample_id="s1", prompt="task", previous_king_output="KING", challenger_output="CHAL")],
     )
     records = asyncio.run(_score_samples(client=fake, request=request, settings=settings, prep_store=store))
-    # one judge never parsed -> sample invalid (all 3 judges required per side)
     assert records[0]["scored"] is False
 
 
@@ -351,9 +339,7 @@ def test_scoring_regenerates_questions_when_async_prep_failed():
     assert fake.complete_calls == 2
 
 
-# --------------------------------------------------------------------- reference anchoring
 class _AnchorFakeClient:
-    """Reference turns for the SOTA model; distinct question sets for anchored vs task-only."""
 
     def __init__(self, n_questions: int = 30, fail_reference: bool = False):
         self.n_questions = n_questions
@@ -363,7 +349,7 @@ class _AnchorFakeClient:
     async def complete(self, *, model, messages, temperature=None, max_tokens=None,
                        provider=None, response_schema=None, accept=None, purpose="",
                        parse_retries=None, retry_count=None):
-        if response_schema is None:  # reference-trajectory or observation-simulation call
+        if response_schema is None:
             if self.fail_reference:
                 return JudgeRawResponse(model=model, provider="fake", raw="", error="boom")
             if messages[0]["role"] == "system" and "ENVIRONMENT" in messages[0]["content"]:
@@ -374,7 +360,6 @@ class _AnchorFakeClient:
             )
         if "REFERENCE TRAJECTORY" in messages[1]["content"]:
             self.saw_reference_prompt = True
-        # Short unique texts survive parse_questions' template/near-dup filters.
         questions = [
             {"text": f"q{i} gate{i}?", "example_bad": "bad"}
             for i in range(self.n_questions)

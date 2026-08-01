@@ -1,4 +1,3 @@
-"""Read on-chain commitments (miner side) — reuses the validator's chain scanner."""
 from __future__ import annotations
 
 from loguru import logger
@@ -7,7 +6,6 @@ from chain_reader.chain import connect, scan_commitments
 
 
 def fetch(netuid: int, network: str, hotkey: str | None = None) -> list:
-    """Return v7 commits on ``netuid`` (optionally filtered to one hotkey), oldest block first."""
     logger.info(f"connecting to {network}…")
     sub = connect(network)
     logger.info(f"scanning commitments on netuid {netuid}…")

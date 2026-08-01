@@ -1,4 +1,3 @@
-"""Async Postgres layer for the model validation stage."""
 
 from __future__ import annotations
 
@@ -31,7 +30,6 @@ async def connect(db_url: str) -> asyncpg.Pool:
 
 
 async def enqueue_from_commits(pool: asyncpg.Pool, netuid: int) -> int:
-    """Repair legacy chain_commits that do not yet have model_submissions."""
     async with pool.acquire() as conn:
         row = await conn.fetchval(
             """
@@ -88,7 +86,6 @@ async def enqueue_from_commits(pool: asyncpg.Pool, netuid: int) -> int:
 async def claim_next(
     pool: asyncpg.Pool, worker_id: str, lease_seconds: int
 ) -> asyncpg.Record | None:
-    """Claim the oldest submitted or retryable model for Hippius validation."""
     async with pool.acquire() as conn:
         async with conn.transaction():
             submission = await conn.fetchrow(
@@ -280,7 +277,6 @@ async def mark_retry(
     fault_code: str,
     fault_message: str,
 ) -> str:
-    """Infra fault: persist HIPPIUS_RETRYABLE if under cap, else terminal infra failure."""
     terminal = attempt_number >= max_attempts
     attempt_state = "FAILED_TERMINAL" if terminal else "FAILED_RETRYABLE"
     visible_state = "TERMINAL_INFRA_FAILED" if terminal else "HIPPIUS_RETRYABLE"
@@ -329,7 +325,6 @@ async def mark_retry(
 
 
 async def sweep_expired(pool: asyncpg.Pool) -> int:
-    """Return expired Hippius attempts to HIPPIUS_RETRYABLE for crash recovery."""
     async with pool.acquire() as conn:
         async with conn.transaction():
             rows = await conn.fetch(
@@ -373,7 +368,6 @@ async def sweep_expired(pool: asyncpg.Pool) -> int:
 
 
 async def hotkey_validated(pool: asyncpg.Pool, hotkey: str) -> bool:
-    """Has this hotkey already had a model pass Hippius validation or beyond?"""
     async with pool.acquire() as conn:
         return bool(
             await conn.fetchval(
@@ -411,7 +405,6 @@ async def hotkey_sanity_block_reason(pool: asyncpg.Pool, hotkey: str) -> str | N
 async def model_hash_holder(
     pool: asyncpg.Pool, model_hash: str, exclude_submission_id
 ) -> asyncpg.Record | None:
-    """The submission (if any) that already holds this model_hash — an exact-digest duplicate."""
     async with pool.acquire() as conn:
         return await conn.fetchrow(
             """
@@ -426,7 +419,6 @@ async def model_hash_holder(
 
 
 async def hotkey_duplicate_block_reason(pool: asyncpg.Pool, hotkey: str) -> str | None:
-    """fault_message of this hotkey's most recent duplicate rejection, or None."""
     async with pool.acquire() as conn:
         return await conn.fetchval(
             """

@@ -1,4 +1,3 @@
-"""Tests for the sanity response heuristics (checks.py) and the worker's _heuristics wrapper."""
 
 from __future__ import annotations
 
@@ -23,7 +22,6 @@ from sanity_service.checks import (
 from sanity_service.dataset import sample_prompts
 from sanity_service.dispatcher import _format_scored_trajectory
 
-# ── per-response checks ─────────────────────────────────────────────────────────
 
 
 def test_check_one_passes_clean_code_answer():
@@ -32,7 +30,7 @@ def test_check_one_passes_clean_code_answer():
 
 def test_check_one_flags_empty_then_short():
     assert check_one("").reason == "empty response"
-    assert not check_one("one two").passed  # below min_tokens=5
+    assert not check_one("one two").passed
 
 
 def test_check_repetition_catches_token_loop():
@@ -46,25 +44,22 @@ def test_check_encoding_catches_garbled_weights():
 
 
 def test_check_vocabulary_catches_low_variety():
-    # High trigram diversity but only two unique tokens -> repetition passes, vocabulary fails.
     assert not check_vocabulary("a b a b a b a b a b").passed
     assert check_vocabulary("alpha beta gamma delta epsilon zeta eta theta").passed
 
 
-# ── cross-prompt checks ─────────────────────────────────────────────────────────
 
 
 def test_check_collapsed_flags_identical_responses():
     assert not check_collapsed(["same", "same", "same"]).passed
     assert check_collapsed(["one", "two", "three"]).passed
-    # single response must never fail - a set of size 1 is expected for n=1
     assert check_collapsed(["any single response"]).passed
 
 
 def test_check_uniform_length_flags_identical_token_counts():
     assert not check_uniform_length(["a b c", "d e f", "g h i"]).passed
     assert check_uniform_length(["a b", "c d e"]).passed
-    assert check_uniform_length(["only one"]).passed  # single response cannot collapse
+    assert check_uniform_length(["only one"]).passed
 
 
 def test_check_code_present_requires_a_keyword_somewhere():
@@ -78,7 +73,6 @@ def test_check_all_reports_first_failure_with_prompt_index():
     assert result.reason.startswith("prompt 2/3:")
 
 
-# ── worker _heuristics wrapper ──────────────────────────────────────────────────
 
 
 def _req() -> SanityRunRequest:
@@ -278,7 +272,6 @@ def test_heuristics_passes_varied_code_responses():
     assert all(v["passed"] for v in out), out
 
 
-# ── _strip_thinking fallback (Option B) ────────────────────────────────────────
 
 
 _CURSED_RAW = (
@@ -296,8 +289,6 @@ _CURSED_RAW_WITH_CODE = (
 
 
 def test_heuristics_passes_cursed_think_output():
-    # Unclosed <think> content fed directly as the answer should pass all checks
-    # because the raw output contains code keywords and is non-empty/non-repetitive.
     responses = [
         _CURSED_RAW_WITH_CODE,
         "<think>\nTHOUGHT: read the file first\nACTION: cat pkg/version/version.go\n",
@@ -308,7 +299,6 @@ def test_heuristics_passes_cursed_think_output():
 
 
 def test_heuristics_empty_vllm_still_fails():
-    # A truly empty vLLM response (model produced nothing) must still be caught.
     out = _heuristics(["", "", ""], _req())
     assert not any(v["passed"] for v in out)
     assert all(v["reason"] == "empty response" for v in out)

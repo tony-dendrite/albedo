@@ -1,4 +1,3 @@
-"""validate — Hippius repo file-manifest check + universal (spec-driven) architecture check."""
 
 from model_validation.validate.architecture import check as check_architecture
 from model_validation.validate.dtype import check as check_dtype

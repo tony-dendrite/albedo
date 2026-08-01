@@ -1,4 +1,3 @@
-"""Resolve the current SN97 king from the eval Postgres (slot 1 of the active reign)."""
 
 from __future__ import annotations
 
@@ -39,8 +38,6 @@ WHERE kv.version <= %s
 ORDER BY kv.version ASC
 """
 
-# Which king_versions rows count towards the lineage number — kept in sync with
-# scripts/king_hf_uploader.py, which names the HF mirrors after that number.
 _QWEN_PATTERNS = ("qwen3.6", "qwen3-6", "qwen3_6")
 _SIZE_PATTERNS = ("35b", "35-b")
 _GENESIS_MARKERS = ("qwen3.6-35b-a3b-genesis", "35b-a3b-genesis")
@@ -58,7 +55,7 @@ class King:
     uid: int | None = None
     hotkey: str | None = None
     king_version: int | None = None
-    roman: str = ""  # lineage number ("XCVI"), i.e. which HF mirror repo holds this king
+    roman: str = ""
 
     @property
     def digest(self) -> str:
@@ -76,9 +73,6 @@ def _to_roman(n: int) -> str:
 
 
 def _lineage_roman(conn, king_version: int) -> str:
-    """Position of this king in the crowned lineage, as a roman numeral. Genesis reigns and models
-    off the current architecture are not counted (same enumeration as the HF uploader, so the number
-    matches the mirror repo name); "" when it cannot be determined."""
     number = 0
     for row in conn.execute(_LINEAGE_SQL, (king_version,)):
         text = " ".join(
@@ -97,9 +91,6 @@ def _lineage_roman(conn, king_version: int) -> str:
 
 
 def _resolve_dsn(settings: KingChatSettings) -> str:
-    """DSN precedence: explicit KING_CHAT_DATABASE_URL/ALBEDO_EVAL_DATABASE_URL, else the box's existing
-    ALBEDO_POSTGRES_* parts (reuses model_validation.config.DB_URL — same eval DB the box already uses,
-    so no new DB secret is needed). Importing that module also loads albedo/.env into the environment."""
     if settings.database_url:
         return settings.database_url
     try:
@@ -111,7 +102,6 @@ def _resolve_dsn(settings: KingChatSettings) -> str:
 
 
 def current_king(settings: KingChatSettings) -> King | None:
-    """Return the current king, or None on empty reign / DB error (caller keeps the warm server)."""
     if settings.king_override_uri:
         return King(model_uri=settings.king_override_uri, model_hash=settings.king_override_hash)
 

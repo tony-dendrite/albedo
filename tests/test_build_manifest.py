@@ -24,8 +24,6 @@ _STRATEGIES = ["pr_1", "lm_rewrite__a", "combine_file__b", "func_pm_remove_cond_
 
 
 def _conversation(asst: int, edit_at: int) -> list[dict]:
-    """`asst` assistant turns, the one at `edit_at` (1-based) carrying an edit command so
-    _row_meta can resolve first_edit."""
     turns = [{"role": "system", "content": "s"}]
     for i in range(1, asst + 1):
         turns.append({"role": "user", "content": "o"})
@@ -35,11 +33,8 @@ def _conversation(asst: int, edit_at: int) -> list[dict]:
 
 def _write_shard(data_dir: Path, name: str, rows: int, *, asst: int = 12) -> None:
     data_dir.mkdir(parents=True, exist_ok=True)
-    # Rows cycle through the four bug families (via the instance_id grammar) and edit depths, so the
-    # enriched manifest carries the {iid, asst, first_edit, family} the sampler strata need.
     table = pa.table(
         {
-            # repo varies: the sampler caps how many tasks one codebase can supply (REPO_CAP).
             "instance_id": [
                 f"owner__repo{i}.abc1234.{_STRATEGIES[i % len(_STRATEGIES)]}" for i in range(rows)
             ],
@@ -62,7 +57,7 @@ def test_build_source_counts_rows_and_enriches_row_meta(tmp_path):
     source = bm._build_source("mini-coder", tmp_path)
 
     assert source["name"] == "mini-coder"
-    assert "weight" not in source  # the mix is STEP_TRIM x FAMILY_MIX, never a per-source weight
+    assert "weight" not in source
     assert source["total_rows"] == 5
     assert [s["path"] for s in source["shards"]] == [
         "mini-coder/data/train-00000.parquet",
@@ -98,7 +93,6 @@ def test_build_meta_dict_strips_rows_meta_and_aggregates(tmp_path):
     src = meta["sources"][0]
     assert all("rows_meta" not in shard for shard in src["shards"])
     assert src["shards"][0]["rows"] == 4 and len(src["shards"][0]["sha256"]) == 64
-    # blocked rows never enter the sampler pool, so they are excluded from instance stats
     assert src["stats"] == {
         "instances": 3,
         "instances_with_edit": 3,
@@ -107,7 +101,6 @@ def test_build_meta_dict_strips_rows_meta_and_aggregates(tmp_path):
         "languages": {"python": 3},
     }
     assert meta["unique_instances"] == 3
-    # ordered pair lists (sort_keys would scramble dict keys), mirroring the sampler constants
     assert [p[0] for p in meta["sampling"]["phases"]] == ["pre_edit", "at_edit", "cold"]
     assert [f[0] for f in meta["sampling"]["families"]] == ["pr", "lm", "combine", "mechanical"]
 
@@ -136,7 +129,5 @@ def test_built_manifest_is_sampler_compatible(tmp_path):
 
     ids = multi_source_manifest_sample_ids(manifest, block_hash="0xabc", sample_count=100)
     assert len(ids) == 100 == len(set(ids))
-    # instances are pooled across sources, so both contribute; the split is driven by the
-    # STEP_TRIM x FAMILY_MIX grid and pool size, never by a per-source weight
     assert sum(1 for i in ids if i.startswith("mini-coder/")) > 0
     assert sum(1 for i in ids if i.startswith("swe-hero/")) > 0

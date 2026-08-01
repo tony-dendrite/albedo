@@ -1,9 +1,3 @@
-"""Ship chunks to a HF dataset repo, one named split per reference model.
-
-Chunks upload to data/<model>/ only — the repo README/dataset card is managed
-by hand, never touched here. Upload status lives in the SQLite ledger, so
-failures are retried on the next pipeline tick.
-"""
 
 from __future__ import annotations
 
@@ -14,7 +8,6 @@ from state import State
 
 
 def upload(cfg: Config, state: State, repo: str) -> int:
-    """Upload all pending chunks."""
     from huggingface_hub import HfApi
     token = os.environ.get("DATASET_CREATOR_HF_TOKEN") or os.environ.get("HF_TOKEN")
     if not token:

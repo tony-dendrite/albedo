@@ -1,9 +1,3 @@
-"""Check #4: the model is not a near-duplicate of one already on the subnet.
-
-Computes a weight fingerprint for the downloaded model and compares it against the
-corpus store, skipping the miner's own prior entries (same hotkey). A match at/above
-the configured similarity threshold flags the model as a duplicate.
-"""
 from __future__ import annotations
 
 import logging
@@ -20,18 +14,13 @@ NAME = "duplicate"
 
 def check(model_dir: str, store: FingerprintStore, *, hotkey: str,
           threshold: float = SIM_THRESHOLD) -> CheckOutcome:
-    """Fingerprint ``model_dir`` and check it against the corpus.
-
-    The computed fingerprint is returned in ``details['fingerprint']`` so the caller
-    can record it (publish / index) regardless of the outcome.
-    """
     fp = compute_fingerprint(model_dir)
 
     best_sim = 0.0
     best_key = ""
     for entry in store.candidates():
         if hotkey and entry.get("hotkey") == hotkey:
-            continue  # the miner's own prior model is not a duplicate of itself
+            continue
         sim = similarity(fp, entry.get("fingerprint", {}))
         if sim > best_sim:
             best_sim, best_key = sim, entry.get("key", "")

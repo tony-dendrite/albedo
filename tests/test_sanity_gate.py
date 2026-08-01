@@ -1,4 +1,3 @@
-"""Tests for the sanity pre-eval gate, dispatcher decisions, and worker run store."""
 
 from __future__ import annotations
 
@@ -19,7 +18,6 @@ from sanity_service.llm_check import GateResult, LLMGate, SampleInput, run_gate
 from sanity_service.rubric import parse_injection, parse_viability
 from sanity_service.settings import SanitySettings
 
-# ── rubric parsers ────────────────────────────────────────────────────────────
 
 
 def test_parse_injection_and_viability():
@@ -29,7 +27,6 @@ def test_parse_injection_and_viability():
     assert parse_viability("not json")[0] is None
 
 
-# ── gate via a fake judge client (calls 1-3 = first injection pass, 4-6 = re-check) ─────
 
 
 class _FakeJudge:
@@ -146,7 +143,6 @@ def test_gate_injection_ignores_trajectory_wrapper():
     assert gate.passed
 
 
-# ── dispatcher _complete decisions ──────────────────────────────────────────────
 
 
 class _FakeRepo:
@@ -271,19 +267,15 @@ def test_multiturn_keeps_prompt_messages_on_first_turn(monkeypatch):
     assert seen[1].prompt_messages is None
 
 
-# ── import hygiene ──────────────────────────────────────────────────────────────
 
 
 def test_dispatcher_binds_canonical_repository():
-    # Guards against re-introducing `from src.sanity_service.db`, which loads db.py a second
-    # time under the `src.` namespace and yields a distinct PreEvalRepository class.
     import sanity_service.db as canonical
 
     assert D.PreEvalRepository is canonical.PreEvalRepository
     assert D.ClaimedPreEval is canonical.ClaimedPreEval
 
 
-# ── worker run store ────────────────────────────────────────────────────────────
 
 
 def test_model_ref_parts_accepts_chain_model_uri():
@@ -296,15 +288,14 @@ def test_worker_store_lifecycle():
     store = SanityRunStore()
     req = SanityRunRequest(run_id="r1", model_uri="m", digest="d", prompts=["a", "b", "c"])
     run = store.start(req)
-    assert store.start(req) is run  # idempotent on run_id
+    assert store.start(req) is run
     assert store.mark_worker_started("r1").state == "queued"
-    assert store.mark_worker_started("r1") is None  # only once
+    assert store.mark_worker_started("r1") is None
     run.succeed(responses=["x"], heuristics=[{"passed": True, "reason": "ok"}])
     assert run.as_status()["state"] == "succeeded"
     assert store.list_active() == []
 
 
-# ── sanity remote worker fixes ────────────────────────────────────────────────
 
 from sanity_remote.config import SanityRemoteSettings
 from sanity_remote.worker import (
@@ -366,7 +357,7 @@ def test_strip_model_config_noop_when_clean(tmp_path):
 
 
 def test_strip_model_config_tolerates_missing_config(tmp_path):
-    _strip_model_config(str(tmp_path))  # must not raise
+    _strip_model_config(str(tmp_path))
 
 
 def test_vllm_cmd_includes_generation_config_vllm(tmp_path):

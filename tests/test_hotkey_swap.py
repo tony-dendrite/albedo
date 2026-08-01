@@ -23,7 +23,6 @@ def test_unchanged_hotkey_not_flagged():
 
 
 def test_null_prior_reg_block_skipped():
-    # pre-backfill rows have no stored registration block — cannot judge, must not flag
     prior = {9: ("hk-old", None)}
     current = [(9, "hk-new", 8500000)]
 
@@ -44,10 +43,10 @@ def test_mixed_metagraph_flags_only_the_swap():
         3: ("hk-c", 300),
     }
     current = [
-        (1, "hk-a", 100),      # unchanged
-        (2, "hk-b2", 999),     # re-registered
-        (3, "hk-c2", 300),     # swapped
-        (4, "hk-d", 400),      # new uid, no history
+        (1, "hk-a", 100),
+        (2, "hk-b2", 999),
+        (3, "hk-c2", 300),
+        (4, "hk-d", 400),
     ]
 
     assert find_swaps(prior, current) == [SwapEvent(3, "hk-c", "hk-c2", 300)]

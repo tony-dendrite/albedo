@@ -13,8 +13,6 @@ _FAMILIES = ("pr", "lm", "combine", "mechanical")
 
 
 def _shard(source: str, rows: int):
-    # rows_meta must carry family + first_edit: the sampler stratifies by both (sampling.FAMILY_MIX,
-    # sampling.STEP_TRIM), so a single-family fixture makes three of the four strata infeasible.
     return {
         "name": f"{source}/data/train-00000.parquet",
         "rows": rows,
@@ -51,8 +49,6 @@ def test_eval_defaults_keep_64_samples_and_32_batches():
 
 
 def test_build_eval_request_rejects_single_source_manifest(tmp_path):
-    # No fallback to one dataset: a legacy single-source manifest must be rejected
-    # when the dispatcher computes sample_ids from a local manifest.
     manifest = {"shards": [{"name": "data/train-00000.parquet", "rows": 2}], "total_rows": 2}
     payload = json.dumps(manifest, sort_keys=True).encode("utf-8")
     manifest_path = tmp_path / "manifest.json"

@@ -1,28 +1,19 @@
-"""Response quality heuristics - pure text analysis, no LLM judge."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-# Keywords expected in at least one response for a coding task.
 _CODE_KEYWORDS = {
-    # ── Python ──
     "def","class","import","from","return","if","elif","else","for","while","try","except","finally","with","as","lambda",
     "yield","raise","assert","pass","del","global","nonlocal","and","or","not","in","is","async","await","print","self",
-    # ── JS / TS ──
     "function","const","let","var","switch","case","break","continue","new","extends","export","default","typeof","instanceof",
     "this","super","catch","throw","interface","type","enum","namespace","public","private","protected","readonly","console",
-    # ── Java / C# / C / C++ ──
     "static","final","void","int","char","bool","string","struct","using","package","implements",
     "abstract","override","virtual","template","typename","include","#include","std","sizeof","typedef",
-    # ── Go ──
     "func","range","map","chan","go","defer","select","nil",
-    # ── Rust ──
     "fn","mut","impl","trait","pub","use","mod","match","loop","where","unsafe","dyn","crate",
-    # ── Ruby / PHP / shell-script ──
     "end","module","require","unless","until","do","done","then","fi",
     "begin","rescue","ensure","puts","elsif","foreach","echo",
-    # ── mini-swe-agent bash / POSIX + dev CLIs (the dominant signal) ──
     "grep","rgrep","tree","find","cat","sed","awk","ls","cd","head","tail","sort","uniq","wc","cut","tr","xargs","diff",
     "patch","cp","mv","rm","rmdir","mkdir","touch","chmod","chown","ln","pwd","which","tee","printf","export","source",
     "env","stat","basename","dirname","tar","curl","wget","ssh","rsync","git","make","cmake","gcc","clang","node","npm",
@@ -33,23 +24,19 @@ _CODE_KEYWORDS = {
 
 @dataclass
 class CheckResult:
-    # Outcome of a single check with an optional human-readable failure reason.
     passed: bool
     reason: str = ""
 
 
-# ── Per-response checks ───────────────────────────────────────────────────────
 
 
 def check_empty(text: str) -> CheckResult:
-    # Fails if the model produced nothing or only whitespace.
     if not text.strip():
         return CheckResult(False, "empty response")
     return CheckResult(True)
 
 
 def check_length(text: str, min_tokens: int = 5) -> CheckResult:
-    # Fails if response is shorter than min_tokens - catches single-word outputs.
     tokens = text.split()
     if len(tokens) < min_tokens:
         return CheckResult(False, f"too short ({len(tokens)} tokens, min={min_tokens})")
@@ -57,7 +44,6 @@ def check_length(text: str, min_tokens: int = 5) -> CheckResult:
 
 
 def check_repetition(text: str, max_repetition: float = 0.85) -> CheckResult:
-    # Fails if >85% of consecutive trigrams are identical - catches "to to to to" token loops.
     tokens = text.split()
     if len(tokens) < 3:
         return CheckResult(True)
@@ -69,14 +55,12 @@ def check_repetition(text: str, max_repetition: float = 0.85) -> CheckResult:
 
 
 def check_encoding(text: str) -> CheckResult:
-    # Fails if >60% of characters are non-ASCII - catches garbled or wrong-encoding weights.
     if len(text) > 20 and sum(1 for c in text if ord(c) > 127) / len(text) > 0.6:
         return CheckResult(False, "excessive non-ASCII (encoding broken)")
     return CheckResult(True)
 
 
 def check_vocabulary(text: str, min_ratio: float = 0.3) -> CheckResult:
-    # Fails if unique/total token ratio is below 30% - catches low-variety "the the the" outputs.
     tokens = text.lower().split()
     if len(tokens) < 8:
         return CheckResult(True)
@@ -87,7 +71,6 @@ def check_vocabulary(text: str, min_ratio: float = 0.3) -> CheckResult:
 
 
 def check_one(text: str, min_tokens: int = 5, max_repetition: float = 0.85, min_vocab_ratio: float = 0.3,) -> CheckResult:
-    # Runs all per-response checks in order and returns the first failure.
     for result in [
         check_empty(text),
         check_length(text, min_tokens),
@@ -100,11 +83,9 @@ def check_one(text: str, min_tokens: int = 5, max_repetition: float = 0.85, min_
     return CheckResult(True)
 
 
-# ── Cross-prompt checks ───────────────────────────────────────────────────────
 
 
 def check_collapsed(responses: list[str]) -> CheckResult:
-    # Fails if all responses are identical - the model ignores the prompt entirely.
     if len(responses) < 2:
         return CheckResult(True)
     if len({r.strip()[:100] for r in responses}) == 1:
@@ -113,7 +94,6 @@ def check_collapsed(responses: list[str]) -> CheckResult:
 
 
 def check_uniform_length(responses: list[str]) -> CheckResult:
-    # Fails if all responses have the exact same token count - a hidden collapse signal.
     lengths = [len(r.split()) for r in responses]
     if len(responses) >= 2 and len(set(lengths)) == 1:
         return CheckResult(
@@ -123,18 +103,15 @@ def check_uniform_length(responses: list[str]) -> CheckResult:
 
 
 def check_code_present(responses: list[str]) -> CheckResult:
-    # Fails if no response contains any code keyword - model not engaging with coding tasks.
     for resp in responses:
         if set(resp.lower().split()) & _CODE_KEYWORDS:
             return CheckResult(True)
     return CheckResult(False, "no code keywords in any response (def/return/import/etc)")
 
 
-# ── Main entry point ──────────────────────────────────────────────────────────
 
 
 def check_all(responses: list[str], min_tokens: int = 5, max_repetition: float = 0.95, min_vocab_ratio: float = 0.1,) -> CheckResult:
-    # Runs per-response checks first, then cross-prompt checks; returns the first failure.
     for i, resp in enumerate(responses):
         result = check_one(
             resp,

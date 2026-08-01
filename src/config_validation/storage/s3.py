@@ -1,8 +1,3 @@
-"""Hippius public-read S3 client for publishing validation JSONL.
-
-Env-gated and best-effort: when credentials are absent the client is disabled and
-``put_*`` is a no-op returning False, so the validator runs fine without publishing.
-"""
 from __future__ import annotations
 
 import logging
@@ -37,7 +32,6 @@ def _client():
 
 
 def put_jsonl(key: str, body: bytes) -> bool:
-    """Upload ndjson bytes to ``key`` (public-read). Returns False if disabled/failed."""
     if not ENABLED:
         log.debug("hippius S3 disabled (CV_S3_* unset); skipping put(%r)", key)
         return False
@@ -52,6 +46,6 @@ def put_jsonl(key: str, body: bytes) -> bool:
         )
         log.info("hippius S3: uploaded %d bytes to s3://%s/%s", len(body), _BUCKET, key)
         return True
-    except Exception as exc:  # noqa: BLE001 — never wedge the validator on an upload
+    except Exception as exc:
         log.warning("hippius S3 put(%r) failed: %s", key, exc)
         return False

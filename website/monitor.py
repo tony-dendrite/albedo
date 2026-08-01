@@ -1,15 +1,4 @@
 #!/usr/bin/env python3
-"""Watch the eval Postgres DB and publish the website's data files.
-
-Builds two files into website/data/ and uploads them to Hippius whenever the DB changes:
-  - dashboard.json : reign, eval history, score chart, queue, fails (the rich view)
-  - state.json     : live pipeline status across hippius_validate / pre_eval / eval (running vs queued)
-
-Self-contained (like push_to_hippius.py): reads ../.env, talks to Postgres via psycopg, uploads via
-boto3. Change detection is a cheap signature poll, so a tick only does work when something changed.
-
-Run as a long-running loop (default, for PM2) or `--once`.
-"""
 
 from __future__ import annotations
 
@@ -32,12 +21,8 @@ DATA_DIR = WEBSITE_DIR / "data"
 
 log = logging.getLogger("monitor")
 
-# Mirrors albedo_eval_service.judge_core.JUDGE_MODELS (kept inline so this script stays standalone).
 JUDGE_MODELS = ["z-ai/glm-5.2", "qwen/qwen3.5-397b-a17b", "deepseek/deepseek-v3.2"]
 
-# Artifact types the website knows how to render (website/js/config.js ARTIFACT_TYPES).
-# JUDGE_RESULTS and EVAL_TRANSCRIPT are legacy — new runs no longer emit them, but historical
-# runs still have those rows and must keep rendering.
 DASHBOARD_ARTIFACT_TYPES = [
     "EVAL_VERDICT", "GENERATED_SAMPLES", "SCORING_RESULTS", "JUDGE_RESULTS",
     "EVAL_TRANSCRIPT", "REMOTE_PROGRESS", "REMOTE_LOGS", "SANITY_RESULT",
@@ -47,8 +32,6 @@ QUEUE_STATES = ("PRE_EVAL_QUEUED", "PRE_EVAL_RUNNING", "PRE_EVAL_PASSED", "EVAL_
 FAIL_STATES = ("TERMINAL_INVALID", "TERMINAL_INFRA_FAILED")
 ACTIVE_EVAL_STATES = ("QUEUED", "DISPATCHED", "GENERATING", "SCORING", "VERDICT_READY")
 
-# state.json: per-stage running/queued buckets. Handoff states (HIPPIUS_VALIDATED, PRE_EVAL_PASSED) are
-# "queued for the next stage" — that's exactly what the next-stage dispatcher claims.
 STAGE_BUCKETS: dict[str, dict[str, tuple[str, ...]]] = {
     "hippius_validate": {"queued": ("SUBMITTED", "HIPPIUS_RETRYABLE"), "running": ("HIPPIUS_RUNNING",)},
     "pre_eval": {"queued": ("HIPPIUS_VALIDATED", "PRE_EVAL_QUEUED", "PRE_EVAL_RETRYABLE"), "running": ("PRE_EVAL_RUNNING",)},
@@ -103,7 +86,7 @@ def _public_url(uri: str | None, base: str) -> str | None:
         return f"{base.rstrip('/')}/{bucket_and_key}"
     if uri.startswith(("http://", "https://")):
         return uri
-    return None  # local-cache://, file:// — not browser-fetchable
+    return None
 
 
 def _eval_artifact_tail(uri: str | None) -> tuple[str, str] | None:
@@ -116,11 +99,7 @@ def _eval_artifact_tail(uri: str | None) -> tuple[str, str] | None:
     return (eval_run_id, name) if eval_run_id and name else None
 
 
-# --------------------------------------------------------------------------- king per-judge backfill
 
-# The verdict's score_breakdown.by_judge is challenger-only (judge_core.aggregate_scores);
-# the king's per-judge yes-rates only exist in the SCORING_RESULTS artifact. Compute them
-# once per run from the artifact and cache to disk so each tick stays cheap.
 KING_CACHE_PATH = DATA_DIR / "king_by_judge_cache.json"
 
 
@@ -137,8 +116,6 @@ def _save_king_cache(cache: dict[str, dict[str, float]]) -> None:
 
 
 def _king_by_judge_from_artifact(url: str) -> dict[str, float] | None:
-    """Mirror judge_core.aggregate_scores for the king side: per-judge mean yes_rate over
-    scored records (side == previous_king, parse_ok). None on fetch failure (retried next tick)."""
     import urllib.request
 
     try:
@@ -165,16 +142,9 @@ def _king_by_judge_from_artifact(url: str) -> dict[str, float] | None:
     return {model: round(sum(v) / len(v), 6) for model, v in rates.items()}
 
 
-# --------------------------------------------------------------------------- dashboard.json
 
 
 def _king_version_map(conn, *, model_filter: str) -> dict[int, int]:
-    """Map raw king_versions.version -> display regnal number within the current model family.
-
-    The DB version counter is global across eras (4B + 35B); for display we renumber the
-    current family from 0, ordered by raw version: the 35B genesis seed -> 0 (shown as GENESIS),
-    the first miner-crowned king -> 1 -> ALBEDO-I. Pre-35B versions aren't in the map (-> null).
-    """
     rows = conn.execute(
         """
         SELECT kv.version,
@@ -428,7 +398,6 @@ def _fails(conn, *, limit: int, base: str, model_filter: str) -> list[dict[str, 
 
 
 def _stats(conn, *, model_filter: str) -> dict[str, Any]:
-    # Distinct models evaluated, not eval runs: a model re-evaluated several times counts once.
     row = conn.execute(
         """
         SELECT count(DISTINCT er.submission_id) AS n
@@ -457,7 +426,6 @@ def build_dashboard(conn, *, netuid: int, history_limit: int, artifact_base: str
     }
 
 
-# --------------------------------------------------------------------------- state.json
 
 
 def build_state(conn, *, model_filter: str) -> dict[str, Any]:
@@ -491,7 +459,6 @@ def build_state(conn, *, model_filter: str) -> dict[str, Any]:
     return {"updated_at": datetime.now(UTC).isoformat(), "counts": counts, "stages": stages}
 
 
-# --------------------------------------------------------------------------- upload
 
 
 def _upload_to_hippius(key: str, path: Path) -> bool:
@@ -531,12 +498,11 @@ def _upload_to_hippius(key: str, path: Path) -> bool:
             put_args.pop("ACL", None)
             client.put_object(**put_args)
         return True
-    except Exception as exc:  # never wedge the loop on an upload
+    except Exception as exc:
         log.error("upload failed for %s: %s", key, exc)
         return False
 
 
-# --------------------------------------------------------------------------- loop
 
 
 def _signature(conn) -> tuple:
@@ -596,8 +562,6 @@ def main() -> int:
     netuid = args.netuid if args.netuid is not None else int(os.environ.get("ALBEDO_DASHBOARD_NETUID", "97"))
     history_limit = args.history_limit if args.history_limit is not None else int(os.environ.get("ALBEDO_DASHBOARD_HISTORY_LIMIT", "200"))
     artifact_base = os.environ.get("ALBEDO_DASHBOARD_ARTIFACT_BASE_URL", "https://s3.hippius.com")
-    # Only surface the current reference-model family (in-place cutover leaves 4B rows in the DB).
-    # SQL LIKE substring; "qwen3.6-35b" matches the 35B genesis + albedo-qwen3.6-35b-* challengers.
     model_filter = os.environ.get("ALBEDO_DASHBOARD_MODEL_FILTER", "qwen3.6-35b")
     interval = float(os.environ.get("ALBEDO_MONITOR_INTERVAL_S", "2"))
 
@@ -619,7 +583,7 @@ def main() -> int:
             if sig != last_sig:
                 run_once()
                 last_sig = sig
-        except Exception as exc:  # keep the loop alive; the next tick retries
+        except Exception as exc:
             log.error("tick failed: %s", exc)
         time.sleep(interval)
 

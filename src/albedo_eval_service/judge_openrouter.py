@@ -27,8 +27,6 @@ class OpenRouterJudgeClient:
         if not settings.openrouter_api_key:
             raise ValueError("ALBEDO_JUDGE_OPENROUTER_API_KEY is required")
         self.settings = settings
-        # Size the connection pool to the per-model concurrency across all models + the evaluator,
-        # so raising max_concurrency_per_model actually parallelizes instead of queueing on sockets.
         pool = max(64, (len(JUDGE_MODELS) + 1) * settings.max_concurrency_per_model)
         self._client = httpx.AsyncClient(
             base_url=settings.openrouter_base_url.rstrip("/"),
@@ -79,9 +77,6 @@ class OpenRouterJudgeClient:
         parse_retries: int | None = None,
         retry_count: int | None = None,
     ) -> JudgeRawResponse:
-        # Generic completion (e.g. the question evaluator): `response_schema` forces JSON, `provider`
-        # overrides the per-model pins. `parse_retries`/`retry_count` override the settings-level
-        # retry budget for callers that do their own fallback (e.g. the observation simulator).
         return await self._call(
             model=model, messages=messages, response_schema=response_schema,
             temperature=temperature, max_tokens=max_tokens, provider=provider, accept=accept,
@@ -109,8 +104,6 @@ class OpenRouterJudgeClient:
         parse_budget = self.settings.parse_retries if parse_retries is None else parse_retries
         transport_budget = self.settings.retry_count if retry_count is None else retry_count
         async with sem:
-            # Retry a 200-that-doesn't-parse (accept=False) up to parse_retries times; each retry is a
-            # fresh call that may re-route to a different provider via allow_fallbacks.
             last: JudgeRawResponse | None = None
             for parse_attempt in range(max(1, parse_budget)):
                 last = await self._score_with_retries(
@@ -196,7 +189,6 @@ class OpenRouterJudgeClient:
         if model.startswith("openai/"):
             del payload["temperature"]
             payload["provider"] = dict(provider_block)
-        # Force JSON whenever a schema is given; require_parameters routes only to providers that honor it.
         if response_schema is not None:
             payload["response_format"] = {
                 "type": "json_schema",

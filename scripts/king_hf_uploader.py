@@ -52,12 +52,11 @@ class Unreachable(Exception):
 
 
 class RateLimited(Exception):
-    """Raised on HF HTTP 429 so a pass can abort and let the quota window reset."""
+    pass
 
 
 @dataclass
 class UploaderState:
-    """Per-process memory so we stop re-hitting the HF API for kings already handled."""
 
     completed: set[int] = dataclasses.field(default_factory=set)
     backoff_until: dict[int, float] = dataclasses.field(default_factory=dict)
@@ -145,7 +144,6 @@ class KingUpload:
         if not uri.startswith(("s3://", "file://", "hf://")):
             if "@" not in uri and self.model_hash:
                 uri = f"{uri}@{self.model_hash}"
-            # A bare repo@<git-sha> is an HF ref; the resolver only routes it with the scheme.
             if _is_hf_source(uri):
                 uri = f"hf://{uri}"
         return uri
@@ -423,7 +421,6 @@ def list_crowned_kings(conn: psycopg.Connection, settings: Settings) -> list[Kin
 
 
 def _source_cache_path(base_dir: Path, king: KingUpload) -> Path | None:
-    """Where ModelArtifactResolver would have cached this king under ``base_dir``."""
     parsed = parse_oci_ref(king.source_ref)
     if parsed:
         registry, repository, digest = parsed
@@ -468,11 +465,9 @@ def download_to_work_dir(king: KingUpload, settings: Settings) -> Path:
     )
     try:
         resolved = resolver.resolve(king.source_ref)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise Unreachable(str(exc)) from exc
     if resolved.source == "passthrough":
-        # The resolver did not recognize the ref and returned it verbatim — uploading
-        # from that "path" would silently produce an empty mirror.
         raise Unreachable(f"resolver could not fetch {king.source_ref} (passthrough)")
     return Path(resolved.local_path).resolve()
 
@@ -578,7 +573,7 @@ def download_missing_from_source(
                         label=name,
                     )
                 downloaded.append(name)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise Unreachable(str(exc)) from exc
     return out_dir, downloaded
 
@@ -681,7 +676,7 @@ def _index_shard_files(repo_id: str, token: str | None, present: set[str]) -> se
         )
         data = json.loads(Path(path).read_text(encoding="utf-8"))
         return {name for name in data.get("weight_map", {}).values() if isinstance(name, str)}
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("could not read safetensors index for {}: {}", repo_id, exc)
         return set()
 
@@ -863,20 +858,15 @@ def process_once(
     try:
         for king in kings:
             version = king.king_version
-            # Kings up to N are assumed already mirrored — skip without any HF API call
-            # (env ALBEDO_KING_HF_ASSUME_MIRRORED_THROUGH, 0 disables; --force overrides).
             if not settings.force and king.number <= settings.assume_mirrored_through:
                 counts["skipped"] += 1
                 continue
-            # Source is permanently gone (HTTP 404/410) — never touch Hippius or HF again.
             if version in state.permanent_skip:
                 counts["skipped"] += 1
                 continue
-            # Already confirmed complete on HF during this run — never re-hit the API.
             if not settings.force and version in state.completed:
                 counts["skipped"] += 1
                 continue
-            # A recent attempt failed/was unreachable — wait out the backoff window.
             retry_at = state.backoff_until.get(version)
             if retry_at is not None and now < retry_at:
                 counts["deferred"] += 1
@@ -915,7 +905,7 @@ def process_once(
                         delay,
                     )
                 counts["failed"] += 1
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 if _is_rate_limited(exc):
                     raise RateLimited() from exc
                 delay = _register_backoff(state, version, now)
@@ -960,7 +950,7 @@ def explain(settings: Settings) -> None:
         try:
             exists = already_uploaded(api, repo_id)
             status = "SKIP (already uploaded)" if exists else "WILL UPLOAD"
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             exists = False
             status = f"WILL UPLOAD (HF check failed: {type(exc).__name__})"
         hit = eval_dir_path(king, settings)
@@ -1023,7 +1013,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = _build_parser().parse_args()
     settings = load_settings(args)
-    lock = acquire_pid_lock(settings.lock_path)  # noqa: F841
+    lock = acquire_pid_lock(settings.lock_path)
 
     logger.info(
         "king HF uploader starting: namespace={} eval_dir={} work_dir={} poll={}s dry_run={} "
@@ -1072,7 +1062,7 @@ def main() -> None:
             time.sleep(settings.poll_interval_s)
             try:
                 counts = process_once(api, settings, state)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning("monitor pass error ({}): {}", type(exc).__name__, exc)
                 continue
             if counts["uploaded"]:

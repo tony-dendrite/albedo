@@ -1,8 +1,3 @@
-"""Runtime configuration for the king-chat service (KING_CHAT_* env / .env).
-
-Standalone script package (run as `.venv/bin/python chat_to_king/supervisor.py`), so this is a flat
-module imported as a sibling — not part of the installed wheel.
-"""
 
 from __future__ import annotations
 
@@ -33,8 +28,6 @@ class KingChatSettings(BaseSettings):
     llms_keywords: str = "albedo,sn97,subnet 97,netuid 97"
     llms_max_chars: int = 0
 
-    # Our own HF mirror of each king, written by scripts/king_hf_uploader.py — the same env vars the
-    # uploader reads, so the two cannot point at different namespaces.
     hf_namespace: str = Field(
         default="dendriteholdings",
         validation_alias=AliasChoices("KING_CHAT_HF_NAMESPACE", "ALBEDO_KING_HF_NAMESPACE"),

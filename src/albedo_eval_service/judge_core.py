@@ -1,6 +1,3 @@
-"""Binary yes/no-question judging: an evaluator writes next-step yes/no questions per task; the
-judge answers 1/0 for the king and challenger independently; the mean yes-rate is each side's score.
-"""
 
 from __future__ import annotations
 
@@ -11,7 +8,6 @@ from difflib import SequenceMatcher
 from statistics import mean
 from typing import Any
 
-# Crown iff (challenger_mean - king_mean) >= this, on the 0-1 absolute scale
 CHALLENGER_WIN_MARGIN = 0.03
 QUESTION_FLOOR_FRACTION = 0.22
 GENERIC_HYGIENE_QUESTION_LIMIT = 3
@@ -32,8 +28,6 @@ JUDGE_PROVIDER_PINS: dict[str, dict[str, object]] = {
     for model in JUDGE_MODELS
 }
 
-# Section shares (percent of the checklist). They shape ONLY the per-section question counts
-# interpolated into the prompt text; scoring weights (REQUIRES_WEIGHTS, size factor) are separate.
 STEP_SHARES_PCT = {
     "workflow": 48.0,
     "terminal": 12.0,
@@ -41,17 +35,14 @@ STEP_SHARES_PCT = {
     "grounding": 22.0,
     "length": 10.0,
 }
-# Prompt budgets, set below the code caps (READ_ONLY_QUESTION_CAP, NEGATIVE_QUESTION_LIMIT) so
-# the generator has headroom instead of being trimmed.
 PROMPT_READ_LABEL_CAP = 5
 PROMPT_NEGATIVE_CAP = 6
-LENGTH_BOUND_QUESTIONS = 2                      # word-count bounds inside the economy section
-LENGTH_BOUND_MULTIPLIERS = ("TEN", "TWENTY")    # x a competent-agent word estimate
+LENGTH_BOUND_QUESTIONS = 2
+LENGTH_BOUND_MULTIPLIERS = ("TEN", "TWENTY")
 VALID_TAGS = ("explore", "verification", "action", "economy")
 
 
 def step_counts(n: int) -> dict[str, int]:
-    """Percent shares -> exact per-section question counts summing to n (largest remainder)."""
     raw = {key: n * pct / 100.0 for key, pct in STEP_SHARES_PCT.items()}
     counts = {key: int(value) for key, value in raw.items()}
     remainder = n - sum(counts.values())
@@ -61,7 +52,6 @@ def step_counts(n: int) -> dict[str, int]:
 
 
 def allocate(total: int, counts: dict[str, int]) -> dict[str, int]:
-    """Split a checklist-wide cap (read/negative) across sections by share, largest remainder."""
     total_count = sum(counts.values()) or 1
     raw = {key: total * value / total_count for key, value in counts.items()}
     alloc = {key: int(value) for key, value in raw.items()}
@@ -71,7 +61,6 @@ def allocate(total: int, counts: dict[str, int]) -> dict[str, int]:
     return alloc
 
 
-# --------------------------------------------------------------------------- prompts (verbatim)
 QUESTION_SYSTEM = """You write an evaluation checklist to judge a coding agent's candidate \
 trajectory. The judge will see the original conversation, CANDIDATE OUTPUT N blocks, and \
 ENVIRONMENT OBSERVATION blocks between them; it scores ONLY the candidate assistant outputs — the \
@@ -239,9 +228,6 @@ QUESTION_USER = """TASK (the conversation so far):
 Return STRICT JSON only, exactly {n} questions, no prose and no code fences:
 {{"questions":[{{"text":"...","example_bad":"...","requires":"action|read|neutral","tag":"explore|verification|action|economy"}}]}}"""
 
-# Appended to QUESTION_SYSTEM when a SOTA reference trajectory is available; must not contain
-# literal braces (the combined prompt is .format()ed). See
-# eval-scoring-sota-anchored-questions-plan.md in the scoring checkout for design + calibration.
 ANCHORED_QUESTION_BLOCK = """\
 REFERENCE TRAJECTORY — the user message also contains a REFERENCE \
 TRAJECTORY: a strong coding agent's own continuation of this exact task, with the environment \
@@ -301,10 +287,6 @@ are the environment's replies):
 Return STRICT JSON only, exactly {n} questions, no prose and no code fences:
 {{"questions":[{{"text":"...","example_bad":"...","requires":"action|read|neutral","tag":"explore|verification|action|economy"}}]}}"""
 
-# Five per-section directives embedded in the question user message ({section}), in section
-# order. Placeholders {k}/{read_k}/{neg_k} (plus the length section's {bound_n}/{struct_n}/
-# {mult_1}/{mult_2}) are filled by build_question_messages from STEP_SHARES_PCT and the
-# prompt budgets.
 SECTION_DIRECTIVES: dict[str, str] = {
     "workflow": """SECTION 1 of 5 — WORKFLOW AND VERIFICATION BACKBONE. Write EXACTLY {k} \
 questions. At most {read_k} may be requires:"read"; at most {neg_k} may use negative form.
@@ -583,7 +565,6 @@ then the 1 (good) or 0 (bad) that follows from it. When a check cannot be verifi
 trajectory alone, answer 0. Return the strict JSON now."""
 
 
-# --------------------------------------------------------------------------- response measurements
 _FENCE_RE = re.compile(r"```[^\n]*\n(.*?)(?:```|\Z)", re.DOTALL)
 
 
@@ -607,8 +588,6 @@ _CANDIDATE_BLOCK_RE = re.compile(
 
 
 def candidate_output_measure(text: str) -> dict[str, int]:
-    """Size of the candidate's OWN outputs inside a merged trajectory string — context and
-    observations excluded, so verbosity bounds measure the candidate, not the sample depth."""
     blocks = _CANDIDATE_BLOCK_RE.findall(text)
     if not blocks:
         blocks = [text]
@@ -638,8 +617,6 @@ def measurements_block(text: str) -> str:
 
 
 def format_section_directives(n: int) -> str:
-    """The five SECTION_DIRECTIVES with every count filled in: per-section question counts from
-    STEP_SHARES_PCT (largest remainder) and the read/negative caps split across sections."""
     counts = step_counts(n)
     read_alloc = allocate(PROMPT_READ_LABEL_CAP, counts)
     neg_alloc = allocate(PROMPT_NEGATIVE_CAP, counts)
@@ -660,10 +637,6 @@ def format_section_directives(n: int) -> str:
 def build_question_messages(
     *, task: str, n: int, reference: str | None = None, reference_made_edit: bool | None = None
 ) -> list[dict[str, str]]:
-    """Question-writer messages; with a SOTA `reference` trajectory the checklist is anchored
-    on its concrete milestones (see ANCHORED_QUESTION_BLOCK). `reference_made_edit` is carried
-    by callers for enforce_question_labels/apply_measurement_gate; the no-edit case is handled
-    by the anchored block's own prose ("IF THE REFERENCE MADE NO EDIT...")."""
     section = format_section_directives(n)
     if reference is None:
         system = QUESTION_SYSTEM.format(
@@ -684,7 +657,6 @@ def build_question_messages(
 
 
 def format_reference_trajectory(turns: list[dict[str, Any]]) -> str:
-    """Render a reference trajectory's generated turns for the question writer."""
     parts: list[str] = []
     step = 0
     for turn in turns:
@@ -697,12 +669,9 @@ def format_reference_trajectory(turns: list[dict[str, Any]]) -> str:
 
 
 def filter_reference_leaks(questions: list[dict[str, str]]) -> list[dict[str, str]]:
-    """Drop the rare question that reveals the reference as shared history; judges could never
-    verify it and it leaks the anchoring mechanism."""
     return [q for q in questions if "the reference" not in q["text"].casefold()]
 
 
-# ------------------------------------------------------------------ mechanical question gates
 _EDIT_COMMAND_RE = re.compile(
     r"sed\s+-i|>\s*[\w./]|>>\s*[\w./]|tee\s+[\w./-]|cat\s*>|str_replace|git apply|patch\s+-p"
     r"|applypatch|cp\s+[\w./-]+\s+[\w./-]+|mv\s+[\w./-]+\s+[\w./-]+",
@@ -719,22 +688,16 @@ READ_ONLY_QUESTION_CAP = 5
 
 
 def candidate_turn_texts_from_merged(text: str) -> list[str]:
-    """Extract the candidate's own scored blocks from a merged trajectory string."""
     return _CANDIDATE_BLOCK_RE.findall(text or "")
 
 
 def trajectory_made_edit(turn_texts: list[str]) -> bool:
-    """True when any scored turn contains a state-changing command (regex heuristic)."""
     return any(_EDIT_COMMAND_RE.search(text or "") for text in turn_texts)
 
 
 def enforce_question_labels(
     questions: list[dict[str, str]], *, reference_made_edit: bool
 ) -> tuple[list[dict[str, str]], dict[str, int]]:
-    """Parse-time enforcement of the anchoring rules (prose rules alone get ignored):
-    cap read-only-passable questions, reject un-folded "avoids X" checks that inaction sweeps,
-    and drop completed-edit/submit dead weight when the reference never edited in its window.
-    Returns (kept, drop_counts). Question ids are reassigned by the caller via parse order."""
     kept: list[dict[str, str]] = []
     drops = {"read_cap": 0, "unfolded_avoid": 0, "no_edit_dead_weight": 0}
     read_kept = 0
@@ -769,12 +732,6 @@ def apply_measurement_gate(
     candidate_turn_texts: list[str],
     reference_made_edit: bool,
 ) -> dict[str, str | None]:
-    """Deterministic per-candidate gate, applied to one judge's answer sheet:
-    - A candidate that made NO edit has inaction-conditional do-no-harm questions REMOVED from
-      its denominator (dropping, never awarding: inaction is the adversary, a free 1 rewards it).
-    - When the reference proved an edit was reachable, the candidate made no edit, and its final
-      turn is still a read, all `requires: action` and progress-category questions are forced to
-      0 — well-groomed exploration must not out-score imperfect work."""
     made_edit = trajectory_made_edit(candidate_turn_texts)
     if made_edit:
         return answers
@@ -794,7 +751,7 @@ def apply_measurement_gate(
             and _NEGATIVE_QUESTION_RE.search(text)
             and _ACTION_VERB_RE.search(text)
         ):
-            gated.pop(qid)  # e.g. "no failed edit", "no premature submit" — unverifiable here
+            gated.pop(qid)
             continue
         if (
             reference_made_edit
@@ -825,15 +782,12 @@ def build_judge_messages(*, response: str, questions: list[dict[str, str]]) -> l
     ]
 
 
-# --------------------------------------------------------------------------- schemas
 def question_schema(n: int) -> dict[str, Any]:
     return {
         "type": "object",
         "properties": {
             "questions": {
                 "type": "array",
-                # Floor at the parser's accept threshold, not n: forcing exactly n makes the model
-                # pad the quota by repeating a question once it runs out of distinct checks.
                 "minItems": question_floor(n),
                 "maxItems": n,
                 "items": {
@@ -841,12 +795,7 @@ def question_schema(n: int) -> dict[str, Any]:
                     "properties": {
                         "text": {"type": "string"},
                         "example_bad": {"type": "string"},
-                        # What a candidate must DO to pass: "action" = only a concrete
-                        # edit/verify/justified-submit passes; "read" = passable by
-                        # reading/searching alone; "neutral" = size/protocol/format.
                         "requires": {"type": "string", "enum": ["action", "read", "neutral"]},
-                        # The ONE kind of evidence that can satisfy the question; shown to
-                        # the judges, whose TAG VALIDATION block demands exactly it.
                         "tag": {
                             "type": "string",
                             "enum": ["explore", "verification", "action", "economy"],
@@ -888,12 +837,10 @@ def answer_schema(question_ids: list[str]) -> dict[str, Any]:
     }
 
 
-# --------------------------------------------------------------------------- json + parsers
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*([\S\s]*?)\s*```", re.IGNORECASE)
 
 
 def extract_json(raw: str, prefer_keys: tuple[str, ...] = ()) -> Any | None:
-    """Pull a JSON object from verbose LLM text; prefer a dict carrying one of prefer_keys."""
     if not raw:
         return None
     decoder = json.JSONDecoder()
@@ -1035,9 +982,6 @@ def _question_signature(text: str) -> frozenset[str]:
 
 
 def _template_key(text: str) -> tuple[str, ...]:
-    """Leading phrase with target-like tokens (code, paths, identifiers, numbers) collapsed to a
-    placeholder, so 'references `A`?' and 'references `B` or `C`?' share one key while
-    'avoid re-running §' and 'avoid editing §' stay distinct."""
     tokens: list[str] = []
     for raw in text.split():
         core = raw.strip("?,.!:;\"'()")
@@ -1047,7 +991,7 @@ def _template_key(text: str) -> tuple[str, ...]:
             "`" in raw
             or any(ch.isdigit() for ch in core)
             or any(ch in "._/=<>[]{}\\" for ch in core)
-            or any(ch.isupper() for ch in core[1:])  # CamelCase / ALLCAPS / K"str" identifiers
+            or any(ch.isupper() for ch in core[1:])
         )
         normalized = "§" if is_target else core.casefold()
         if normalized == "§" and tokens and tokens[-1] == "§":
@@ -1112,13 +1056,6 @@ def classify_question_category(text: str) -> str:
 
 
 def parse_questions(raw: str, n: int) -> tuple[list[dict[str, str]], bool]:
-    """Return ([{id,category,text,example_bad}], ok). ok iff >= question_floor(n) DISTINCT
-    questions parsed.
-
-    Exact and semantic near-duplicates are dropped (first occurrence wins): the evaluator pads its
-    quota by repeating one check as paraphrases or per-file/symbol template copies, which would let
-    a single check dominate the yes-rate. A degenerate payload therefore fails ok and is retried
-    via the client's accept hook."""
     obj = extract_json(raw, prefer_keys=("questions",))
     items = obj.get("questions") if isinstance(obj, dict) else obj
     out: list[dict[str, str]] = []
@@ -1190,7 +1127,6 @@ def parse_questions(raw: str, n: int) -> tuple[list[dict[str, str]], bool]:
     out = out[:n]
     for position, question in enumerate(out, start=1):
         question["id"] = f"q_{position:02d}"
-    # Accept a slightly-short set (model sometimes emits an empty item); the eval-level gate covers the rest.
     return out, len(out) >= question_floor(n)
 
 
@@ -1200,7 +1136,6 @@ _ANSWER_TO_BIT: dict[str, float] = {"1": 1.0, "0": 0.0}
 def parse_answers(
     raw: str, question_ids: list[str]
 ) -> tuple[dict[str, str | None], dict[str, str], bool]:
-    """Return (answers{id->'1'|'0'|None}, explanations, parse_ok); parse_ok iff every id got a 1/0."""
     obj = extract_json(raw, prefer_keys=("answers",))
     items = obj.get("answers") if isinstance(obj, dict) else obj
     answers: dict[str, str | None] = {qid: None for qid in question_ids}
@@ -1218,25 +1153,18 @@ def parse_answers(
     return answers, explanations, parse_ok
 
 
-# --------------------------------------------------------------------------- scoring
 
 REQUIRES_WEIGHTS = {
     "action": float(_os.environ.get("ALBEDO_EXP_W_ACTION", "2.0")),
     "read": float(_os.environ.get("ALBEDO_EXP_W_READ", "0.75")),
     "neutral": float(_os.environ.get("ALBEDO_EXP_W_NEUTRAL", "0.25")),
 }
-# Size compliance is a MULTIPLIER, not votes: a verbose model that brushes every milestone via
-# sheer output volume must not out-vote the ladder (observed: 16k-word king passes 64% of
-# action checks). floor 0.6 keeps the factor from dominating honest thoroughness.
 SIZE_FACTOR_FLOOR = float(_os.environ.get("ALBEDO_EXP_SIZE_FLOOR", "0.6"))
 
 
 def judge_yes_rate(
     answers: dict[str, str | None], questions: list[dict[str, str]] | None = None
 ) -> float | None:
-    """Weighted mean of 1/0 answers: action-requiring checks count 1.5x, read 1.0x, neutral
-    (size/protocol) 0.5x — real work separates candidates; freebies must not compress them.
-    Without question metadata (or without labels) this reduces to the plain mean."""
     if questions:
         size_ids = {q.get("id") for q in questions if q.get("category") == "size"}
         weight_by_id = {
@@ -1269,7 +1197,6 @@ def response_score(
     per_judge_answers: dict[str, dict[str, str | None]],
     questions: list[dict[str, str]] | None = None,
 ) -> float | None:
-    """Per-judge yes-rate, then mean across judges. None if no judge yielded a rate."""
     rates = [
         r for r in (judge_yes_rate(a, questions) for a in per_judge_answers.values())
         if r is not None
@@ -1284,8 +1211,6 @@ def challenger_beats_king(score_challenger: float, score_king: float) -> bool:
 def aggregate_scores(
     records: list[dict[str, Any]], *, min_valid_fraction: float = 0.8
 ) -> dict[str, Any]:
-    """Per-sample records -> verdict summary; eval FAILS if < min_valid_fraction of samples scored.
-    score_king/score_challenger are independent — they do NOT sum to 1."""
     total = len(records)
     valid = [r for r in records if r.get("scored")]
     valid_count = len(valid)
@@ -1355,7 +1280,6 @@ def aggregate_scores(
     }
 
 
-# --------------------------------------------------------------------------- response hygiene
 _INJECTION_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r'\{\s*"verdict"\s*:\s*"[^"]*"[^}]*\}', re.IGNORECASE),
     re.compile(r'\{\s*"injection"\s*:\s*(true|false)[^}]*\}', re.IGNORECASE),
@@ -1368,7 +1292,6 @@ _VERDICT_LABELS = frozenset({"accept", "weak_pass", "reject"})
 
 
 def strip_reply_injection(reply: str) -> str:
-    """Blank/clean verdict-like injection a candidate response may embed to hijack the judge."""
     cleaned = _DELIMITER_INJECTION_RE.sub("", reply or "")
     for pattern in _INJECTION_PATTERNS:
         cleaned = pattern.sub("", cleaned)

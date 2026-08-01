@@ -1,4 +1,3 @@
-"""Backend detection, HF/Hippius dispatch, preflight, and manifest-URI routing."""
 import pytest
 
 from config_validation.models import BACKEND_HF, BACKEND_HIPPIUS, ModelRef, detect_backend
@@ -36,7 +35,7 @@ def test_modelref_allows_mutable_when_enabled(monkeypatch):
 
 def test_modelref_explicit_backend_contradiction():
     with pytest.raises(ValueError):
-        ModelRef("ns/m", _SHA256, backend=BACKEND_HF)  # a sha256 digest cannot be hf
+        ModelRef("ns/m", _SHA256, backend=BACKEND_HF)
 
 
 def test_cache_dir_namespaced_no_collision():
@@ -61,7 +60,6 @@ def test_hf_download_and_list(monkeypatch, tmp_path):
     from config_validation.storage import _supervise
 
     calls = {}
-    # Exercise the in-process download so the monkeypatched snapshot_download is reached.
     monkeypatch.setattr(_supervise, "OUT_OF_PROCESS", False)
     monkeypatch.setattr(hf, "_cache_dir", lambda ref: tmp_path)
     monkeypatch.setattr(

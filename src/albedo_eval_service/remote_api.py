@@ -136,7 +136,7 @@ def _prefetch_model_artifact(model_uri: str, settings: RemoteSettings) -> None:
         with _prefetch_inflight_guard:
             _prefetch_failed_at.pop(model_uri, None)
         print(f"model_prefetch_done ref={model_uri} cache_hit={resolved.cache_hit}", flush=True)
-    except Exception as exc:  # noqa: BLE001 - prefetch is best-effort; the eval retries the download itself
+    except Exception as exc:
         with _prefetch_inflight_guard:
             _prefetch_failed_at[model_uri] = time.monotonic()
         logger.warning(f"[remote-api] model prefetch failed ref={model_uri}: {exc}")

@@ -105,8 +105,6 @@ def test_remote_api_model_prefetch_resolves_in_background(monkeypatch):
 
     assert response.status_code == 200
     assert response.json() == {"model_uri": model_uri, "state": "started"}
-    # TestClient runs background tasks before returning, so the resolve already happened
-    # and the in-flight marker was cleared again.
     assert calls == [model_uri]
     assert model_uri not in remote_api_module._prefetch_inflight
 

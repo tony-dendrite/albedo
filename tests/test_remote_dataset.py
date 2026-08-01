@@ -128,7 +128,6 @@ def test_load_swe_zero_sample_from_prompt_column(tmp_path):
 
 
 def test_load_sample_from_namespaced_source(tmp_path):
-    # mini-coder shards live under a namespaced subdir; the sample_id carries the prefix.
     shard_dir = tmp_path / "mini-coder" / "data"
     shard_dir.mkdir(parents=True)
     messages = [

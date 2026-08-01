@@ -63,7 +63,7 @@ def create_app(
             result = await asyncio.to_thread(
                 service.context_for, request.sample_id, request.assistant_output
             )
-        except Exception as exc:  # noqa: BLE001 - grounding must never fail the caller
+        except Exception as exc:
             logger.warning(
                 "repo_context_endpoint_error sample_id={} error={}",
                 request.sample_id, f"{type(exc).__name__}: {exc}",

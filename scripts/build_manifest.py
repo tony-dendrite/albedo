@@ -13,12 +13,12 @@ import pyarrow.parquet as pq
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from albedo_eval_service.sampling import _SHARD_RE  # noqa: E402
+from albedo_eval_service.sampling import _SHARD_RE
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from build_manifest_meta import write_meta  # noqa: E402
-from prepare_datasets import SOURCES  # noqa: E402
+from build_manifest_meta import write_meta
+from prepare_datasets import SOURCES
 
 DEFAULT_VERSION = "mini-coder+open-swe+smith-rs+hero-v1"
 
@@ -37,8 +37,6 @@ def _sha256(path: Path) -> str:
             h.update(chunk)
     return h.hexdigest()
 
-# judge_core._EDIT_COMMAND_RE, tightened: its bare `>` also matches `2>/dev/null` and `-> str`, which
-# fire on turn 1-2 and drag first_edit to the front. The judge's own regex stays as-is.
 _EDIT_RE = re.compile(
     r"sed\s+-i|tee\s+[\w./-]|cat\s*>|str_replace|git apply|patch\s+-p|applypatch|"
     r"cp\s+[\w./-]|mv\s+[\w./-]|(?<![-\d&])>>?\s*(?!/dev/)[\w.][\w./-]*"
@@ -46,8 +44,6 @@ _EDIT_RE = re.compile(
 
 
 def _family(instance_id: str) -> str:
-    """Bug family from the instance_id grammar. SWE-smith ids are
-    ``owner__repo.<sha>.<strategy>__<hash>``; real-PR ids are ``owner__repo-<N>`` (no dot)."""
     if "." not in instance_id:
         return "pr"
     tail = instance_id.rsplit(".", 1)[-1]
@@ -58,8 +54,6 @@ def _family(instance_id: str) -> str:
 
 
 def _row_meta(path: Path, blocked: frozenset[str] = frozenset(), language: str = "") -> list[dict]:
-    """Rendered sources ship first_edit/family/repo and those win: their first_edit comes from the
-    structured tool calls, the only way to tell a read-only `view` from a real write."""
     metas: list[dict] = []
     parquet_file = pq.ParquetFile(path)
     available = set(parquet_file.schema_arrow.names)
@@ -72,7 +66,7 @@ def _row_meta(path: Path, blocked: frozenset[str] = frozenset(), language: str =
             asst = 0
             regex_first_edit = 0
             running = 0
-            chars_by_turn: list[int] = []  # prefix chars once assistant turn i is included
+            chars_by_turn: list[int] = []
             for turn in row.get("messages") or []:
                 if not isinstance(turn, dict):
                     continue
@@ -82,7 +76,7 @@ def _row_meta(path: Path, blocked: frozenset[str] = frozenset(), language: str =
                 asst += 1
                 chars_by_turn.append(running)
                 if not regex_first_edit and _EDIT_RE.search(str(turn.get("content") or "")):
-                    regex_first_edit = asst  # 1-based assistant-turn index
+                    regex_first_edit = asst
             given = row.get("first_edit")
             first_edit = int(given) if given is not None else regex_first_edit
 
@@ -93,14 +87,12 @@ def _row_meta(path: Path, blocked: frozenset[str] = frozenset(), language: str =
 
             metas.append(
                 {
-                    # flagged, not dropped: row indices must stay aligned with the parquet file
                     **({"blocked": True} if iid in blocked else {}),
                     "iid": iid,
                     "asst": asst,
                     "first_edit": first_edit,
                     "family": str(row.get("family") or _family(iid)),
                     "repo": str(row.get("repo") or iid.split(".")[0]),
-                    # per-phase prefix size, for the sampler's MAX_PREFIX_CHARS gate
                     "language": str(row.get("language") or language or "unknown"),
                     "verified": bool(row.get("verified")) if "verified" in available else None,
                     "chars_at": _chars(first_edit or 1),
@@ -130,9 +122,8 @@ def _build_source(name: str, root: Path, *, max_workers: int = 8) -> dict:
         )
         return {"path": shard_path, "rows": len(rows_meta), "sha256": _sha256(path), "rows_meta": rows_meta}
 
-    # Hashing reads every shard's bytes; overlap that I/O across shards.
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        shards = list(pool.map(_shard, files))  # map preserves input (sorted) order
+        shards = list(pool.map(_shard, files))
     total_rows = sum(s["rows"] for s in shards)
 
     return {
@@ -164,12 +155,10 @@ def write_manifest(
     version: str = DEFAULT_VERSION,
     max_workers: int = 8,
 ) -> tuple[Path, dict, str]:
-    """Build the combined manifest, write it locally, and return (path, manifest, sha256)."""
     out_path = Path(out_path) if out_path else Path(root) / "manifest.json"
     manifest = build_manifest_dict(Path(root), names, version=version, max_workers=max_workers)
     payload = json.dumps(manifest, sort_keys=True, indent=2).encode("utf-8")
     out_path.write_bytes(payload)
-    # the dashboard fetches a rows_meta-stripped copy; keep it in lockstep with the manifest
     write_meta(manifest, out_path.with_name("manifest.meta.json"))
     return out_path, manifest, hashlib.sha256(payload).hexdigest()
 

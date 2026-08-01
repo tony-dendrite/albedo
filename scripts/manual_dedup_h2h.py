@@ -1,39 +1,18 @@
 #!/usr/bin/env python3
-"""Whole-model head-to-head weight comparison — is model A a copy of model B, or a real
-finetune of it?  Standalone, no albedo deps.  Reads every weight (full coverage, not a
-sample) so it is hard to game; not built for speed — it checks the whole model.
 
-For each unordered pair of the configured models it reports, over their shared tensors:
-  frac_changed : fraction of ALL weights whose bf16 code differs        (density of change)
-  het_cv       : per-tensor relative-change heterogeneity                (uniform noise ~0)
-  kurt         : excess-kurtosis of the delta                            (gaussian noise ~0)
-and a verdict:
-  COPY    — frac/het/kurt below thresholds ⇒ a copy or code-perturbed copy (no real training)
-  DISTINCT— a real finetune / independent model (building on it is allowed)
+WORKERS = 16
 
-Every signal is computed over the WHOLE model — every weight, no sampling — via streaming
-per-tensor accumulators, so nothing is left un-checked.
-
-═══════════════════════════ CONFIG — edit this block ═══════════════════════════"""
-
-WORKERS = 16                 # parallel tensor readers
-
-# Local model directories to compare head-to-head (every pair). Each must hold
-# model.safetensors.index.json + the *.safetensors shards.
 MODELS = [
     "path"
 ]
 
-# Optional: a HuggingFace repo to download and add to the comparison set. "" to skip.
-DOWNLOAD_REPO = ""           # e.g. "dendriteholdings/albedo-qwen3.6-35b-king-LXVII" or "...@<rev>"
+DOWNLOAD_REPO = ""
 DOWNLOAD_DIR = "/root/models"
-HF_TOKEN = ""                # falls back to env HF_TOKEN / HUGGING_FACE_HUB_TOKEN
+HF_TOKEN = ""
 
-# Verdict thresholds (below any ⇒ COPY).
-FRAC_MIN = 0.012             # <1.2% of weights changed ⇒ not a real (dense) finetune
-HET_MIN = 0.15               # rel-uniform change ⇒ code-noise, not training
-KURT_MIN = 1.0               # structureless (gaussian) delta ⇒ noise, not training
-# ════════════════════════════════════════════════════════════════════════════════
+FRAC_MIN = 0.012
+HET_MIN = 0.15
+KURT_MIN = 1.0
 
 import json
 import os
@@ -45,10 +24,9 @@ from pathlib import Path
 
 import numpy as np
 
-# bf16 code space so any float dtype compares apples-to-apples.
 _NP = {"BF16": "<u2", "F16": "<f2", "F32": "<f4", "F64": "<f8"}
 _ITEM = {"BF16": 2, "F16": 2, "F32": 4, "F64": 8}
-_CHUNK = 8_000_000           # elements per read chunk (bounds worker memory; all weights are read)
+_CHUNK = 8_000_000
 
 
 def _is_vision(key: str) -> bool:
@@ -56,7 +34,6 @@ def _is_vision(key: str) -> bool:
 
 
 def bf16_codes(raw: np.ndarray, dtype: str) -> np.ndarray:
-    """Raw tensor values → bf16 uint16 codes (round-to-nearest-even)."""
     if dtype == "BF16":
         return raw.view("<u2") if raw.dtype != np.uint16 else raw
     u = raw.astype(np.float32).view(np.uint32).astype(np.uint64)
@@ -68,7 +45,6 @@ def decode_bf16(u16: np.ndarray) -> np.ndarray:
 
 
 def tensor_index(model_dir: str) -> dict:
-    """{tensor_key: (shard_path, dtype, byte_start, byte_end)} for every float tensor."""
     d = Path(model_dir)
     idx_file = d / "model.safetensors.index.json"
     if idx_file.exists():
@@ -92,20 +68,14 @@ def tensor_index(model_dir: str) -> dict:
 
 
 def _compare_tensor(args):
-    """One tensor, read once per model over ALL its weights (no sampling): full-coverage
-    change count + full-coverage delta stats via streaming moment accumulators.
-      rel  = ‖A−B‖ / ‖B‖                       (relative change magnitude, whole tensor)
-      kurt = m4/m2² − 3                          (excess kurtosis of the delta, whole tensor)
-    Moments S1..S4 are summed in float64 across chunks, so the whole tensor is covered
-    without ever holding it fully decoded."""
     key, spec_a, spec_b = args
     pa, da, sa, _ = spec_a
     pb, db, sb, _ = spec_b
     n = (spec_a[3] - spec_a[2]) // _ITEM[da]
     if n != (spec_b[3] - spec_b[2]) // _ITEM[db]:
-        return None                                    # shape mismatch → not comparable
+        return None
     changed = 0
-    S1 = S2 = S3 = S4 = Sb2 = 0.0                       # Σd, Σd², Σd³, Σd⁴, Σb²  (float64)
+    S1 = S2 = S3 = S4 = Sb2 = 0.0
     with open(pa, "rb") as fa, open(pb, "rb") as fb:
         for off in range(0, n, _CHUNK):
             m = min(_CHUNK, n - off)

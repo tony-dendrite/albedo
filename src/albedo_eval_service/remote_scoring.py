@@ -188,7 +188,6 @@ class WebSocketScoringClient:
 
 
 class MockScoringClient:
-    """Small deterministic scorer retained for unit tests and control-plane smoke runs only."""
 
     def __init__(self, settings: RemoteSettings):
         self.settings = settings
@@ -347,11 +346,6 @@ def _collect_score_batches(
     *,
     max_concurrency: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Send score batches concurrently; records/summaries keep the payload order.
-
-    Keep max_concurrency * scoring_batch_size * 2 within ~2x the judge API's
-    per-model semaphore, or per-batch latency can exceed the scoring timeout.
-    """
     all_records: list[dict[str, Any]] = []
     summaries: list[dict[str, Any]] = []
     if not payloads:

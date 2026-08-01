@@ -1,11 +1,3 @@
-"""Validate a model/repo with the validator's OWN check functions — no deduplication.
-
-Reuses model_validation.validate (the same code the validator runs): the strict file
-manifest + the universal spec-driven architecture check, plus — on a full local model — the
-safetensors-index consistency check and the 16-bit weight-dtype check. No OpenSearch/Postgres
-involved. The remote check fetches config.json only, so it runs the file + architecture checks
-(the index/dtype checks need the safetensors and run in validate_local).
-"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -29,7 +21,6 @@ def _result(checks: dict[str, tuple[bool, str]]) -> tuple[bool, dict]:
 
 
 def validate_local(path: str) -> tuple[bool, dict]:
-    """Validate a local model directory before upload."""
     logger.info(f"validating local model: {path}")
     files = [p.name for p in Path(path).iterdir() if p.is_file()]
     logger.info("checking file manifest…")
@@ -49,7 +40,6 @@ def validate_local(path: str) -> tuple[bool, dict]:
 
 
 def validate_remote(repo: str, digest: str) -> tuple[bool, dict]:
-    """Validate an uploaded repo (lists files + fetches config.json only); HF or Hippius."""
     from huggingface_hub.errors import (
         EntryNotFoundError,
         RepositoryNotFoundError,
@@ -72,7 +62,7 @@ def validate_remote(repo: str, digest: str) -> tuple[bool, dict]:
     except EntryNotFoundError:
         return _result({"file_manifest": (False, f"config.json missing from {repo}@{digest}"),
                         "architecture": (False, "skipped")})
-    except Exception as exc:  # noqa: BLE001 — surface a readable reason, not a traceback
+    except Exception as exc:
         return _result({"file_manifest": (False, f"could not read {repo}@{digest}: {exc}"),
                         "architecture": (False, "skipped")})
 

@@ -1,20 +1,4 @@
 #!/usr/bin/env python3
-"""Derive the dashboard's manifest.meta.json from a full (rows_meta-enriched) manifest.
-
-The browser can't fetch the full manifest (rows_meta makes it GB-scale), so the dashboard reads a
-stripped copy instead (website/js/config.js MANIFEST_ENDPOINTS -> datasets/manifest.meta.json).
-Besides dropping rows_meta, the meta file carries what the old per-source ``weight`` used to convey:
-per-source pool aggregates (unique instances by family/language) and the sampler's stratification
-constants, so the dashboard can show the mix the eval actually draws.
-
-Stats are counted over unique non-blocked instances — the sampler pools one rollout per instance and
-skips blocked rows, so instance-level counts are the ones comparable to FAMILY_MIX.
-
-build_manifest.py writes the meta file alongside the manifest automatically; this CLI re-derives it
-from an existing manifest.json (json.load of the full file — run it on the build box):
-
-    python scripts/build_manifest_meta.py --manifest /eval/datasets/manifest.json
-"""
 
 from __future__ import annotations
 
@@ -25,7 +9,7 @@ from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from albedo_eval_service.sampling import (  # noqa: E402
+from albedo_eval_service.sampling import (
     BENCHMARK_LANGUAGE,
     FAMILY_MIX,
     MAX_PREFIX_CHARS,
@@ -36,8 +20,6 @@ from albedo_eval_service.sampling import (  # noqa: E402
 
 
 def _source_stats(source: dict) -> tuple[dict, set[str]]:
-    """(stats, non-blocked instance ids). Family/language are constant per instance (both derive
-    from the instance_id / the source), so the first rollout seen wins."""
     by_instance: dict[str, dict] = {}
     blocked_rows = 0
     for shard in source.get("shards", []):
@@ -83,10 +65,7 @@ def build_meta_dict(manifest: dict) -> dict:
     return {
         **{k: v for k, v in manifest.items() if k != "sources"},
         "sources": sources,
-        # pooled across sources = the sampler's pool size (an instance in two corpora counts once)
         "unique_instances": len(pool),
-        # the target mix lives in code now, not in per-source weights; [name, share] pairs so the
-        # display order survives json.dumps(sort_keys=True)
         "sampling": {
             "phases": [[name, share] for name, share in STEP_TRIM],
             "families": [[name, share] for name, share in FAMILY_MIX],

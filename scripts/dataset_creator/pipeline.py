@@ -1,33 +1,4 @@
 #!/usr/bin/env python3
-"""Incremental pipeline: eval machine -> local artifacts -> 100-row parquets -> HF splits.
-
-Primary source is the eval machine's artifact dir, polled for new run dirs
-(no S3 download when the data is already stored there). Each tick:
-1. lists <eval_artifacts_dir> on the eval machine; fetches every COMPLETE
-   (verdict.json present) run dir not yet processed,
-2. extracts (sample_id, messages) rows per reference model into the JSON
-   buffers pending/<model>.json — runs whose jsonl predates the
-   reference-trajectory fields yield 0 rows and are recorded as skipped,
-3. cuts hf_out/<model>/<model>-NNNN.parquet for every COMPLETE 100-row slice,
-   deleting the used rows from the buffer (leftovers wait for the next tick),
-4. uploads new chunks to the HF dataset repo (one named split per model).
-
-If no new run dir has appeared for `stall_hours` (default 2h), the eval DB is
-queried to tell "queue is idle" apart from "evals happened but artifacts are
-missing" — any SUCCEEDED runs the machine no longer has are backfilled from S3.
-
-Permanent ledger (processed runs, cut chunks, upload status, meta) lives in
-SQLite at <data_dir>/state.db; processed runs are skipped on startup.
-Idempotent — safe to re-run / cron / pm2-restart.
-
-All deployment specifics come from env / the repo-root .env
-(see .env.example): data dir, eval machine, DB access, HF repo, HF_TOKEN.
-
-Usage:
-  python3 scripts/dataset_creator/pipeline.py            # one tick (cron mode)
-  python3 scripts/dataset_creator/pipeline.py --watch    # poll every 5 minutes
-  python3 scripts/dataset_creator/pipeline.py --no-upload
-"""
 
 from __future__ import annotations
 
@@ -38,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.stdout.reconfigure(line_buffering=True)  # keep pm2 logs live
+sys.stdout.reconfigure(line_buffering=True)
 
 from config import Config
 from db import query_succeeded_runs
@@ -86,7 +57,6 @@ def scan_eval_machine(cfg: Config, state: State) -> None:
 
 
 def db_health_check(cfg: Config, state: State) -> None:
-    """No new dirs for a while — ask the DB whether evals are genuinely idle."""
     print(f"no new run dir for {cfg.stall_hours}h — checking DB")
     runs = query_succeeded_runs(cfg, state.get_meta("anchor"))
     missing = {r: v for r, v in runs.items() if not state.is_processed(r)}
@@ -105,7 +75,7 @@ def db_health_check(cfg: Config, state: State) -> None:
 def tick(cfg: Config, state: State, no_upload: bool) -> int:
     try:
         scan_eval_machine(cfg, state)
-    except Exception as e:  # noqa: BLE001 - machine may be recycled; DB path still works
+    except Exception as e:
         print(f"eval-machine scan failed ({e}) — will rely on DB fallback")
 
     stall = timedelta(hours=cfg.stall_hours)
@@ -113,7 +83,7 @@ def tick(cfg: Config, state: State, no_upload: bool) -> int:
             and _now() - _ts(state.get_meta("last_db_check_at")) > stall):
         try:
             db_health_check(cfg, state)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             print(f"DB health check failed ({e})")
 
     print("chunks:")
@@ -128,7 +98,7 @@ def tick(cfg: Config, state: State, no_upload: bool) -> int:
         return 0
     try:
         upload(cfg, state, repo)
-    except Exception as e:  # noqa: BLE001 - keep chunks pending, retry next tick
+    except Exception as e:
         print(f"upload failed ({e}); {len(state.pending_uploads())} chunks remain pending")
         return 1
     return 0

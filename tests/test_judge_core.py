@@ -43,7 +43,6 @@ def test_question_prompt_requires_trajectory_coverage():
     assert "===== RULE 2: PUT THE TARGET IN THE FIRST THREE WORDS =====" in system
     assert "===== RULE 3: EVERY QUESTION MUST BE FAILABLE =====" in system
     assert '"tag":"explore|verification|action|economy"' in system
-    # section counts at n=50: 48/12/8/22/10 percent -> 24/6/4/11/5 questions
     assert "SECTION 1 of 5 — WORKFLOW AND VERIFICATION BACKBONE. Write EXACTLY 24 questions." in user
     assert "SECTION 2 of 5 — TERMINAL INTEGRITY. Write EXACTLY 6 questions." in user
     assert "SECTION 3 of 5 — FAILURE REACTION. Write EXACTLY 4 questions." in user
@@ -130,7 +129,6 @@ def test_parse_questions_assigns_ids_and_category():
     assert ok is True
     assert [q["id"] for q in questions] == ["q_01", "q_02", "q_03"]
     assert all(q["category"] == "other" for q in questions)
-    # below the floor -> not ok
     _, ok2 = parse_questions(json.dumps({"questions": []}), 3)
     assert ok2 is False
 
@@ -147,7 +145,6 @@ def test_parse_answers_is_binary():
     answers, _explanations, parse_ok = parse_answers(raw, ["q_01", "q_02"])
     assert parse_ok is True
     assert answers == {"q_01": "1", "q_02": "0"}
-    # a -1 is no longer a valid answer -> unparsed -> parse_ok flips
     bad = json.dumps({"answers": [{"id": "q_01", "answer": -1, "explanation": "e"}]})
     answers2, _e, parse_ok2 = parse_answers(bad, ["q_01"])
     assert answers2 == {"q_01": None}
@@ -156,7 +153,6 @@ def test_parse_answers_is_binary():
 
 def test_judge_yes_rate_and_response_score():
     assert judge_yes_rate({"a": "1", "b": "0", "c": "1"}) == round(2 / 3, 6)
-    # per-judge yes-rates 1.0 and 0.5 -> mean 0.75 across judges
     per_judge = {"j1": {"q_01": "1", "q_02": "1"}, "j2": {"q_01": "1", "q_02": "0"}}
     assert response_score(per_judge) == 0.75
 
@@ -262,12 +258,11 @@ def test_aggregate_scores_crowns_on_margin():
     assert summary["challenger_won"] is True
     assert summary["scoring_mode"] == "binary"
 
-    below = aggregate_scores([_record(0.30, 0.31) for _ in range(10)])  # Δ 0.01 < 0.02 margin
+    below = aggregate_scores([_record(0.30, 0.31) for _ in range(10)])
     assert below["challenger_won"] is False
 
 
 def test_aggregate_scores_fails_when_too_few_valid():
-    # 6/10 samples unscored (judge parse failures) -> valid fraction 0.4 < 0.5 -> invalid eval.
     records = [_record(0.3, 0.4) for _ in range(4)] + [
         _record(0.3, 0.4, scored=False) for _ in range(6)
     ]
@@ -277,17 +272,14 @@ def test_aggregate_scores_fails_when_too_few_valid():
 
 
 def test_parse_questions_drops_duplicates_and_rejects_degenerate_padding():
-    # Observed in production: the evaluator fills its 50-question quota by repeating one question
-    # (worst case 44x), letting a single check dominate the sample score.
     degenerate = json.dumps(
         {"questions": [{"text": "q0?", "example_bad": "b"}]
          + [{"text": "Does the response check X?", "example_bad": "b"} for _ in range(49)]}
     )
     out, ok = parse_questions(degenerate, 50)
     assert [q["text"] for q in out] == ["q0?", "Does the response check X?"]
-    assert ok is False  # 2 unique < question_floor(50)=20 -> accept hook retries the evaluator
+    assert ok is False
 
-    # near-exact repeats (case/whitespace) are the same check
     fuzzy = json.dumps(
         {"questions": [{"text": "Does it pass?", "example_bad": "b"},
                        {"text": "  does IT pass? ", "example_bad": "b"}]}
@@ -295,7 +287,6 @@ def test_parse_questions_drops_duplicates_and_rejects_degenerate_padding():
     out2, _ = parse_questions(fuzzy, 2)
     assert len(out2) == 1
 
-    # enough unique questions among some repeats -> accepted, ids stay sequential and texts unique
     mixed = json.dumps(
         {"questions": [{"text": f"q{i % 9}?", "example_bad": "b"} for i in range(10)]}
     )
@@ -306,8 +297,6 @@ def test_parse_questions_drops_duplicates_and_rejects_degenerate_padding():
 
 
 def test_parse_questions_drops_semantic_near_duplicates():
-    # Observed in production: paraphrase padding ("...as a lazy/hasty/premature finish?") and
-    # template stamping ("avoids editing <file X>?" per file) survive exact-match dedup.
     marker = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
     paraphrases = [
         f"Does the response avoid using echo {marker} as a no-op finish?",
@@ -335,8 +324,6 @@ def test_parse_questions_drops_semantic_near_duplicates():
 
 
 def test_parse_questions_caps_template_stamping():
-    # Observed in production: one template re-aimed at a different symbol each time ("Does the
-    # THOUGHT section mention <X>?" x22) — word-overlap misses it since every target differs.
     stamped = [
         "Does the THOUGHT section mention the platform matcher or node selector labels?",
         "Does the THOUGHT section mention scheduling Kaniko pods on matching nodes?",
@@ -380,8 +367,6 @@ def test_parse_questions_caps_generic_hygiene_checks():
 
     assert ok is True
     assert GENERIC_HYGIENE_QUESTION_LIMIT == 3
-    # Numeric-bound size checks ("under 100 words", "40 lines") are measurement-ladder
-    # questions: answered from the MEASUREMENTS block and exempt from the hygiene cap.
     measurement_bound = [t for t in generic if any(ch.isdigit() for ch in t)]
     non_numeric_kept = sum(t in texts for t in generic if t not in measurement_bound)
     assert non_numeric_kept == GENERIC_HYGIENE_QUESTION_LIMIT
@@ -437,13 +422,10 @@ def test_parse_questions_keeps_validated_tag_and_blanks_invalid():
     )
     out, _ok = parse_questions(raw, 10)
 
-    # valid tags survive (case/whitespace normalized), unknown or missing tags become ""
     assert [q["tag"] for q in out] == ["action", "verification", "", "economy", ""]
 
 
 def test_question_schema_floor_does_not_force_padding():
-    # Floor sits well under the evaluator's real supply of distinct checks (~25-35 per task):
-    # a floor near n forces quota-padding with paraphrase/template repeats.
     schema = question_schema(50)["properties"]["questions"]
     assert schema["minItems"] == 11 and schema["maxItems"] == 50
 
@@ -460,18 +442,18 @@ def test_question_schema_includes_tag_enum():
 def test_parse_questions_accepts_slightly_short_and_truncates_extra():
     q9 = json.dumps({"questions": [{"text": f"q{i}", "example_bad": "b"} for i in range(9)]})
     out, ok = parse_questions(q9, 10)
-    assert ok is True and len(out) == 9 and out[-1]["id"] == "q_09"   # >= floor -> accepted
+    assert ok is True and len(out) == 9 and out[-1]["id"] == "q_09"
 
     q11 = json.dumps({"questions": [{"text": f"q{i}", "example_bad": "b"} for i in range(9)] + [
         {"text": "Does the next turn use the observed KeyError?", "example_bad": "b"},
         {"text": "Does the command target a real cache file?", "example_bad": "b"},
     ]})
     out2, ok2 = parse_questions(q11, 10)
-    assert ok2 is True and len(out2) == 10                             # extra truncated to n
+    assert ok2 is True and len(out2) == 10
 
     q10 = json.dumps({"questions": [{"text": f"q{i}", "example_bad": "b"} for i in range(10)]})
     _, ok3 = parse_questions(q10, 50)
-    assert ok3 is False                                            # < floor -> not ok (retry/fail)
+    assert ok3 is False
 
 
 def test_parse_questions_accepts_sparse_terminal_gates_when_list_is_large_enough():

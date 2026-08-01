@@ -295,8 +295,6 @@ def test_model_resolver_downloads_bare_hf_chain_ref(tmp_path, monkeypatch):
 
     monkeypatch.setattr(huggingface_hub, "snapshot_download", fake_snapshot_download, raising=False)
     revision = "d" * 40
-    # Chain commits store "<repo>@<git-sha>" with no scheme; the resolver must treat it
-    # as an HF ref, not pass it through to vLLM.
     ref = f"alice/albedo-qwen3.6-35b-hf@{revision}"
     resolver = ModelArtifactResolver(
         RemoteSettings(
@@ -331,7 +329,6 @@ def test_download_supervisor_kills_stalled_child(tmp_path, monkeypatch):
     launched: list[subprocess.Popen] = []
 
     def fake_spawn(repo, revision, temp_dir, concurrency, log_path, child_entry="_hf_download_child"):
-        # A child that never writes to temp_dir and refuses to exit — a wedged transfer.
         proc = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(600)"],
             start_new_session=True,
@@ -354,9 +351,9 @@ def test_download_supervisor_kills_stalled_child(tmp_path, monkeypatch):
             max_attempts=2,
         )
 
-    assert len(launched) == 2  # stalled once, retried, then gave up
+    assert len(launched) == 2
     for proc in launched:
-        assert proc.poll() is not None  # every stalled child was terminated
+        assert proc.poll() is not None
 
 
 def test_download_supervisor_raises_on_child_error(tmp_path, monkeypatch):
@@ -390,9 +387,9 @@ def test_download_supervisor_budget_resets_on_progress(tmp_path, monkeypatch):
         attempt = len(launched) + 1
         marker = Path(temp_dir) / "model-00001.safetensors"
         if attempt == 1:
-            marker.write_bytes(b"x" * 4096)  # bytes grow, then the transfer wedges
+            marker.write_bytes(b"x" * 4096)
         elif attempt == 2:
-            marker.unlink()  # shard retry deletes its partial: bytes DROP, then wedge
+            marker.unlink()
         proc = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(600)"],
             start_new_session=True,
@@ -415,8 +412,6 @@ def test_download_supervisor_budget_resets_on_progress(tmp_path, monkeypatch):
             max_attempts=2,
         )
 
-    # Attempts 1 (growth) and 2 (deletion) both moved bytes, so neither burned the
-    # retry budget; only the two final zero-movement attempts did.
     assert len(launched) == 4
     for proc in launched:
         assert proc.poll() is not None

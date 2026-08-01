@@ -1,13 +1,4 @@
 #!/usr/bin/env python3
-"""Regenerate the locked architecture spec from the genesis seed model config.
-
-Downloads the genesis seed config.json (via config_validation) and writes the expected
-`architectures` + lock-key values + forbidden keys to the architecture spec file. This makes
-the spec authoritative (derived from the current genesis) rather than hand-maintained.
-
-Usage:
-    python scripts/generate_arch_spec.py [output_path]
-"""
 from __future__ import annotations
 
 import json
@@ -22,11 +13,6 @@ _FORBIDDEN = ["auto_map", "quantization_config"]
 
 
 def _collect_expected(cfg: dict) -> dict:
-    """Pull lock-key values, falling back to a nested text_config for multimodal models.
-
-    Flat text models (e.g. the genesis qwen3 seed) keep these at the top level; multimodal
-    MoE models (e.g. Qwen3.6-35B-A3B) nest the language-model values under `text_config`.
-    """
     text_cfg = cfg.get("text_config") or {}
     expected = {}
     for key in ALL_LOCK_KEYS:

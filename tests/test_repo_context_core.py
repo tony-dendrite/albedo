@@ -56,7 +56,6 @@ def test_parse_instance_formats():
     assert (swe.repo, swe.pr) == ("secrets-store-csi-driver-provider-azure", "466")
     mini = parse_instance("mini-coder", "seperman__deepdiff.4b8fa12__m1")
     assert (mini.owner, mini.repo, mini.commit) == ("seperman", "deepdiff", "4b8fa12")
-    # real-world shape: dotted suffix after the sha, uid tail
     goat = parse_instance("mini-coder", "arp242__goatcounter.854b1dd2.lm_modify__1vcxllzm")
     assert (goat.owner, goat.repo, goat.commit) == ("arp242", "goatcounter", "854b1dd2")
     assert parse_instance("swe-zero", "owner__repo-notanumber") is None
@@ -115,7 +114,6 @@ def test_resolve_sha_renamed_repo_and_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(service, "_github_json", fake_github_json)
     ref = parse_instance("swe-zero", "old__name-12")
     assert service._resolve_sha(ref) == ("new", "name", FULL_SHA)
-    # Second resolve is served from the per-instance cache file.
     assert service._resolve_sha(ref) == ("new", "name", FULL_SHA)
     assert len(calls) == 3
 
@@ -131,7 +129,7 @@ def test_resolve_sha_negative_cache_ttl(tmp_path, monkeypatch):
     monkeypatch.setattr(service, "_github_json", failing)
     ref = parse_instance("swe-zero", "own__repo-3")
     assert service._resolve_sha(ref) is None
-    assert service._resolve_sha(ref) is None  # fresh negative cache: no new API call
+    assert service._resolve_sha(ref) is None
     assert len(calls) == 1
 
     cache_file = service.cache_dir / "shas" / "own__repo-3.json"
@@ -139,7 +137,7 @@ def test_resolve_sha_negative_cache_ttl(tmp_path, monkeypatch):
     stale["failed_at"] = time.time() - 2 * 24 * 3600
     cache_file.write_text(json.dumps(stale))
     assert service._resolve_sha(ref) is None
-    assert len(calls) == 2  # expired negative cache: retried
+    assert len(calls) == 2
 
 
 def _tar_bytes() -> bytes:
@@ -169,7 +167,6 @@ def test_extract_tarball_sanitizes_members(tmp_path):
     dest = tmp_path / "out"
     dest.mkdir()
     listing, extracted_bytes = service._extract_tarball(tar_path, dest)
-    # huge.bin stays in the listing (it exists in the repo tree) but is never extracted.
     assert listing == ["huge.bin", "src/app.py"]
     assert extracted_bytes == len(b"print('hi')\n")
     assert (dest / "src/app.py").read_text() == "print('hi')\n"
@@ -202,10 +199,9 @@ def test_repo_block_contents_and_containment(tmp_path, monkeypatch):
     assert "- /etc/passwd" in not_present
     assert "- ../../secret" in not_present
     assert "- missing/file.py" in not_present
-    assert "s/a/b" not in not_present  # sed scripts are not reported as files
-    assert "- src" not in not_present  # existing directory is not "missing"
-    assert "- ." not in not_present.split("- .env")[0]  # "." (repo root) is never "missing"
-    # The symlink planted inside the snapshot must never serve host content.
+    assert "s/a/b" not in not_present
+    assert "- src" not in not_present
+    assert "- ." not in not_present.split("- .env")[0]
     assert service._read_snapshot_file(snapshot, "link.py") is None
     assert "root:" not in block
 
@@ -228,7 +224,6 @@ def test_commands_cannot_reach_other_snapshots_or_host(tmp_path, monkeypatch):
     assert "OTHER SNAPSHOT SECRET" not in block
     assert "HOST SECRET" not in block
     assert "root:" not in block
-    # Only paths in THIS snapshot's listing are ever readable; traversal resolves are refused.
     snapshot = service.cache_dir / "snapshots" / SNAPSHOT_KEY
     escape = "../other__repo__000000000000/conf/secret.py"
     assert service._read_snapshot_file(snapshot, escape) is None
@@ -249,8 +244,6 @@ def test_filter_listing_and_caps(tmp_path, monkeypatch):
     )
     assert "... (+2 more matching files)" in result.context
 
-    # Nothing matches -> still grounded, with an explicit empty-result statement so the
-    # simulator answers with a bare format-correct empty observation.
     nothing = service.repo_context_for_instance(
         "swe-zero", "o__r-1", "```bash\nfind . -name '*.zig'\n```"
     )
@@ -260,8 +253,7 @@ def test_filter_listing_and_caps(tmp_path, monkeypatch):
 
 
 def test_contents_survive_huge_listing(tmp_path, monkeypatch):
-    # A huge repo listing must not crowd the cat'ed file contents out of the budget.
-    listing = [f"pkg/module_{i:05}.py" for i in range(6000)]  # ~110k chars of listing
+    listing = [f"pkg/module_{i:05}.py" for i in range(6000)]
     service = make_service(tmp_path, max_context_chars=30000)
     make_snapshot(
         service, {"src/target.py": "TARGET CONTENT " * 100}, listing=listing + ["src/target.py"]
@@ -271,8 +263,8 @@ def test_contents_survive_huge_listing(tmp_path, monkeypatch):
         "swe-zero", "o__r-1", "```bash\ncat src/target.py\n```"
     ).context
     assert len(block) <= 30000 + len("\n... (truncated)")
-    assert "TARGET CONTENT" in block  # contents survived the giant listing
-    assert "more matching files)" in block  # listing truncated with an accurate marker
+    assert "TARGET CONTENT" in block
+    assert "more matching files)" in block
     assert block.index("TARGET CONTENT") > block.index("more matching files")
 
 
@@ -284,14 +276,12 @@ def _write_trajectory_shard(root, turns):
 
 
 def test_iid_resolved_from_parquet_without_manifest(tmp_path):
-    # On the eval server the parquets are local: instance_id comes straight from the row,
-    # no multi-GB rows_meta manifest needed.
     root = tmp_path / "dataset"
     _write_trajectory_shard(root, [{"role": "user", "content": "task"}])
     service = make_service(tmp_path, dataset_root=str(root))
     assert service._iid_for("swe-zero/data/train-00000.parquet", 0) == ("swe-zero", "o__r-1")
-    assert service._iid_for("swe-zero/data/train-00000.parquet", 9) is None  # row out of range
-    assert service._iid_for("swe-zero/data/train-99999.parquet", 0) is None  # missing shard
+    assert service._iid_for("swe-zero/data/train-00000.parquet", 9) is None
+    assert service._iid_for("swe-zero/data/train-99999.parquet", 0) is None
 
 
 def test_trajectory_fallback_when_repo_unavailable(tmp_path, monkeypatch):
@@ -323,18 +313,16 @@ def test_trajectory_fallback_when_repo_unavailable(tmp_path, monkeypatch):
     assert result.kind == "trajectory"
     assert "REFERENCE STEP 1" in result.context
     assert "obs-1" in result.context and "obs-2" in result.context
-    assert "THOUGHT" not in result.context  # command-only, narration stripped
-    # The submission exchange (gold solution diff) must never reach the simulator.
+    assert "THOUGHT" not in result.context
     assert "GOLD SOLUTION DIFF" not in result.context
     assert "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" not in result.context
 
-    # turn_idx=1 skips exchanges already present in the transcript prefix
     later = service.context_for("swe-zero/data/train-00000.parquet:0:1", "```bash\npwd\n```")
     assert "obs-1" not in later.context and "obs-2" in later.context
 
 
 def test_fallback_chain_to_none_and_never_raises(tmp_path, monkeypatch):
-    service = make_service(tmp_path)  # no manifest, no dataset_root
+    service = make_service(tmp_path)
     result = service.context_for("swe-zero/data/train-00000.parquet:0:0", "```bash\nls\n```")
     assert result == GroundingContext(context=None, kind="none", reason="iid_unresolved")
 
@@ -347,15 +335,13 @@ def test_fallback_chain_to_none_and_never_raises(tmp_path, monkeypatch):
 
 
 def test_no_bypass_even_with_poisoned_listing(tmp_path, monkeypatch):
-    """Defense in depth: even if the listing allow-list itself were corrupted with escape
-    entries, the realpath gate must refuse every out-of-snapshot read."""
     service = make_service(tmp_path)
     host_secret = tmp_path / "host_secret.txt"
     host_secret.write_text("HOST SECRET\n")
     poisoned = [
         "../../../host_secret.txt",
-        str(host_secret),  # absolute path smuggled into the listing
-        "evil/host_secret.txt",  # via a directory symlink pointing outside
+        str(host_secret),
+        "evil/host_secret.txt",
         "src/app.py",
     ]
     snapshot = make_snapshot(service, {"src/app.py": "APP CONTENT\n"}, listing=poisoned)
@@ -368,7 +354,7 @@ def test_no_bypass_even_with_poisoned_listing(tmp_path, monkeypatch):
     )
     block = service.repo_context_for_instance("swe-zero", "o__r-1", command).context
     assert "HOST SECRET" not in block
-    assert "APP CONTENT" in block  # legitimate snapshot file still served
+    assert "APP CONTENT" in block
     for entry in poisoned[:3]:
         assert service._read_snapshot_file(snapshot, entry) is None
 
@@ -395,7 +381,6 @@ def test_extract_tarball_skips_metadata_collisions(tmp_path):
 
 
 def test_cache_limit_clears_snapshots_dir(tmp_path, monkeypatch):
-    # 1 KiB limit; the existing snapshot's done-marker records 2 KiB -> cleared before download.
     service = make_service(tmp_path, max_cache_gb=1024 / 1024**3)
     old_snapshot = make_snapshot(service, {"src/app.py": "x"})
     marker = old_snapshot / ".albedo-repo-context-done"
@@ -408,9 +393,8 @@ def test_cache_limit_clears_snapshots_dir(tmp_path, monkeypatch):
     new_sha = "0" * 40
     fresh = service._ensure_snapshot("other", "repo", new_sha)
     assert fresh is not None and (fresh / "src/app.py").exists()
-    assert not old_snapshot.exists()  # over limit: cache was cleared
+    assert not old_snapshot.exists()
 
-    # Under the limit nothing is cleared.
     roomy = make_service(tmp_path, cache_dir=str(tmp_path / "cache2"), max_cache_gb=60.0)
     kept = make_snapshot(roomy, {"src/app.py": "x"})
     monkeypatch.setattr(roomy, "_download_tarball", fake_download)
@@ -436,7 +420,7 @@ def test_prefetch_dedupes_and_skips_already_downloaded(tmp_path, monkeypatch):
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(json.dumps(manifest))
     service = make_service(tmp_path, dataset_manifest_path=str(manifest_path))
-    make_snapshot(service, {"src/app.py": "x"})  # o__r-2's snapshot already on disk
+    make_snapshot(service, {"src/app.py": "x"})
 
     new_sha = "1" * 40
     monkeypatch.setattr(
@@ -454,15 +438,14 @@ def test_prefetch_dedupes_and_skips_already_downloaded(tmp_path, monkeypatch):
     summary = service.prefetch(
         [
             "swe-zero/data/train-00000.parquet:0:0",
-            "swe-zero/data/train-00000.parquet:1:2",  # same instance -> deduped
-            "swe-zero/data/train-00000.parquet:2:0",  # already downloaded -> skipped
-            "garbage",  # ignored
+            "swe-zero/data/train-00000.parquet:1:2",
+            "swe-zero/data/train-00000.parquet:2:0",
+            "garbage",
         ]
     )
     assert summary == {"samples": 4, "instances": 2, "ready": 2}
-    assert downloads == [new_sha]  # exactly one download; cached snapshot untouched
+    assert downloads == [new_sha]
 
-    # A second prefetch of the same samples downloads nothing.
     again = service.prefetch(
         ["swe-zero/data/train-00000.parquet:0:0", "swe-zero/data/train-00000.parquet:2:0"]
     )
@@ -480,5 +463,5 @@ def test_oversized_snapshot_failure_is_cached(tmp_path, monkeypatch):
 
     monkeypatch.setattr(service, "_download_tarball", too_large)
     assert service._ensure_snapshot("o", "r", FULL_SHA) is None
-    assert service._ensure_snapshot("o", "r", FULL_SHA) is None  # served by failure marker
+    assert service._ensure_snapshot("o", "r", FULL_SHA) is None
     assert len(calls) == 1

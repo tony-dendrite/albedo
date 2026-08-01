@@ -1,4 +1,3 @@
-"""Async Postgres layer for chain commits and canonical submission creation."""
 from __future__ import annotations
 
 import asyncio
@@ -19,11 +18,6 @@ async def connect(db_url: str) -> asyncpg.Pool:
 
 
 async def insert_new_commits(pool: asyncpg.Pool, commits: list[Commit]) -> int:
-    """Insert new commits and create their model_submissions.
-
-    Returns the count of newly discovered chain commits. Existing commits are
-    repaired into submissions if needed, so a partial older ingest can resume.
-    """
     if not commits:
         return 0
     inserted = 0
@@ -76,9 +70,6 @@ async def insert_new_commits(pool: asyncpg.Pool, commits: list[Commit]) -> int:
 
                 idempotency_key = f"chain:{c.netuid}:{c.hotkey}:{c.payload_hash}"
 
-                # chain_guard: a hotkey already in the used_hotkeys ledger (legacy or burned by a
-                # prior eval) may not enter eval. Record the reuse as a rejected submission so the
-                # dashboard shows the reason, and publish a detection report to S3.
                 if await guard.is_used(conn, c.hotkey):
                     await _reject_reused_commit(conn, c, miner_id, row["id"], idempotency_key)
                     continue
@@ -142,7 +133,6 @@ async def _reject_reused_commit(
     chain_commit_id,
     idempotency_key: str,
 ) -> None:
-    """Record a reused-hotkey commit as a TERMINAL_INVALID submission and publish it to S3."""
     prior = await conn.fetchrow(
         "SELECT submission_id, source, block_number, raw_payload FROM used_hotkeys WHERE hotkey = $1",
         c.hotkey,

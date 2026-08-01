@@ -1,9 +1,3 @@
-"""Check #2: the repo file set matches the strict allowlist.
-
-A repo must contain every required file, may contain allowlisted files (exact names
-or glob patterns), must contain no forbidden files, and any other file is an
-unexpected extra. Any deviation is a config mismatch.
-"""
 from __future__ import annotations
 
 import fnmatch
@@ -25,7 +19,6 @@ def _matches_any(name: str, globs: tuple[str, ...]) -> bool:
 
 
 def check(files: list[str]) -> CheckOutcome:
-    """Validate ``files`` (filenames in the repo) against the strict allowlist."""
     present = set(files)
 
     missing = [f for f in REQUIRED_FILES if f not in present]

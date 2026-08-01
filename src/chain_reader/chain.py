@@ -1,9 +1,3 @@
-"""Bittensor chain reading — discover v7 model commits as Commit records.
-
-Self-contained (no external albedo imports). A v7 commitment is a pipe-delimited
-reveal string: ``v7|<repo>|<digest>`` where ``<digest>`` is an immutable pin — a
-Hippius OCI digest (``sha256:<hex64>``) or an HF git revision (40- or 64-hex).
-"""
 from __future__ import annotations
 
 import hashlib
@@ -16,7 +10,6 @@ from loguru import logger as log
 from scalecodec.utils.ss58 import ss58_encode
 
 _BLOCK_HASH_CACHE: dict[int, str] = {}
-# Immutable pin: Hippius 'sha256:<hex64>' or an HF git revision (40/64 hex).
 _PIN_RE = re.compile(r"^(sha256:[0-9a-f]{64}|[0-9a-f]{40}|[0-9a-f]{64})$")
 
 
@@ -41,13 +34,6 @@ def connect(network: str) -> Any:
 
 
 def _decode_commitment_pair(pair: tuple[Any, Any]) -> tuple[str, list[tuple[int, str]]]:
-    """Return (hotkey_ss58, [(block, payload), ...]) for one RevealedCommitments row.
-
-    Depending on the substrate client path, the payload may arrive as either a
-    hex-serialized SCALE byte string (``0x...``) or raw commitment bytes wrapped in a
-    Python str via latin-1. We normalize both shapes to bytes, strip the SCALE
-    compact-length prefix, and decode the rest as UTF-8.
-    """
     key, data = pair
     if not isinstance(key, str):
         raise ValueError(f"unexpected commitment key type {type(key).__name__}")
@@ -69,18 +55,13 @@ def _decode_commitment_pair(pair: tuple[Any, Any]) -> tuple[str, list[tuple[int,
 
 
 def _iter_revealed(subtensor: Any, netuid: int) -> Iterator[tuple[str, int, str]]:
-    """Yield (hotkey, block, payload) from Commitments.RevealedCommitments.
-
-    TimelockEncrypted commit-reveal entries are not present here until they are revealed,
-    so they are skipped for free — we never attempt to decode an encrypted blob.
-    """
     qm = subtensor.query_map(module="Commitments", name="RevealedCommitments", params=[netuid])
     for k, v in qm:
         hotkey = str(getattr(k, "value", k))
         data = getattr(v, "value", v)
         try:
             _, entries = _decode_commitment_pair((hotkey, data))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.debug("failed to decode revealed commitment for {}: {}", hotkey, exc)
             continue
         for block, payload in entries:
@@ -91,7 +72,7 @@ def _uid_map(subtensor: Any, netuid: int) -> dict[str, int]:
     try:
         meta = subtensor.metagraph(netuid)
         return {str(n.hotkey): int(n.uid) for n in meta.neurons}
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.warning("metagraph({}) failed: {}", netuid, exc)
         return {}
 
@@ -111,7 +92,6 @@ _ZERO_ACCOUNT = ss58_encode(b"\x00" * 32, ss58_format=42)
 
 
 def hotkey_owner(subtensor: Any, hotkey: str, block: int | None = None) -> str | None:
-    """Owning coldkey of ``hotkey``, or None if its Owner entry is absent."""
     owner = subtensor.query_subtensor("Owner", params=[hotkey], block=block)
     value = getattr(owner, "value", owner)
     if value is None:
@@ -142,13 +122,12 @@ def _block_hash(subtensor: Any, block: int) -> str | None:
         bh = str(subtensor.get_block_hash(block))
         _BLOCK_HASH_CACHE[block] = bh
         return bh
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.debug("get_block_hash({}) failed: {}", block, exc)
         return None
 
 
 def _parse_v7(data: str, chain_hotkey: str) -> dict[str, Any] | None:
-    """Parse a v7 reveal into a payload dict, or None if not a well-formed v7 reveal."""
     if not data.startswith("v7|"):
         return None
     parts = data.split("|")
@@ -171,18 +150,11 @@ def _payload_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
-# hotkeys already warned about having no uid — warn once per process, not every scan
 _warned_no_uid: set[str] = set()
 
 
 def scan_commitments(subtensor: Any, netuid: int, start_block: int = 0,
                      uids: dict[str, int] | None = None) -> list[Commit]:
-    """Read all revealed commitments on ``netuid`` and return v7 Commit records.
-
-    Commits before ``start_block`` are skipped — they are not eval candidates (the chain_guard
-    ledger covers them instead). Pass ``uids`` (hotkey -> uid) to reuse an already-fetched
-    metagraph instead of fetching it again.
-    """
     if uids is None:
         uids = _uid_map(subtensor, netuid)
 

@@ -59,7 +59,6 @@ def test_prefetch_endpoint_accepts_and_runs_in_background():
     response = client.post("/prefetch", json={"sample_ids": ["a:0:0", "b:1:0"]})
     assert response.status_code == 200
     assert response.json() == {"accepted": 2}
-    # TestClient runs background tasks before returning.
     assert service.prefetched == ["a:0:0", "b:1:0"]
 
 

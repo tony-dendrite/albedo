@@ -1,4 +1,3 @@
-"""Postgres access for the sanity pre-eval dispatcher (psycopg, mirrors the eval repository)."""
 
 from __future__ import annotations
 
@@ -17,16 +16,14 @@ from albedo_eval_service.models import RemoteHost
 
 @dataclass(frozen=True)
 class ClaimedPreEval:
-    # A claimed pre-eval job ready to dispatch to a worker.
     submission_id: UUID
     attempt_id: UUID
     remote_host: RemoteHost
-    request: Any  # SanityRunRequest (kept untyped to avoid coupling to the worker package)
+    request: Any
 
 
 @dataclass(frozen=True)
 class ActivePreEval:
-    # An in-flight pre-eval recovered for reconciliation.
     submission_id: UUID
     attempt_id: UUID
     remote_host: RemoteHost
@@ -36,12 +33,10 @@ class ActivePreEval:
 
     @property
     def run_id(self) -> str:
-        # The worker run_id equals the stage-attempt id (no separate storage needed).
         return str(self.attempt_id)
 
 
 class PreEvalRepository:
-    # Durable state transitions for pre-eval; transaction boundaries are explicit for crash recovery.
 
     def __init__(self, database_url: str, *, min_free_gpus: int = 1, max_retry_count: int = 5) -> None:
         self.database_url = database_url
@@ -52,9 +47,6 @@ class PreEvalRepository:
         return psycopg.connect(self.database_url, row_factory=dict_row)
 
     def claim_next_pre_eval(self, *, worker_id: str, lease_seconds: int, request_builder: Callable[..., Any]) -> ClaimedPreEval | None:
-        # Claims the oldest claimable submission under an advisory lock.
-        # Picks HIPPIUS_VALIDATED first (fresh), then PRE_EVAL_RETRYABLE (retries), both
-        # capped at max_retry_count so a broken submission cannot loop forever.
         lease_expires_at = datetime.now(UTC) + timedelta(seconds=lease_seconds)
         with self._connect() as conn, conn.transaction():
             locked = conn.execute("SELECT pg_try_advisory_xact_lock(hashtext('pre_eval')) AS locked").fetchone()
@@ -146,7 +138,6 @@ class PreEvalRepository:
             )
 
     def heartbeat_attempt(self, *, attempt_id: UUID, lease_seconds: int) -> None:
-        # Extends the lease while the dispatcher is actively polling the worker.
         lease_expires_at = datetime.now(UTC) + timedelta(seconds=lease_seconds)
         with self._connect() as conn:
             conn.execute(
@@ -155,7 +146,6 @@ class PreEvalRepository:
             )
 
     def record_remote_event(self, *, submission_id: UUID, attempt_id: UUID, event: dict[str, Any]) -> None:
-        # Persists a worker event under the attempt.
         with self._connect() as conn, conn.transaction():
             self.record_event_inside_tx(
                 conn,
@@ -168,7 +158,6 @@ class PreEvalRepository:
             )
 
     def list_reconcilable_pre_eval(self, *, limit: int = 10) -> list[ActivePreEval]:
-        # Finds RUNNING pre-eval attempts (dispatcher may have crashed mid-poll) to replay.
         with self._connect() as conn:
             rows = conn.execute(
                 """
@@ -211,7 +200,6 @@ class PreEvalRepository:
         return active
 
     def mark_pre_eval_passed(self, *, submission_id: UUID, attempt_id: UUID, repo: str, digest: str, responses: list[str], reason: str, timing: dict[str, Any],) -> None:
-        # Records the cached result, completes the attempt, and advances the submission to PRE_EVAL_PASSED.
         with self._connect() as conn, conn.transaction():
             self._write_sanity_result(conn, repo, digest, True, reason, responses, timing)
             conn.execute(
@@ -233,8 +221,6 @@ class PreEvalRepository:
             )
 
     def mark_pre_eval_failed(self, *, submission_id: UUID, attempt_id: UUID, repo: str, digest: str, fault_class: str, fault_code: str, fault_message: str, retryable: bool, responses: list[str] | None = None, artifact_uri: str | None = None,) -> None:
-        # Fails the attempt; retryable -> PRE_EVAL_RETRYABLE (unless retries exhausted, then
-        # TERMINAL_INVALID), terminal -> TERMINAL_INVALID with a cached sanity_results row.
         attempt_state = "FAILED_RETRYABLE" if retryable else "FAILED_TERMINAL"
         with self._connect() as conn, conn.transaction():
             if not retryable:
@@ -251,8 +237,6 @@ class PreEvalRepository:
                 """,
                 (attempt_state, fault_class, fault_code, fault_message, attempt_id),
             )
-            # Cap retryable failures: once retry_count reaches max, move to TERMINAL_INVALID so the
-            # submission does not sit in PRE_EVAL_RETRYABLE forever unclaimed by the claim query.
             conn.execute(
                 """
                 UPDATE model_submissions
@@ -278,7 +262,6 @@ class PreEvalRepository:
             )
 
     def release_pre_eval_attempt(self, *, submission_id: UUID, attempt_id: UUID, fault_message: str) -> None:
-        # Releases a worker-busy (409) claim back to HIPPIUS_VALIDATED without consuming a retry.
         with self._connect() as conn, conn.transaction():
             conn.execute(
                 """
@@ -300,9 +283,6 @@ class PreEvalRepository:
             )
 
     def sweep_abandoned_pre_eval(self, *, worker_id: str) -> int:
-        # Reclaims expired RUNNING pre-eval attempts (dead dispatcher/host) back to the queue.
-        # When retry_count already reached the cap the submission moves to TERMINAL_INVALID instead
-        # of RETRYABLE so it does not sit in a ghost state that the claim query never picks up.
         with self._connect() as conn, conn.transaction():
             rows = conn.execute(
                 """
@@ -349,7 +329,6 @@ class PreEvalRepository:
 
     @staticmethod
     def _insert_sanity_artifact(conn: psycopg.Connection, submission_id: UUID, attempt_id: UUID, uri: str) -> None:
-        # Records the uploaded fault report so the dashboard can link it (artifact_type SANITY_RESULT).
         bucket, object_key = (None, None)
         if uri.startswith("s3://"):
             bucket, _, object_key = uri[len("s3://") :].partition("/")
@@ -366,7 +345,6 @@ class PreEvalRepository:
 
     @staticmethod
     def _write_sanity_result(conn: psycopg.Connection, repo: str, digest: str, passed: bool, reason: str, responses: list[str], timing: dict[str, Any],) -> None:
-        # Upserts the digest-keyed cache row (first verdict wins).
         conn.execute(
             """
             INSERT INTO sanity_results (repo, digest, passed, reason, responses, timing, checked_at)
@@ -378,7 +356,6 @@ class PreEvalRepository:
 
     @staticmethod
     def record_event_inside_tx(conn: psycopg.Connection, *, submission_id: UUID, stage_attempt_id: UUID | None, event_type: str, severity: str, message: str, data: dict[str, Any],) -> None:
-        # Inserts an audit event row.
         conn.execute(
             """
             INSERT INTO events (id, submission_id, stage_attempt_id, event_type, severity, message, data)
@@ -389,7 +366,6 @@ class PreEvalRepository:
 
     @staticmethod
     def _next_attempt_number(conn: psycopg.Connection, submission_id: UUID, stage: str) -> int:
-        # Returns the next attempt number for this submission/stage.
         row = conn.execute(
             """
             SELECT COALESCE(MAX(attempt_number), 0) + 1 AS next_attempt

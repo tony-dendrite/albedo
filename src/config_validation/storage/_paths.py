@@ -1,4 +1,3 @@
-"""Shared local cache layout for downloaded models, namespaced by backend."""
 from __future__ import annotations
 
 import os
@@ -9,7 +8,6 @@ from config_validation.models import ModelRef
 
 
 def _cache_dir(ref: ModelRef) -> Path:
-    """Per-(backend, repo, digest) cache dir, guarded against path traversal via crafted repos."""
     safe_digest = ref.digest.replace(":", "_")
     root = Path(MODEL_CACHE_DIR).resolve()
     resolved = (root / ref.backend / ref.repo / safe_digest).resolve()
@@ -19,5 +17,4 @@ def _cache_dir(ref: ModelRef) -> Path:
 
 
 def cache_dir(ref: ModelRef) -> Path:
-    """Public: per-(backend, repo, digest) local cache dir for ``ref`` (no I/O, no download)."""
     return _cache_dir(ref)

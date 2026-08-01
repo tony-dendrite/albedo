@@ -11,7 +11,7 @@ from loguru import logger
 
 from .remote_dataset import EvalSample
 
-_QWEN3_IM_END_TOKEN_ID = 248046  # <|im_end|> for Qwen3.6-35B-A3B (was 151645 for Qwen3-4B genesis)
+_QWEN3_IM_END_TOKEN_ID = 248046
 
 
 @dataclass(frozen=True)
@@ -210,15 +210,11 @@ def _vllm_worker(
             "model": model,
             "tensor_parallel_size": len(gpu_ids),
             "trust_remote_code": True,
-            # Match the benchmark eval server's `--generation-config vllm`:
-            # do not let vLLM auto-import Hugging Face generation_config.json.
             "generation_config": "vllm",
             "reasoning_parser": "qwen3",
             "enable_prefix_caching": True,
             "gpu_memory_utilization": gpu_memory_utilization,
             "kv_cache_dtype": kv_cache_dtype,
-            # Text-only eval: cap multimodal inputs to 0 so vLLM skips vision-encoder
-            # profiling, which hangs for the multimodal Qwen3.6 genesis architecture.
             "limit_mm_per_prompt": {"image": 0, "video": 0},
         }
         if max_model_len is not None:

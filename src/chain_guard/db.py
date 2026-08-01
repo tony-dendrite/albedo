@@ -1,4 +1,3 @@
-"""Async Postgres layer for the used_hotkeys guard ledger."""
 from __future__ import annotations
 
 import asyncio
@@ -12,15 +11,10 @@ from chain_guard.swap import SwapEvent, describe
 
 
 async def is_used(conn: asyncpg.Connection, hotkey: str) -> bool:
-    """True if this hotkey is in the ledger (legacy or already burned by eval)."""
     return bool(await conn.fetchval("SELECT 1 FROM used_hotkeys WHERE hotkey = $1", hotkey))
 
 
 async def record_legacy(pool: asyncpg.Pool, rows: list[tuple[str, int, str]], ignore_to_block: int) -> int:
-    """Seed the ledger with every (hotkey, block, raw_payload) committed at/before ``ignore_to_block``.
-
-    Idempotent: a hotkey is recorded at most once. Returns the number of rows newly inserted.
-    """
     legacy = [(hk, block, raw) for hk, block, raw in rows if block <= ignore_to_block]
     if not legacy:
         return 0
@@ -46,7 +40,6 @@ async def record_legacy(pool: asyncpg.Pool, rows: list[tuple[str, int, str]], ig
 
 
 async def load_uid_state(pool: asyncpg.Pool) -> dict[int, tuple[str, int | None]]:
-    """uid -> (hotkey, registration_block) of the most recently seen miner per uid."""
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
@@ -60,11 +53,6 @@ async def load_uid_state(pool: asyncpg.Pool) -> dict[int, tuple[str, int | None]
 
 
 async def record_swaps(pool: asyncpg.Pool, swaps: list[SwapEvent], netuid: int, block_number: int) -> int:
-    """Ledger each swap's NEW hotkey (source='swap') so its commits are rejected before eval,
-    log a dashboard-visible ERROR event, and publish an S3 detection report.
-
-    Idempotent: a hotkey already in the ledger is skipped. Returns newly ledgered count.
-    """
     inserted = 0
     for swap in swaps:
         detail = swap.detail()
@@ -97,11 +85,6 @@ async def record_swaps(pool: asyncpg.Pool, swaps: list[SwapEvent], netuid: int, 
 
 
 async def refresh_registration_blocks(pool: asyncpg.Pool, snapshot: list[tuple[int, str, int]]) -> int:
-    """Persist BlockAtRegistration on the miners rows of the CURRENT metagraph occupants.
-
-    Old rows (previous occupants) are never touched — their stored registration_block is
-    exactly what find_swaps compares against. Returns the number of rows updated.
-    """
     uids = [uid for uid, _hk, _rb in snapshot]
     hotkeys = [hk for _uid, hk, _rb in snapshot]
     reg_blocks = [rb for _uid, _hk, rb in snapshot]

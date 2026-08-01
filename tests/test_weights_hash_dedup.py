@@ -1,4 +1,3 @@
-"""weights_hash: backend-independent exact-content dedup gate ahead of the kNN prefilter."""
 from __future__ import annotations
 
 import pytest
@@ -13,7 +12,6 @@ def test_weights_hash_is_content_only(tmp_path):
     c = tmp_path / "c"
     for d in (a, b, c):
         d.mkdir()
-    # Same bytes under different shard names (and an extra non-weight file) → same hash.
     (a / "model-00001-of-00001.safetensors").write_bytes(b"weights-1")
     (b / "renamed.safetensors").write_bytes(b"weights-1")
     (b / "config.json").write_text("{}", encoding="utf-8")
@@ -58,7 +56,6 @@ def test_exact_weights_match_beats_saturated_knn(monkeypatch):
     assert result["exact_weights_match"] is True
     assert result["similarity"] == 1.0
     assert result["matched_hotkey"] == "hk-orig"
-    # The gate must skip the submitter's own prior models, like the kNN rerank does.
     assert {"term": {"hotkey": "hk-copycat"}} in client.exact_bodies[0]["query"]["bool"]["must_not"]
 
 

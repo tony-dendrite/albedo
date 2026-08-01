@@ -1,10 +1,3 @@
-"""One-time migration from the legacy JSON-state layout into SQLite + buffers.
-
-Imports (if present): pipeline_state.json (processed runs, meta, upload ledger)
-and the old all/<model>.parquet row stores — already-cut rows are covered by
-the chunk files on disk, so only the remainder moves into pending/<model>.json.
-Legacy files are renamed/removed afterwards so this runs once.
-"""
 
 from __future__ import annotations
 
@@ -34,7 +27,6 @@ def migrate_if_needed(cfg: Config, state: State) -> None:
     else:
         uploaded = set()
 
-    # register chunk files already on disk
     if cfg.out_dir.is_dir():
         for f in sorted(cfg.out_dir.glob("*/*.parquet")):
             rel = f"data/{f.parent.name}/{f.name}"
@@ -42,7 +34,6 @@ def migrate_if_needed(cfg: Config, state: State) -> None:
                 state.record_chunk(rel, f.parent.name,
                                    uploaded_at="legacy" if rel in uploaded else None)
 
-    # legacy row store: move the un-cut remainder into the pending buffers
     all_dir = cfg.data_dir / "all"
     if all_dir.is_dir():
         import pandas as pd

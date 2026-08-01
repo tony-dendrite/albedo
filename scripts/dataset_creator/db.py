@@ -1,11 +1,3 @@
-"""Query the eval DB for succeeded eval runs and their artifact URIs.
-
-Two access modes, chosen from env:
-- DATASET_CREATOR_DB_URL: direct postgres DSN (preferred when running on infra,
-  e.g. under pm2 on the eval machine)
-- DATASET_CREATOR_DB_SSH_HOST/_ENV_FILE/_CONTAINER: ssh + docker exec so DB
-  credentials never leave the DB host (workstation mode)
-"""
 
 from __future__ import annotations
 
@@ -38,7 +30,6 @@ SQL"""
 
 
 def query_succeeded_runs(cfg: Config, anchor: str) -> dict[str, dict]:
-    """Return {run_id: {"started_at": str, "files": {basename: (uri, size)}}}."""
     anchor_dt = datetime.fromisoformat(anchor)
     if cfg.db_url:
         rows = _query_direct(cfg.db_url, anchor_dt)

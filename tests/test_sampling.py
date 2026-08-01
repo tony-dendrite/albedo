@@ -19,7 +19,6 @@ _FAMILIES = [name for name, _ in FAMILY_MIX]
 
 
 def _shard(source: str, rows: int, *, asst: int = 30):
-    """Rows cycle through the four families and a spread of first_edit depths."""
     return {
         "name": f"{source}/data/train-00000.parquet",
         "rows": rows,
@@ -80,7 +79,6 @@ def test_rejects_nonpositive_sample_count():
 def test_returns_requested_count_of_unique_samples():
     ids = multi_source_manifest_sample_ids(_manifest(), block_hash="0xabc", sample_count=100)
     assert len(ids) == 100 == len(set(ids))
-    # one rollout per instance: no (shard, row) coordinate is reused
     assert len({i.rsplit(":", 1)[0] for i in ids}) == 100
 
 
@@ -98,13 +96,10 @@ def test_family_mix_matches_spec():
     meta = _meta_by_coord(manifest)
     got = Counter(meta[(n, int(r))]["family"] for n, r, _ in (i.rsplit(":", 2) for i in ids))
 
-    # Exact for any ratio: _family_grid allocates each family against the cumulative phase total, so
-    # per-phase rounding cancels instead of accumulating onto one family.
     assert got == Counter(_apportion(FAMILY_MIX, 100))
 
 
 def test_step_trim_anchors_on_first_edit():
-    """cold cuts shallow; pre_edit cuts two turns before the edit; at_edit cuts at it."""
     manifest = _manifest()
     ids = multi_source_manifest_sample_ids(manifest, block_hash="0xabc", sample_count=100)
     meta = _meta_by_coord(manifest)
@@ -129,9 +124,8 @@ def test_step_trim_anchors_on_first_edit():
 
 
 def test_pools_across_sources_so_shared_instances_are_not_double_drawn():
-    """The same instance_id present in two sources must be sampled at most once."""
     shared = _manifest(mini_rows=400, hero_rows=400)
-    for shard in shared["sources"][1]["shards"]:  # rename swe-hero iids onto mini-coder's
+    for shard in shared["sources"][1]["shards"]:
         for entry in shard["rows_meta"]:
             entry["iid"] = entry["iid"].replace("swe-hero-", "mini-coder-")
     ids = multi_source_manifest_sample_ids(shared, block_hash="0xabc", sample_count=100)
@@ -145,13 +139,12 @@ def test_missing_first_edit_falls_back_to_a_shallow_cut():
     for source in manifest["sources"]:
         for shard in source["shards"]:
             for entry in shard["rows_meta"]:
-                entry["first_edit"] = 0  # no edit detected anywhere
+                entry["first_edit"] = 0
     ids = multi_source_manifest_sample_ids(manifest, block_hash="0xabc", sample_count=100)
     assert {int(i.rsplit(":", 1)[1]) for i in ids} <= {1, 2}
 
 
 def test_infeasible_stratum_raises():
-    """A family that cannot fill its quota is a hard error, not a silent short draw."""
     manifest = _manifest(mini_rows=40, hero_rows=0)
     manifest["sources"] = manifest["sources"][:1]
     with pytest.raises(ValueError, match="infeasible stratum"):
@@ -159,12 +152,10 @@ def test_infeasible_stratum_raises():
 
 
 def test_shallow_trajectories_are_skipped_not_mis_cut():
-    """asst must exceed turn_idx; rows too shallow for their anchor are passed over."""
     manifest = _manifest(mini_rows=4000, hero_rows=0)
     manifest["sources"] = manifest["sources"][:1]
     for shard in manifest["sources"][0]["shards"]:
         for i, entry in enumerate(shard["rows_meta"]):
-            # period 3 vs the family period of 4, so every family keeps some deep rows
             entry["asst"] = 30 if i % 3 == 0 else 3
     ids = multi_source_manifest_sample_ids(manifest, block_hash="0xabc", sample_count=100)
     meta = _meta_by_coord(manifest)
@@ -199,7 +190,6 @@ def test_apportion_largest_remainder_sums_exactly():
 
 
 def test_family_grid_margins_are_exact_on_both_axes():
-    """Phase totals and family totals must each hit their own largest-remainder target."""
     for count in (13, 64, 100, 137, 250):
         grid = _family_grid(count)
         phase_want = _apportion(STEP_TRIM, count)
@@ -217,7 +207,7 @@ def test_repo_cap_limits_how_many_tasks_one_codebase_supplies():
     manifest["sources"] = manifest["sources"][:1]
     for shard in manifest["sources"][0]["shards"]:
         for i, entry in enumerate(shard["rows_meta"]):
-            entry["repo"] = f"owner__repo{i % 200}"  # 200 repos x REPO_CAP > 100 needed
+            entry["repo"] = f"owner__repo{i % 200}"
     ids = multi_source_manifest_sample_ids(manifest, block_hash="0xabc", sample_count=100)
     meta = _meta_by_coord(manifest)
     counts = Counter(meta[(n, int(r))]["repo"] for n, r, _ in (i.rsplit(":", 2) for i in ids))
@@ -229,19 +219,17 @@ def test_repo_cap_infeasibility_is_reported_not_silently_short_drawn():
     manifest["sources"] = manifest["sources"][:1]
     for shard in manifest["sources"][0]["shards"]:
         for entry in shard["rows_meta"]:
-            entry["repo"] = "owner__only"  # every instance from one codebase
+            entry["repo"] = "owner__only"
     with pytest.raises(ValueError, match="REPO_CAP"):
         multi_source_manifest_sample_ids(manifest, block_hash="0xabc", sample_count=100)
 
 
 def test_oversized_prefixes_are_skipped_for_anchored_phases():
-    """Corpora differ ~6x in prefix size at the same phase; the gate keeps the eval affordable."""
     manifest = _manifest(mini_rows=4000, hero_rows=0)
     manifest["sources"] = manifest["sources"][:1]
     for shard in manifest["sources"][0]["shards"]:
         for i, entry in enumerate(shard["rows_meta"]):
             entry["repo"] = f"owner__repo{i}"
-            # period 3 vs the family period of 4, so no family is entirely oversized
             huge = i % 3 == 0
             entry["chars_at"] = MAX_PREFIX_CHARS * 2 if huge else 1_000
             entry["chars_pre"] = MAX_PREFIX_CHARS * 2 if huge else 1_000
@@ -251,7 +239,7 @@ def test_oversized_prefixes_are_skipped_for_anchored_phases():
         name, row, turn = sid.rsplit(":", 2)
         entry, turn = meta[(name, int(row))], int(turn)
         if turn in (1, 2) and turn != entry["first_edit"]:
-            continue  # cold cuts at turn 1-2, inherently small, so the gate does not apply
+            continue
         assert entry["chars_at"] <= MAX_PREFIX_CHARS
 
 
@@ -266,13 +254,11 @@ def test_prefix_gate_tolerates_manifests_without_chars_fields():
 
 
 def test_non_benchmark_languages_are_capped():
-    """A cap, not a quota: Python stays the majority because the benchmarks are Python-dominant."""
     manifest = _manifest(mini_rows=4000, hero_rows=0)
     manifest["sources"] = manifest["sources"][:1]
     for shard in manifest["sources"][0]["shards"]:
         for i, entry in enumerate(shard["rows_meta"]):
             entry["repo"] = f"owner__repo{i}"
-            # period 3 vs the family period of 4, so no family is entirely non-Python
             entry["language"] = "rust" if i % 3 else BENCHMARK_LANGUAGE
     ids = multi_source_manifest_sample_ids(manifest, block_hash="0xabc", sample_count=100)
     meta = _meta_by_coord(manifest)
@@ -285,7 +271,6 @@ def test_non_benchmark_languages_are_capped():
 
 
 def test_language_cap_does_not_break_the_family_mix():
-    """The cap must never cost us the strata: it removes candidates, it does not demand a quota."""
     manifest = _manifest(mini_rows=4000, hero_rows=0)
     manifest["sources"] = manifest["sources"][:1]
     for shard in manifest["sources"][0]["shards"]:
@@ -299,7 +284,6 @@ def test_language_cap_does_not_break_the_family_mix():
 
 
 def test_missing_language_defaults_to_the_benchmark_language():
-    """Manifests predating the language field must keep sampling, not silently hit the cap."""
     manifest = _manifest()
     for source in manifest["sources"]:
         for shard in source["shards"]:

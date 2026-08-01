@@ -7,8 +7,6 @@ from pathlib import Path
 from typing import Any
 
 
-# Canonical model upgraded from the Qwen3-4B genesis to Qwen3.6-35B-A3B
-# (qwen3_5_moe). Pinned to the teutonic/qwen3.6-35b-a3b-genesis `genesis` manifest.
 GENESIS_MODEL_CONFIG_REF = (
     "registry.hippius.com/teutonic/qwen3.6-35b-a3b-genesis@"
     "sha256:efd5b8d0a1c1f472be56ff919419cdd0561bdecd9013d5c2a96dd0e23e89c165"
@@ -35,9 +33,6 @@ _CANONICAL_JSON_FILES = (
 )
 _CACHE_MARKER_FILES = (".albedo-model-cache.json",)
 
-# Full Hugging Face config.json for Qwen/Qwen3.6-35B-A3B. Kept byte-for-byte
-# faithful to the published config so apply_canonical_model_config is idempotent
-# on the canonical artifact and pins the architecture for contestants.
 GENESIS_MODEL_CONFIG: dict[str, Any] = {
     "architectures": ["Qwen3_5MoeForConditionalGeneration"],
     "image_token_id": 248056,
@@ -152,7 +147,6 @@ GENESIS_MODEL_CONFIG: dict[str, Any] = {
     "vision_start_token_id": 248053,
 }
 
-# Published generation_config.json for Qwen3.6-35B-A3B.
 GENESIS_GENERATION_CONFIG: dict[str, Any] = {
     "bos_token_id": 248044,
     "do_sample": True,
@@ -194,18 +188,14 @@ GENESIS_ARCH_SPEC: dict[str, Any] = {
 
 
 def canonical_model_config() -> dict[str, Any]:
-    """Return the pinned genesis Hugging Face model config."""
     return deepcopy(GENESIS_MODEL_CONFIG)
 
 
 def canonical_generation_config() -> dict[str, Any]:
-    """Return the pinned genesis Hugging Face generation config."""
     return deepcopy(GENESIS_GENERATION_CONFIG)
 
 
 def canonical_max_model_len() -> int:
-    # max_position_embeddings lives under text_config for the multimodal MoE
-    # config; fall back to the top level for flat configs.
     config = GENESIS_MODEL_CONFIG
     if "max_position_embeddings" in config:
         return int(config["max_position_embeddings"])
@@ -213,12 +203,6 @@ def canonical_max_model_len() -> int:
 
 
 def apply_canonical_model_config(model_dir: Path) -> bool:
-    """Replace model-supplied config files with the canonical genesis values.
-
-    Eval should use miner artifacts only for weights and model.safetensors.index.json.
-    All model/tokenizer/processor metadata is pinned to the local genesis copy before
-    vLLM or Transformers load the directory.
-    """
     config_path = model_dir / "config.json"
     existing: dict[str, Any] = {}
     if config_path.exists():
@@ -239,9 +223,6 @@ def apply_canonical_model_config(model_dir: Path) -> bool:
         json.dumps(canonical_generation_config(), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    # Pin the canonical image+video processor configs so vLLM can construct the
-    # multimodal model. Text-only eval never uses them, but vLLM/HF refuse to load
-    # the multimodal Qwen3.6 architecture without an image+video processor present.
     (model_dir / "preprocessor_config.json").write_text(
         json.dumps(GENESIS_PREPROCESSOR_CONFIG, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
@@ -254,8 +235,6 @@ def apply_canonical_model_config(model_dir: Path) -> bool:
             raise FileNotFoundError(f"canonical tokenizer asset missing: {source}")
         shutil.copyfile(source, model_dir / name)
 
-    # These optional files are loaded by Hugging Face tokenizers when present. Do
-    # not let a miner-supplied sidecar alter the canonical tokenizer we just pinned.
     for name in _MINER_TOKENIZER_SIDECARS:
         (model_dir / name).unlink(missing_ok=True)
 

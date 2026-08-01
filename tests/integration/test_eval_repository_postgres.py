@@ -100,8 +100,6 @@ def test_claim_next_eval_is_sequential_and_creates_attempt(db_url: str):
 def test_claim_next_eval_rejects_duplicate_already_scored_hotkey(db_url: str):
     repo = EvalRepository(db_url)
     submission_id = _seed_eval_ready_submission(db_url)
-    # Same hotkey already has a model that was scored (lost a prior eval), so the
-    # still-queued duplicate must be rejected instead of dispatched.
     _seed_scored_duplicate(db_url, hotkey="miner-hotkey")
 
     claimed = repo.claim_next_eval(
@@ -572,8 +570,6 @@ def test_record_remote_progress_and_verdict_artifacts_update_eval_run(db_url: st
 
 
 def test_mark_eval_failed_records_artifacts_uploaded_by_a_soft_fault(db_url: str):
-    """A soft fault (no_valid_generated_pairs, judge_provider_exhausted) still uploads a full
-    artifact set; those objects need DB rows or they are orphaned in the bucket."""
     repo = EvalRepository(db_url)
     _seed_eval_ready_submission(db_url)
     claimed = repo.claim_next_eval(
@@ -629,7 +625,6 @@ def test_mark_eval_failed_records_artifacts_uploaded_by_a_soft_fault(db_url: str
 
 
 def test_mark_eval_failed_without_a_verdict_records_no_artifacts(db_url: str):
-    """A hard failure carries no verdict (broken stream) or artifacts={} (run.fail)."""
     repo = EvalRepository(db_url)
     _seed_eval_ready_submission(db_url)
     claimed = repo.claim_next_eval(

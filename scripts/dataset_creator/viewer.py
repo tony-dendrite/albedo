@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""Local viewer for the dataset parquet chunks (sample_id + messages chat format).
-
-Usage: python3 scripts/dataset_creator/viewer.py [--port 8765] [--dir <path>]
-Defaults to <data_dir>/hf_out (the pipeline output). Then open http://localhost:8765
-"""
 
 import argparse
 import json
@@ -17,9 +12,8 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import Config
 
-BASE = None  # set in main() from --data-dir/--dir
+BASE = None
 
-# data[model][filename] = list of {"sample_id": str, "messages": [{"role","content"}, ...]}
 data: dict[str, dict[str, list[dict]]] = {}
 
 

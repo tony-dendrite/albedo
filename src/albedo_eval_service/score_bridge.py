@@ -42,7 +42,7 @@ class ScoreBridgeHub:
         if old is not None and old is not websocket:
             try:
                 await old.close(code=1012)
-            except Exception as exc:  # noqa: BLE001 - best-effort close of replaced bridge
+            except Exception as exc:
                 logger.debug(f"[score-bridge] best-effort close of replaced websocket failed: {exc}")
         try:
             while True:
@@ -67,7 +67,6 @@ class ScoreBridgeHub:
         timeout_seconds: float,
         endpoint: str = "/score-batch",
     ) -> dict[str, Any]:
-        # Wait up to 120s for the bridge to (re)connect - handles transient disconnects during vLLM cleanup.
         _deadline = time.monotonic() + 120.0
         while True:
             with self._lock:

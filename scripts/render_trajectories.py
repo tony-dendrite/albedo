@@ -1,16 +1,4 @@
 #!/usr/bin/env python3
-"""Normalize tool_calls-based trajectory corpora into the mini-coder shard format.
-
-The loader reads an assistant turn's `content`, but these corpora put the action in `tool_calls` and
-leave `content` empty or null: `""` makes `_messages_from_turns` drop the turn silently, `None` makes
-`_content` fall through to `str(turn)` and inject a dict repr into the prompt.
-
-Writes `<source>/data/train-*.parquet` plus first_edit/family/repo columns. `first_edit` comes from the
-STRUCTURED tool calls, never a regex over rendered text: a read-only `view` renders as `cat -n`,
-indistinguishable from a real write.
-
-    python scripts/render_trajectories.py --source swe-smith-rs --raw-root /raw --out-root /eval
-"""
 
 from __future__ import annotations
 
@@ -26,11 +14,10 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from prepare_datasets import SOURCES  # noqa: E402
+from prepare_datasets import SOURCES
 
 COMPLETE_MARKER = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 
-# `view` is deliberately absent: it does not mutate.
 _EDIT_SUBCOMMANDS = {"create", "str_replace", "insert", "undo_edit", "write"}
 _BASH_TOOLS = {"bash", "execute_bash", "run_bash_cmd", "shell"}
 _EDITOR_TOOLS = {"str_replace_editor", "str_replace_based_edit_tool", "edit_file", "file_editor"}
@@ -46,7 +33,6 @@ _THOUGHT_LOGGED = "your thought has been logged"
 
 
 def _arguments(tool_call: Any) -> tuple[str, dict]:
-    """(tool_name, args). `arguments` is a JSON string in some corpora and a dict in others."""
     if not isinstance(tool_call, dict):
         return "", {}
     function = tool_call.get("function") or {}
@@ -67,10 +53,9 @@ def _bash_block(command: str) -> str:
 
 
 def _render_editor(args: dict) -> tuple[str, bool]:
-    """Render an editor call as its shell equivalent. Returns (text, is_edit)."""
     command = str(args.get("command") or "").strip()
     path = str(args.get("path") or args.get("file_path") or "").strip()
-    if command == "view":  # the schema defines view as "the result of applying `cat -n`"
+    if command == "view":
         rng = args.get("view_range")
         if isinstance(rng, list) and len(rng) == 2:
             return _bash_block(f"sed -n '{rng[0]},{rng[1]}p' {path} | cat -n"), False
@@ -85,7 +70,6 @@ def _render_editor(args: dict) -> tuple[str, bool]:
     if command == "str_replace":
         old = str(args.get("old_str") or "")
         new = str(args.get("new_str") or "")
-        # a SEARCH/REPLACE block: escaping these literals into sed would corrupt them
         return (
             f"Editing `{path}`:\n\n```\n<<<<<<< SEARCH\n{old}\n=======\n{new}\n>>>>>>> REPLACE\n```",
             True,
@@ -96,7 +80,6 @@ def _render_editor(args: dict) -> tuple[str, bool]:
 
 
 def _render_call(tool_call: Any) -> tuple[str, bool, str]:
-    """Returns (text, is_edit, kind) where kind is action | think | done | unknown."""
     name, args = _arguments(tool_call)
     lowered = name.lower()
     if lowered in _THINK_TOOLS:
@@ -131,11 +114,9 @@ def _thought(turn: dict) -> str:
 
 
 def render_turns(turns: list, *, stats: Counter | None = None) -> tuple[list[dict], int]:
-    """Returns (messages, first_edit): first_edit is the 1-based index of the first assistant turn
-    that mutates the tree, or 0 if none does."""
     stats = stats if stats is not None else Counter()
     out: list[dict] = []
-    pending_thought = ""  # a `think` call folds into the next action's THOUGHT
+    pending_thought = ""
     assistant_index = 0
     first_edit = 0
 
@@ -152,7 +133,7 @@ def render_turns(turns: list, *, stats: Counter | None = None) -> tuple[list[dic
 
         if role == "tool":
             observation = str(turn.get("content") or "").strip()
-            if not observation or _THOUGHT_LOGGED in observation.lower():  # canned think receipt
+            if not observation or _THOUGHT_LOGGED in observation.lower():
                 continue
             out.append({"role": "user", "content": observation})
             continue
@@ -163,7 +144,6 @@ def render_turns(turns: list, *, stats: Counter | None = None) -> tuple[list[dic
         calls = _turn_calls(turn)
         thought = _thought(turn)
         if not calls:
-            # reasoning with no action: fold forward
             pending_thought = "\n\n".join(p for p in (pending_thought, thought) if p)
             continue
 
@@ -185,13 +165,12 @@ def render_turns(turns: list, *, stats: Counter | None = None) -> tuple[list[dic
             first_edit = assistant_index
         stats[f"kind_{kind}"] += 1
         if len(calls) > 1:
-            stats["multi_call_truncated"] += 1  # only the first block runs at eval time
+            stats["multi_call_truncated"] += 1
 
     return out, first_edit
 
 
 def smith_family(instance_id: str) -> str:
-    """Bug family from the SWE-smith id grammar `owner__repo.<sha>.<strategy>__<hash>`."""
     if "." not in instance_id:
         return "pr"
     tail = instance_id.rsplit(".", 1)[-1]
@@ -209,7 +188,6 @@ def _repo_of(row: dict, instance_id: str) -> str:
 
 
 def _keep(row: dict, instance_id: str, spec: dict, seen_repos: Counter) -> str | None:
-    """Reason to drop this row, or None to keep."""
     if instance_id in spec.get("exclude_ids", ()):
         return "excluded_id"
     upstream = str(row.get("hf_dataset_name") or row.get("dataset") or "")
@@ -268,7 +246,6 @@ def render_source(
                 "language": [r["language"] for r in buffer],
             }
         )
-        # small row groups: _read_parquet_row scans from file start on every sample load
         pq.write_table(table, out_dir / f"train-{written:05d}.parquet", row_group_size=64)
         written += 1
         buffer = []
@@ -287,7 +264,7 @@ def render_source(
                 if not instance_id:
                     stats["no_instance_id"] += 1
                     continue
-                if instance_id in seen_ids:  # one rollout per instance within a source
+                if instance_id in seen_ids:
                     stats["duplicate_instance"] += 1
                     continue
                 reason = _keep(row, instance_id, spec, seen_repos)
@@ -296,7 +273,7 @@ def render_source(
                     continue
                 messages, first_edit = render_turns(row.get(turns_col) or [], stats=stats)
                 assistant = sum(1 for m in messages if m["role"] == "assistant")
-                if assistant < 2:  # need a turn to cut at, plus one after the cut
+                if assistant < 2:
                     stats["too_few_assistant_turns"] += 1
                     continue
                 if any(not m["content"] for m in messages):

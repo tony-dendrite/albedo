@@ -1,4 +1,3 @@
-"""Sanity pre-eval dispatcher - claim, sample, push to the worker, judge, persist (mirrors eval)."""
 
 from __future__ import annotations
 
@@ -81,14 +80,12 @@ class _TrajectoryState:
 
 
 class SanityDispatcher:
-    # Orchestrates one pre-eval at a time: claim -> dispatch -> poll -> judge -> persist.
 
     def __init__(self, *, settings: SanitySettings, repository: PreEvalRepository) -> None:
         self.settings = settings
         self.repository = repository
 
     def _build_request(self, submission: dict[str, Any], host: Any, attempt_id: UUID) -> SanityRunRequest:
-        # Samples the prompts (stable side) and builds the worker request; run_id = attempt_id.
         samples = sample_prompts(
             seed=str(submission["block_hash"]),
             n=self.settings.sample_count,
@@ -111,7 +108,6 @@ class SanityDispatcher:
         )
 
     def claim_once(self) -> ClaimedPreEval | None:
-        # Claims the next queued pre-eval (sampling happens inside the request builder).
         return self.repository.claim_next_pre_eval(
             worker_id=self.settings.worker_id,
             lease_seconds=self.settings.lease_seconds,
@@ -119,7 +115,6 @@ class SanityDispatcher:
         )
 
     async def dispatch_once(self) -> bool:
-        # Claims and runs one pre-eval end to end; returns False when nothing was claimable.
         claimed = self.claim_once()
         if not claimed:
             logger.debug("[sanity-dispatch] no claimable pre-eval")
@@ -210,7 +205,6 @@ class SanityDispatcher:
     async def _run_multiturn(
         self, client: SanityRemoteClient, claimed: ClaimedPreEval
     ) -> dict[str, Any]:
-        # Stable side owns observation simulation; GPU side only generates assistant turns.
         request = claimed.request
         turn_count = max(1, int(request.assistant_turns))
         states = _trajectory_states(request)
@@ -250,13 +244,10 @@ class SanityDispatcher:
             if kept_warm:
                 try:
                     await client.teardown()
-                except Exception as exc:  # noqa: BLE001 - best-effort GPU cleanup
+                except Exception as exc:
                     logger.warning("[sanity-dispatch] remote teardown failed: {}", exc)
 
     async def _follow_until_result(self, client: SanityRemoteClient, *, submission_id: UUID, attempt_id: UUID, run_id: str) -> dict[str, Any]:
-        # Polls the worker, recording events and refreshing the lease, until a result appears.
-        # Heartbeat runs once per poll tick (not just per event) so a long model download or
-        # vLLM boot — which emits no events — does not let the lease expire mid-wait.
         seen = 0
         while True:
             events = [event async for event in client.iter_events(run_id)]
@@ -269,7 +260,6 @@ class SanityDispatcher:
                     self.repository.heartbeat_attempt(attempt_id=attempt_id, lease_seconds=self.settings.lease_seconds)
                     return event
             seen = max(seen, len(events))
-            # Heartbeat on every tick so a silent download/boot period does not expire the lease.
             self.repository.heartbeat_attempt(attempt_id=attempt_id, lease_seconds=self.settings.lease_seconds)
             status = await client.get_run(run_id)
             if status.get("type") == "result" or status.get("state") in {"succeeded", "failed"}:
@@ -279,7 +269,6 @@ class SanityDispatcher:
             await asyncio.sleep(self.settings.remote_event_poll_seconds)
 
     async def _complete(self, *, submission_id: UUID, attempt_id: UUID, repo: str, digest: str, prompts: list[str], result: dict[str, Any],) -> None:
-        # Judges the generated responses and writes the terminal verdict.
         logger.info("[sanity-dispatch] completing submission={:.8} digest={:.16} state={}", str(submission_id), digest, result.get("state"),)
         if result.get("state") == "failed":
             self.repository.mark_pre_eval_failed(
@@ -315,7 +304,7 @@ class SanityDispatcher:
                 consensus=self.settings.consensus,
                 skip_viability=self.settings.skip_viability,
             )
-        except Exception as exc:  # noqa: BLE001 - a judge/OpenRouter failure must fail cleanly, not escape
+        except Exception as exc:
             logger.exception(f"[sanity-dispatch] judge gate failed submission={submission_id}: {exc}")
             self.repository.mark_pre_eval_failed(
                 submission_id=submission_id,
@@ -353,9 +342,6 @@ class SanityDispatcher:
                 timing={},
             )
         else:
-            # Terminal miner fault: publish a fault report to Hippius (reason + per-judge evidence)
-            # so it can be linked from the dashboard, then record the artifact alongside
-            # the verdict.
             detail = {
                 "submission_id": str(submission_id),
                 "repo": repo,
@@ -383,9 +369,6 @@ class SanityDispatcher:
             )
 
     async def reconcile_once(self, *, limit: int = 10, follow_timeout: float = 50.0) -> int:
-        # Replays in-flight pre-evals whose dispatcher may have crashed mid-poll.
-        # follow_timeout must be shorter than the cron_restart interval (60s) so PM2 never
-        # has to SIGTERM a busy reconciler — the TimeoutError exits cleanly instead.
         in_flight = self.repository.list_reconcilable_pre_eval(limit=limit)
         logger.info("[sanity-dispatch] reconcile found={}", len(in_flight))
         if not in_flight:
@@ -417,27 +400,25 @@ class SanityDispatcher:
                     prompts=active.prompts,
                     result=result,
                 )
-            except Exception as exc:  # noqa: BLE001 - log and continue so one bad completion does not abort the loop
+            except Exception as exc:
                 logger.exception("[sanity-dispatch] reconcile _complete failed submission={}: {}", active.submission_id, exc)
                 continue
             reconciled += 1
         return reconciled
 
     async def run_forever(self) -> None:
-        # Continuously claims and dispatches pre-evals; keeps the loop alive across transient errors.
         while True:
             try:
                 did_work = await self.dispatch_once()
                 if not did_work:
                     logger.debug("[sanity-dispatch] idle — sleeping {}s", self.settings.dispatch_poll_seconds)
                     await asyncio.sleep(self.settings.dispatch_poll_seconds)
-            except Exception as exc:  # noqa: BLE001 - keep the loop alive across DB blips, etc.
+            except Exception as exc:
                 logger.exception("[sanity-dispatch] unhandled error in dispatch loop, retrying in {}s: {}", self.settings.dispatch_poll_seconds, exc)
                 await asyncio.sleep(self.settings.dispatch_poll_seconds)
 
 
 def main() -> None:
-    # CLI entrypoint (--once / --sweep-abandoned / --reconcile-running), mirroring eval.
     parser = argparse.ArgumentParser(description="Run the Albedo sanity pre-eval dispatcher.")
     parser.add_argument("--once", action="store_true", help="Claim and dispatch at most one pre-eval.")
     parser.add_argument("--sweep-abandoned", action="store_true", help="Reclaim expired pre-eval attempts.",)

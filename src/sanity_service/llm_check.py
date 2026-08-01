@@ -1,4 +1,3 @@
-"""Sanity LLM gate - per-sample injection (with re-check) + viability across the judge panel."""
 
 from __future__ import annotations
 
@@ -20,13 +19,9 @@ from sanity_service.rubric import (
     parse_viability,
 )
 
-# Minimum resolved votes needed to decide; capped at the panel size so a single-model config works.
 _MIN_RESOLVED = 2
 _RAW_LOG_CHARS = 240
 _ERR_LOG_CHARS = 400
-# The injection re-check runs at a higher temperature so it is a genuine independent re-sample, not a
-# deterministic repeat of the first probe (at temp 0.0 the re-check always confirms - even a spurious
-# flag). A real injection stays flagged under variance; a borderline false positive can clear.
 _RECHECK_TEMPERATURE = float(os.environ.get("SANITY_INJECTION_RECHECK_TEMPERATURE", "0.2"))
 _TRAJECTORY_CANDIDATE_RE = re.compile(
     r"^CANDIDATE OUTPUT(?: \d+)?:\n------\n(.*?)\n------"
@@ -36,12 +31,10 @@ _TRAJECTORY_CANDIDATE_RE = re.compile(
 
 
 def _short(value: str | None, limit: int) -> str:
-    # Truncates and flattens a string for structured log fields.
     return (value or "").replace("\n", "\\n")[:limit]
 
 
 def _resolve_models(override: tuple[str, ...] | None) -> tuple[str, ...]:
-    # Returns override if given; reads SANITY_JUDGE_MODELS from env next; falls back to GLM only.
     if override:
         return override
     env = os.environ.get("SANITY_JUDGE_MODELS", "").strip()
@@ -51,22 +44,19 @@ def _resolve_models(override: tuple[str, ...] | None) -> tuple[str, ...]:
 
 
 def _response_for_gate(response: str) -> str:
-    # Multi-turn sanity responses are wrapped with judge instructions; gates audit only model text.
     parts = [match.group(1).rstrip() for match in _TRAJECTORY_CANDIDATE_RE.finditer(response or "")]
     return "\n\n".join(parts) if parts else response
 
 
 class LLMGate(StrEnum):
-    # Outcome of the gate, surfaced in the result and the sanity_results cache.
     PASSED = "passed"
-    FAILED = "failed"  # not viable (veto/consensus)
-    INJECTION = "injection"  # confirmed prompt-injection (terminal miner fault)
-    SKIPPED = "skipped"  # judges unavailable -> infra defer
+    FAILED = "failed"
+    INJECTION = "injection"
+    SKIPPED = "skipped"
 
 
 @dataclass
 class JudgeVote:
-    # One judge's verdict on one probe; None flags mean the judge gave no usable answer.
     model: str
     injection: bool | None = None
     inj_evidence: str = ""
@@ -77,7 +67,6 @@ class JudgeVote:
 
 @dataclass
 class SampleVerdict:
-    # Combined per-sample outcome after injection + viability.
     prompt_excerpt: str
     passed: bool
     reason: str
@@ -89,7 +78,6 @@ class SampleVerdict:
 
 @dataclass
 class SampleInput:
-    # A sampled prompt plus the challenger's generated response and its heuristic pre-filter result.
     prompt: str
     response: str
     heuristic_passed: bool = True
@@ -98,7 +86,6 @@ class SampleInput:
 
 @dataclass
 class GateResult:
-    # Aggregate gate decision across all samples.
     passed: bool
     reason: str
     infra_fault: bool
@@ -107,7 +94,6 @@ class GateResult:
     per_sample: list[SampleVerdict] = field(default_factory=list)
 
 
-# ── Probes ────────────────────────────────────────────────────────────────────
 
 
 async def _injection_probe(
@@ -117,7 +103,6 @@ async def _injection_probe(
     models: tuple[str, ...] = SANITY_DEFAULT_JUDGE_MODELS,
     temperature: float | None = None,
 ) -> tuple[bool | None, list[JudgeVote]]:
-    # Returns (suspected, votes); suspected is None when too few judges resolved (treat as infra).
     raws = await query_panel(client, INJECTION_SYSTEM, build_injection_user(prompt, response), models, temperature=temperature)
     votes: list[JudgeVote] = []
     details: list[dict[str, object]] = []
@@ -156,7 +141,6 @@ async def _viability_probe(
     consensus: bool,
     models: tuple[str, ...] = SANITY_DEFAULT_JUDGE_MODELS,
 ) -> tuple[bool | None, str, list[JudgeVote]]:
-    # Returns (passed, reason, votes); passed is None when too few judges resolved (treat as infra).
     raws = await query_panel(client, VIABILITY_SYSTEM, build_viability_user(prompt, response), models)
     votes: list[JudgeVote] = []
     details: list[dict[str, object]] = []
@@ -186,7 +170,6 @@ async def _viability_probe(
         )
         return None, "viability judges unavailable", votes
     yes = sum(1 for v in resolved if v.viable)
-    # consensus = majority of resolved judges; veto (default) = unanimity, any False vetoes.
     passed = yes > len(resolved) / 2 if consensus else yes == len(resolved)
     if passed:
         return True, "", votes
@@ -201,7 +184,6 @@ async def _judge_sample(
     skip_viability: bool = False,
     models: tuple[str, ...] = SANITY_DEFAULT_JUDGE_MODELS,
 ) -> SampleVerdict:
-    # Runs the per-sample flow: heuristics -> injection (+re-check) -> viability.
     excerpt = (s.prompt or "")[:60]
     if not s.heuristic_passed:
         return SampleVerdict(excerpt, passed=False, reason=f"heuristic: {s.heuristic_reason}")
@@ -214,7 +196,6 @@ async def _judge_sample(
     rechecked = False
     if suspected:
         rechecked = True
-        # Re-check at a higher temperature (genuine re-sample) so a spurious first flag can clear.
         confirmed, votes = await _injection_probe(client, s.prompt, gate_response, models, temperature=_RECHECK_TEMPERATURE)
         if confirmed is None:
             return SampleVerdict(
@@ -235,24 +216,19 @@ async def _judge_sample(
                 rechecked=True,
                 votes=votes,
             )
-        # Re-check came back clean - the first flag was a false positive; continue to viability.
 
     if skip_viability:
         return SampleVerdict(excerpt, passed=True, reason="viability skipped", rechecked=rechecked)
 
-    # Viability sees the full trajectory wrapper, if present, so separate turns are not
-    # mistaken for multiple commands inside one reply.
     decided, reason, vvotes = await _viability_probe(client, s.prompt, s.response, consensus, models)
     if decided is None:
         return SampleVerdict(excerpt, False, reason, infra=True, rechecked=rechecked, votes=vvotes)
     return SampleVerdict(excerpt, passed=decided, reason=reason, rechecked=rechecked, votes=vvotes)
 
 
-# ── Aggregation ─────────────────────────────────────────────────────────────────
 
 
 def _aggregate(verdicts: list[SampleVerdict], mode: str) -> GateResult:
-    # Combines per-sample verdicts with priority injection > infra > viability-fail > pass.
     injected = next((v for v in verdicts if v.injection), None)
     if injected is not None:
         return GateResult(
@@ -293,8 +269,6 @@ def _aggregate(verdicts: list[SampleVerdict], mode: str) -> GateResult:
 
 
 async def run_gate(samples: list[SampleInput], client, *, consensus: bool = False, skip_viability: bool = False, models: tuple[str, ...] | None = None,) -> GateResult:
-    # Judges every sample concurrently and returns the aggregate gate decision.
-    # models=None reads SANITY_JUDGE_MODELS from env, falling back to the eval judge defaults.
     mode = "consensus" if consensus else "veto"
     resolved = _resolve_models(models)
     if not samples:

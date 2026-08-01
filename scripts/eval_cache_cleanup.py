@@ -47,7 +47,6 @@ def load_env() -> None:
 
 
 def connect():
-    # All DB connection settings come from env / .env — no hardcoded host, db, or credentials.
     required = ("ALBEDO_POSTGRES_HOST", "ALBEDO_POSTGRES_DB",
                 "ALBEDO_POSTGRES_USER", "ALBEDO_POSTGRES_PASSWORD")
     missing = [v for v in required if not os.environ.get(v)]
@@ -71,7 +70,6 @@ def digest_of(model_uri: str | None) -> str | None:
         return None
     if "@sha256:" in model_uri:
         return model_uri.split("@sha256:")[-1].strip()
-    # HF refs pin a bare git revision: [hf://]repo@<40/64-hex>.
     tail = model_uri.rpartition("@")[2].strip()
     if _HF_REVISION_RE.match(tail):
         return tail
@@ -79,7 +77,6 @@ def digest_of(model_uri: str | None) -> str | None:
 
 
 def load_db_state(cur):
-    """Return (king_digests, subs) where subs maps digest -> list[(state, finished_at)]."""
     cur.execute(
         """SELECT ms.model_uri FROM reigns r
            JOIN reign_members rm ON rm.reign_id = r.id
@@ -127,7 +124,6 @@ def _scan_repo_dir(repo: Path):
 
 
 def scan(cache_dir: Path):
-    """Yield (model_dir, repo_munged, digest, is_partial) across the oci/ and hf/ cache trees."""
     base = cache_dir / "oci"
     if base.is_dir():
         for registry in base.iterdir():
@@ -161,7 +157,6 @@ def decide(repo_munged, digest, is_partial, model_dir, king, subs, grace_hours, 
     states = {s for s, _ in recs}
     if states & IN_FLIGHT:
         return "KEEP", "in-flight: " + ",".join(sorted(states & IN_FLIGHT))
-    # failed-only models get a grace window; evaluated (loss/coronated) are decided immediately
     if not (states & {"COMPLETE_LOSS", "COMPLETE_CORONATED"}):
         fail_times = [f for s, f in recs if s in FAILED and f]
         if fail_times:
@@ -203,7 +198,6 @@ def run_once(cache_dir: Path, grace_hours: float, execute: bool) -> None:
 
 
 def acquire_lock():
-    """Single-instance PID lock: refuse to start if another cleanup is already running."""
     lock_path = os.environ.get("CLEANUP_LOCK_PATH", "/tmp/albedo-eval-cache-cleanup.lock")
     handle = open(lock_path, "w")
     try:
@@ -217,7 +211,7 @@ def acquire_lock():
 
 
 def main() -> None:
-    load_env()  # populate os.environ from .env before reading env-backed defaults below
+    load_env()
     ap = argparse.ArgumentParser()
     ap.add_argument("--execute", action="store_true", help="actually delete (default: dry-run)")
     ap.add_argument("--once", action="store_true", help="single pass then exit (default: loop)")
@@ -232,7 +226,7 @@ def main() -> None:
                              or os.environ.get("ALBEDO_CACHE_DIR", "/root/albedo-models")),
                     help="dir to watch for cached models (env: EVAL_CLEAN_WATCH_DIR)")
     args = ap.parse_args()
-    lock = acquire_lock()  # noqa: F841 — held open for the process lifetime to hold the PID lock
+    lock = acquire_lock()
     execute = args.execute or os.environ.get("CLEANUP_EXECUTE") == "1"
     cache_dir = Path(args.cache_dir)
 
@@ -243,7 +237,7 @@ def main() -> None:
     while True:
         try:
             run_once(cache_dir, args.grace_hours, execute)
-        except Exception as exc:  # noqa: BLE001 — keep the service alive across transient errors
+        except Exception as exc:
             log(f"cleanup pass error: {type(exc).__name__}: {exc}")
         time.sleep(args.interval)
 

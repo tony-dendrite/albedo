@@ -8,7 +8,6 @@ from .canonical_model_config import GENESIS_MODEL_CONFIG_REF
 
 
 class RemoteSettings(BaseSettings):
-    """Runtime configuration for the remote eval control-plane API."""
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -24,7 +23,6 @@ class RemoteSettings(BaseSettings):
     accelerator_type: str = "B200"
     ready: bool = True
 
-    # Control-plane smoke mode exists only for API health/idempotency tests.
     mock_auto_verdict: bool = False
     mock_challenger_won: bool = False
 
@@ -42,9 +40,6 @@ class RemoteSettings(BaseSettings):
     top_p: float = 1.0
     max_model_len: int | None = None
     enforce_eager: bool = False
-    # Pinned torch.compile cache dir shared across models. All contestant models get the
-    # canonical genesis config, so compiled kernels are shape-identical and interchangeable;
-    # the default per-model-path keying recompiles (~50s) and leaks ~1.25 GB per model.
     compile_cache_dir: str = ""
     gpu_memory_utilization: float = 0.95
     kv_cache_dtype: str = "auto"
@@ -54,18 +49,10 @@ class RemoteSettings(BaseSettings):
     resolve_model_artifacts: bool = True
     model_cache_dir: str = "/tmp/albedo-remote-models"
     model_download_concurrency: int = 8
-    # Run HF snapshot downloads in a killable child process guarded by a stall
-    # watchdog: kill + resume when the .partial dir stops growing for
-    # model_download_stall_seconds, giving up (retryable) after
-    # model_download_stall_retries consecutive stalls. Set False to fetch in-process.
     model_download_out_of_process: bool = True
     model_download_stall_seconds: float = 180.0
     model_download_stall_retries: int = 3
-    # Chunked (pointer.v2) hippius artifacts download via hippius_hub, whose decentralized
-    # backend has longer legitimate no-progress gaps than the HF CDN — wider stall window.
     hippius_download_stall_seconds: float = 1200.0
-    # Per-read timeout for the in-process OCI blob stream so a dead socket raises
-    # instead of hanging forever.
     model_download_read_timeout_seconds: float = 120.0
     artifact_spool_dir: str = "/tmp/albedo-remote-artifacts"
     remote_state_dir: str = "/tmp/albedo-remote-state"

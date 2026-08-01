@@ -1,8 +1,3 @@
-"""Model validation worker — claim queued commits oldest-first and validate each model.
-
-Startup checks (DB + OpenSearch) → ensure schema → enqueue from chain_commits → loop:
-sweep expired leases → claim oldest queued → run checks (with a heartbeat) → finalize.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -41,13 +36,12 @@ _WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
 
 @dataclass
 class Outcome:
-    state: str                       # 'done' | 'failed'
-    fault_class: str | None = None   # MINER_FAULT | INFRA_FAULT
+    state: str
+    fault_class: str | None = None
     fault_code: str | None = None
     fault_message: str = ""
     retryable: bool = False
     result_summary: dict = field(default_factory=dict)
-    # Full explanation written to fault.json (e.g. duplicate evidence incl. the fingerprint).
     fault_detail: dict = field(default_factory=dict)
 
 
@@ -61,23 +55,14 @@ def _infra(code: str, msg: str) -> Outcome:
 
 _NOT_FOUND_MARKERS = ("not found", "404", "no such", "does not exist", "nosuchkey",
                       "no revision", "not exist", "norepo",
-                      # HF gated repos are unusable by validators — the miner's fault, not
-                      # retryable infra. Private repos already match "not found" (HF raises
-                      # RepositoryNotFoundError for them). Do NOT match on bare 401/403: an
-                      # invalid validator HF_TOKEN 401s on every repo and would mass-fault miners.
                       "gated", "restricted")
 
 
 def _is_not_found(exc: Exception) -> bool:
-    """True if a hub error means the repo/revision doesn't exist or is inaccessible
-    (gated/private) — the miner's fault either way."""
     return any(m in str(exc).lower() for m in _NOT_FOUND_MARKERS)
 
 
 def _weights_hash(model_dir: str) -> str:
-    """Backend-independent exact-content key: sha256 over the sorted content sha256s of every
-    *.safetensors file. Equal weights ⇒ equal hash, no matter which hub (HF or Hippius), repo
-    name, or revision served them — unlike commit_hash, which for HF is a git SHA, not content."""
     hashes: list[str] = []
     for path in Path(model_dir).glob("*.safetensors"):
         h = hashlib.sha256()
@@ -89,33 +74,27 @@ def _weights_hash(model_dir: str) -> str:
 
 
 def process_model(model_uri: str, hotkey: str) -> Outcome:
-    """Run the per-model check flow synchronously (blocking I/O). Returns an Outcome."""
     repo, _, digest = model_uri.partition("@")
-    # chain_reader's ingest gate is looser than ModelRef (it only checks "/" in repo), so a
-    # committed ref can still be malformed here — that's the miner's fault, not retryable infra.
     try:
         ref = make_ref(repo, digest)
     except ValueError as exc:
         return _miner("invalid_ref", f"malformed on-chain model reference: {exc}", {})
 
-    # 1 — file manifest
     try:
         files = list_files(ref)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         if _is_not_found(exc):
             return _miner("repo_not_found", f"repo/revision not found on {ref.backend}: {exc}", {})
         return _infra("list_files_failed", f"could not list repo files: {exc}")
-    # An empty repo is the miner's fault, not infra.
     if not files:
         return _miner("empty_repo", "model repo has no files", {})
     ok, msg = check_repo(files)
     if not ok:
         return _miner("file_manifest", msg, {"files": sorted(files)[:50]})
 
-    # 1.5 — preflight: reject non-16-bit weights from shard headers only (HTTP Range),
     try:
         shard_dtypes = safetensors_dtypes(ref)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         if _is_not_found(exc):
             return _miner("repo_not_found", f"repo/revision not found on {ref.backend}: {exc}", {})
         return _infra("preflight_failed", f"could not read safetensors headers: {exc}")
@@ -123,10 +102,9 @@ def process_model(model_uri: str, hotkey: str) -> Outcome:
     if not ok:
         return _miner("weight_dtype", msg, {})
 
-    # 2 — small tokenizer/config download
     try:
         config_dir = download_config(ref)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         if _is_not_found(exc):
             return _miner("repo_not_found", f"repo/revision not found on {ref.backend}: {exc}", {})
         return _infra("download_config_failed", f"model config download failed: {exc}")
@@ -134,57 +112,44 @@ def process_model(model_uri: str, hotkey: str) -> Outcome:
     if not ok:
         return _miner("chat_template_hash", msg, {})
 
-    # 2.5 — every metadata file must be byte-identical to the genesis repo
-    # (chat_template.jinja checked at step 2; model.safetensors.index.json checked
-    # structurally at step 3.5 since it is allowed to be custom).
     ok, msg = check_genesis(config_dir, files)
     if not ok:
         return _miner("metadata_hash", msg, {})
 
-    # 2.75 — architecture is checked against the already hash-pinned metadata.
     try:
         ok, msg = check_architecture(config_dir)
     except FileNotFoundError as exc:
         return _miner("architecture", f"config.json missing: {exc}", {})
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return _infra("architecture_read_failed", f"could not read config.json: {exc}")
     if not ok:
         return _miner("architecture", msg, {})
 
-    # 3 — full download
     try:
         model_dir = download_full(ref)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         if _is_not_found(exc):
             return _miner("repo_not_found", f"repo/revision not found on {ref.backend}: {exc}", {})
         return _infra("download_failed", f"model download failed: {exc}")
-    # Repo that resolved but yielded no usable model content is a miner fault, not infra.
     mdir = Path(model_dir)
     if not any(mdir.glob("*.safetensors")):
         return _miner("incomplete_repo",
                       "downloaded repo is missing *.safetensors", {})
 
-    # 3.5 — safetensors match model.safetensors.index.json (no unused shards/tensors)
     ok, msg = check_index(model_dir, files)
     if not ok:
         return _miner("safetensors_index", msg, {})
 
-    # 5 — fingerprint + dedup
     try:
         fp = compute_fingerprint(model_dir)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return _infra("fingerprint_failed", f"could not fingerprint model: {exc}")
 
     try:
         whash = _weights_hash(model_dir)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return _infra("weights_hash_failed", f"could not hash weight files: {exc}")
 
-    # The norm_vector has one element per tensor; OpenSearch's lucene knn_vector (and thus the
-    # per-architecture dedup index) caps dimension at MAX_KNN_DIM. A vector over the cap is a
-    # non-canonical architecture (canonical models are a few thousand tensors), so reject it
-    # terminally — otherwise the ensure_index mapping error surfaces as a retryable infra fault
-    # and the model re-downloads and loops until MAX_ATTEMPTS.
     dim = len(fp.get("norm_vector") or [])
     if dim > config.MAX_KNN_DIM:
         return _miner("fingerprint_too_large",
@@ -192,12 +157,11 @@ def process_model(model_uri: str, hotkey: str) -> Outcome:
                       f"{config.MAX_KNN_DIM} max — non-canonical architecture",
                       {"fingerprint_dim": dim, "max_dim": config.MAX_KNN_DIM})
 
-    # Record this model's fingerprint into the two aggregate corpus files (all fingerprinted models).
     fp_uri, tensors_uri = update_fingerprint_corpus(model_uri, fp)
 
     try:
         dedup = find_duplicate(fp, hotkey, weights_hash=whash)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return _infra("opensearch_failed", f"dedup search failed: {exc}")
 
     if dedup["is_duplicate"]:
@@ -210,16 +174,14 @@ def process_model(model_uri: str, hotkey: str) -> Outcome:
                    "duplicate_of": dedup["matched_key"], "duplicate_of_hotkey": dedup["matched_hotkey"],
                    "candidates_checked": dedup["candidates_checked"],
                    "exact_weights_match": dedup.get("exact_weights_match", False)}
-        # The full duplicate explanation + fingerprint evidence goes into fault.json.
         fault_detail = {**summary, "fingerprint": fp}
         return _miner("duplicate", reason, summary, fault_detail=fault_detail)
 
-    # Not a duplicate → index it into the working corpus (OpenSearch).
     created_at = datetime.now(timezone.utc).isoformat()
     try:
         index_fingerprint(model_uri, fp, hotkey=hotkey, repo=repo, digest=digest,
                           model_uri=model_uri, created_at=created_at, weights_hash=whash)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return _infra("opensearch_index_failed", f"could not index fingerprint: {exc}")
 
     return Outcome("done", result_summary={"similarity": dedup["similarity"], "threshold": dedup["threshold"],
@@ -238,8 +200,6 @@ async def _finalize(pool, attempt, outcome: Outcome) -> None:
         try:
             await db.mark_done(pool, attempt["id"], outcome.result_summary)
         except asyncpg.UniqueViolationError as exc:
-            # Another submission already holds this model_hash: an exact-digest duplicate
-            # that slipped past the claim-time gate (e.g. a race). Terminal miner fault.
             await db.mark_failed(
                 pool, attempt["id"],
                 fault_class="MINER_FAULT",
@@ -256,8 +216,6 @@ async def _finalize(pool, attempt, outcome: Outcome) -> None:
             fault_code=outcome.fault_code, fault_message=outcome.fault_message)
         log.warning("infra fault [{}] {} → {}", outcome.fault_code, attempt["model_uri"], new_state)
     else:
-        # Terminal miner fault: publish a full-explanation fault.json to Hippius (best-effort).
-        # For a duplicate, fault_detail carries the matched model + similarity + fingerprint evidence.
         digest = attempt["model_uri"].partition("@")[2]
         fault_doc = {
             "model_uri": attempt["model_uri"], "hotkey": attempt["hotkey"],
@@ -295,8 +253,6 @@ async def run() -> None:
             log.info("claim — block={} hotkey={} {}", attempt["block_number"],
                      attempt["hotkey"][:10], attempt["model_uri"])
 
-            # A hotkey whose model failed the sanity gate for injection or low vocabulary is
-            # blocked for good; any later commitment is rejected here without re-validating.
             sanity_reason = await db.hotkey_sanity_block_reason(pool, attempt["hotkey"])
             if sanity_reason is not None:
                 await db.mark_failed(
@@ -310,8 +266,6 @@ async def run() -> None:
                 log.info("skip — hotkey sanity-blocked ({}): {}", sanity_reason, attempt["hotkey"][:10])
                 continue
 
-            # A hotkey that previously submitted a duplicate model is blocked for good;
-            # any later commitment is rejected here without re-validating.
             dup_reason = await db.hotkey_duplicate_block_reason(pool, attempt["hotkey"])
             if dup_reason is not None:
                 await db.mark_failed(
@@ -325,7 +279,6 @@ async def run() -> None:
                 log.info("skip — hotkey duplicate-blocked: {}", attempt["hotkey"][:10])
                 continue
 
-            # One passed Hippius validation per hotkey. A later commit is a miner-side duplicate.
             if await db.hotkey_validated(pool, attempt["hotkey"]):
                 await db.mark_failed(
                     pool,
@@ -338,10 +291,6 @@ async def run() -> None:
                 log.info("skip — hotkey already validated: {}", attempt["hotkey"][:10])
                 continue
 
-            # A commit whose digest was already validated for ANY submission is a byte-identical
-            # copy — reject before downloading. The fingerprint dedup can miss exact twins (the
-            # knn norm-vector prefilter saturates on a copycat-heavy corpus), and mark_done would
-            # crash on model_submissions_model_hash_uidx.
             holder = None
             if attempt["commit_hash"]:
                 holder = await db.model_hash_holder(
@@ -366,14 +315,13 @@ async def run() -> None:
             try:
                 outcome = await asyncio.to_thread(
                     process_model, attempt["model_uri"], attempt["hotkey"])
-            except Exception as exc:  # noqa: BLE001 — unexpected; treat as infra, retry
+            except Exception as exc:
                 outcome = _infra("unexpected", f"{type(exc).__name__}: {exc}")
             finally:
                 hb.cancel()
             try:
                 await _finalize(pool, attempt, outcome)
-            except Exception as exc:  # noqa: BLE001 — keep the worker alive; the attempt
-                # stays RUNNING and returns via lease expiry instead of crash-looping pm2.
+            except Exception as exc:
                 log.error("finalize failed for {} — left to lease expiry: {}",
                           attempt["model_uri"], exc)
     finally:

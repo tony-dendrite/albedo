@@ -4,8 +4,6 @@ from pathlib import Path
 from model_validation.validate import genesis_files
 from model_validation.validate.genesis_files import GENESIS_SHA256, check
 
-# Files the repo already ships that are also genesis-hashed; used to prove the pinned
-# constants match a real, byte-for-byte copy of the canonical tokenizer.
 _ASSETS = Path(__file__).resolve().parents[1] / "assets" / "tokenizers" / "Qwen3.6-35B-A3B"
 
 
@@ -14,16 +12,11 @@ def _sha256(path):
 
 
 def test_pinned_hashes_match_committed_assets():
-    """The pinned genesis hashes must match the repo's own canonical tokenizer files.
-
-    chat_template.jinja is excluded — it is hash-checked by chat_template.py, not here.
-    """
     for name in ("tokenizer.json", "tokenizer_config.json"):
         assert _sha256(_ASSETS / name) == GENESIS_SHA256[name], name
 
 
 def test_chat_template_is_not_genesis_hashed():
-    """chat_template.jinja is owned by chat_template.py, so it must not be duplicated here."""
     assert "chat_template.jinja" not in GENESIS_SHA256
 
 
@@ -59,5 +52,4 @@ def test_missing_file_rejected(tmp_path, monkeypatch):
 
 
 def test_index_json_is_not_genesis_hashed():
-    """model.safetensors.index.json is allowed to be custom, so it must not be hash-pinned."""
     assert "model.safetensors.index.json" not in GENESIS_SHA256

@@ -49,9 +49,7 @@ from .notifications import EvalErrorNotification, notify_eval_error
 class QuestionPrepSample(BaseModel):
     sample_id: str
     prompt: str
-    sample_index: int = 0  # retained for payload compatibility; scoring ignores order
-    # Structured chat context + trajectory turn budget: present when the caller wants
-    # SOTA-reference-anchored questions (the reference model consumes raw messages).
+    sample_index: int = 0
     messages: list[dict[str, str]] | None = None
     assistant_turns: int = 0
 
@@ -65,7 +63,7 @@ class QuestionPrepRequest(BaseModel):
 
 class QuestionPrepResponse(BaseModel):
     eval_run_id: str
-    category_prep_id: str  # opaque id (name kept for control-plane compatibility)
+    category_prep_id: str
     accepted_sample_count: int
 
 
@@ -161,9 +159,6 @@ STRICT RULES:
 """
 
 def _evaluator_provider(settings: JudgeSettings) -> dict[str, Any]:
-    """Evaluator provider block: always fp8. With an `order` list, fallbacks are disabled — failover
-    happens by rotating the order across retries (deterministic provenance, ~3x less draw-to-draw
-    strictness wobble measured offline). Without a list, generic fallbacks stay on."""
     block: dict[str, Any] = {"allow_fallbacks": True, "quantizations": ["fp8"]}
     order = [p.strip() for p in settings.evaluator_providers.split(",") if p.strip()]
     if order:
@@ -173,9 +168,6 @@ def _evaluator_provider(settings: JudgeSettings) -> dict[str, Any]:
 
 
 def _simulation_provider(settings: JudgeSettings) -> dict[str, Any] | None:
-    """Hard provider pin for the primary simulator model. `only` (unlike `order`) refuses every
-    other provider, so an endpoint outage fails the single primary call fast instead of silently
-    re-routing to another host."""
     allowed = [p.strip() for p in settings.simulation_providers.split(",") if p.strip()]
     if not allowed:
         return None
@@ -191,8 +183,6 @@ def _reference_completion_observation(fmt: str) -> str:
 
 
 class ReferenceTrajectoryService:
-    """Runs the SOTA reference model through the same turn -> simulated-observation loop the
-    candidates face; the rendered trajectory anchors the question checklist."""
 
     def __init__(
         self,
@@ -214,7 +204,6 @@ class ReferenceTrajectoryService:
     async def generate(
         self, sample: QuestionPrepSample, *, eval_run_id: str = ""
     ) -> tuple[str, str, bool]:
-        """Returns (reference_text, model, made_edit)."""
         reference, model, made_edit, _ = await self._generate_once(
             sample, eval_run_id, extra_turns=0
         )
@@ -256,7 +245,6 @@ class ReferenceTrajectoryService:
         self, sample: QuestionPrepSample, eval_run_id: str, *, extra_turns: int,
         model_offset: int = 0,
     ) -> tuple[str, str, bool, int]:
-        """Returns (reference_text, model, made_edit, generated_step_count)."""
         model = self._model_for(sample.sample_id, offset=model_offset)
         turn_count = (
             max(1, sample.assistant_turns or self.settings.sota_trajectory_turns) + extra_turns
@@ -323,8 +311,6 @@ class ReferenceTrajectoryService:
 
 
 class QuestionService:
-    """Generates the yes/no question set for one sample via OpenRouter glm-5.2 — anchored on a
-    SOTA reference trajectory when the sample carries messages, task-only otherwise."""
 
     def __init__(
         self,
@@ -460,7 +446,7 @@ class RepoContextClient:
             response.raise_for_status()
             context = response.json().get("context")
             return context if isinstance(context, str) and context else None
-        except Exception as exc:  # noqa: BLE001 - grounding is best-effort
+        except Exception as exc:
             now = time.monotonic()
             if now - self._last_warning > 60.0:
                 self._last_warning = now
@@ -496,7 +482,6 @@ class ObservationSimulationService:
             prompt=request.prompt,
             assistant_output=request.assistant_output,
         )
-        # The simulated turn has to speak the observation format this trajectory already uses.
         fmt = detect_format(request.sample_id, request.messages)
         primary = self.settings.simulation_model or self.settings.evaluator_model
         fallback_model = self.settings.evaluator_model
@@ -508,9 +493,6 @@ class ObservationSimulationService:
 
         observation = ""
         for model, tries in attempts:
-            # The dedicated primary gets exactly ONE HTTP call (no parse/transport retries):
-            # on any failure the chain moves straight to the evaluator model, whose own call
-            # keeps the full retry budget, and finally to the empty-observation fallback.
             single_shot = model == primary and primary != fallback_model
             messages = [
                 {
@@ -535,7 +517,7 @@ class ObservationSimulationService:
                 )
                 if response.error:
                     if model != fallback_model:
-                        break  # primary unavailable: let the fallback model try
+                        break
                     raise ObservationSimulationUnavailable(response.error)
                 observation = repair_output(response.raw, fmt)
                 if _usable_simulation_output(observation, fmt):
@@ -579,7 +561,6 @@ class ObservationSimulationService:
 
 
 class QuestionPrepStore:
-    """Async per-sample question generation started at eval start (overlaps generation); scoring awaits it."""
 
     def __init__(self, settings: JudgeSettings, service: QuestionService):
         self.settings = settings
@@ -780,10 +761,6 @@ _COMMAND_BLOCK_RE = re.compile(r"```(?:bash|sh)?[ \t]*\n(.*?)```", re.DOTALL)
 
 
 def _command_only(text: str) -> str:
-    """The environment must see only the command, never the THOUGHT. Candidate narration can
-    steer an LLM terminal-simulator into confirming invented repository state (observed with
-    king-LXXX: fabricated 'already located/shown' claims got echoed back as observations).
-    Falls back to the full text when no fenced command block exists."""
     match = _COMMAND_BLOCK_RE.search(text or "")
     if match:
         return f"```bash\n{match.group(1).strip()}\n```"
@@ -816,9 +793,9 @@ def _simulation_system_prompt(fmt: str, context_block: str | None = None) -> str
     return f"{BASE_PROMPT}\n{context_block}\n{block}"
 
 
-_LOOP_LINE_RUN = 25  # consecutive identical non-empty lines
-_LOOP_TAIL_WINDOW = 512  # tail span that must be fully periodic to call it a cycle loop
-_LOOP_MIN_REPEATS = 4  # the period must fit this many times inside the tail window
+_LOOP_LINE_RUN = 25
+_LOOP_TAIL_WINDOW = 512
+_LOOP_MIN_REPEATS = 4
 
 
 def _looping_output(text: str) -> bool:
@@ -839,7 +816,7 @@ def _looping_output(text: str) -> bool:
 def _trailing_cycle_period(text: str) -> int:
     tail = text.rstrip()[-_LOOP_TAIL_WINDOW:]
     if len(tail) < _LOOP_TAIL_WINDOW:
-        return 0  # short outputs cannot loop meaningfully; the line-run check covers them
+        return 0
     for period in range(1, _LOOP_TAIL_WINDOW // _LOOP_MIN_REPEATS + 1):
         if tail[period:] == tail[:-period]:
             return period
@@ -905,7 +882,6 @@ async def _judge_side(
     judge_models: list[str],
     reference_made_edit: bool | None = None,
 ) -> tuple[dict[str, dict[str, str | None]], list[dict[str, Any]]]:
-    """Score one trajectory (king or challenger) with all judges."""
     question_ids = [q["id"] for q in questions]
     schema = answer_schema(question_ids)
     messages = build_judge_messages(response=response_text, questions=questions)
@@ -973,7 +949,7 @@ async def _score_samples(
         nonlocal completed
         try:
             return await _score_one_inner(sample)
-        except Exception as exc:  # one bad sample must not abort the whole batch
+        except Exception as exc:
             async with progress_lock:
                 completed += 1
             logger.warning(
@@ -1033,8 +1009,6 @@ async def _score_samples(
             "judge_results": king_recs + chal_recs,
             "scored": scored,
             "scoring_mode": "binary",
-            # Question regime provenance: task_only here means the sample was scored WITHOUT
-            # the anchored checklist (no size ladder) — must be visible in artifacts.
             "question_source": prepared.source,
         }
 

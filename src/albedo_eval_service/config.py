@@ -7,7 +7,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Runtime configuration for the backend-side eval service."""
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -21,9 +20,6 @@ class Settings(BaseSettings):
 
     dataset_version: str = "swe-zero+mini-coder-v1"
     dataset_manifest_uri: str
-    # TODO: still the single-source SWE-ZERO hash. Repin to the combined swe-zero+mini-coder
-    # manifest sha256 from `scripts/build_manifest.py` output before deploying 2 datasets
-    # (also update src/sanity_service/settings.py).
     dataset_manifest_hash: str = "980d50ad40e0b5863a4e624b9e313441bda38626fbba089efb95cbec8aa1a9f4"
     dataset_manifest_path: str | None = None
     sample_count: int = 100

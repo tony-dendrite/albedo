@@ -5,7 +5,6 @@ from model_validation.validate.safetensors_index import check
 
 
 def _write_shard(path, tensor_keys):
-    """Write a minimal valid safetensors file declaring tensor_keys (zero-size tensors)."""
     header = {k: {"dtype": "F32", "shape": [0], "data_offsets": [0, 0]} for k in tensor_keys}
     blob = json.dumps(header).encode("utf-8")
     path.write_bytes(struct.pack("<Q", len(blob)) + blob)
@@ -42,7 +41,7 @@ def test_clean_sharded_ok(tmp_path):
 
 def test_extra_unreferenced_shard_fails(tmp_path):
     _write_shard(tmp_path / "model-00001-of-00001.safetensors", ["a"])
-    _write_shard(tmp_path / "model-00002-of-00002.safetensors", ["b"])  # not in index
+    _write_shard(tmp_path / "model-00002-of-00002.safetensors", ["b"])
     _write_index(tmp_path / "model.safetensors.index.json", {
         "a": "model-00001-of-00001.safetensors",
     })
@@ -55,14 +54,14 @@ def test_missing_referenced_shard_fails(tmp_path):
     _write_shard(tmp_path / "model-00001-of-00002.safetensors", ["a"])
     _write_index(tmp_path / "model.safetensors.index.json", {
         "a": "model-00001-of-00002.safetensors",
-        "b": "model-00002-of-00002.safetensors",  # file absent
+        "b": "model-00002-of-00002.safetensors",
     })
     ok, msg = check(str(tmp_path), [])
     assert not ok and "references missing shard" in msg
 
 
 def test_dead_tensor_in_shard_fails(tmp_path):
-    _write_shard(tmp_path / "model.safetensors", ["a", "unused"])  # 'unused' not in index
+    _write_shard(tmp_path / "model.safetensors", ["a", "unused"])
     _write_index(tmp_path / "model.safetensors.index.json", {"a": "model.safetensors"})
     ok, msg = check(str(tmp_path), [])
     assert not ok and "not referenced by the index" in msg
@@ -73,7 +72,7 @@ def test_index_maps_missing_tensor_fails(tmp_path):
     _write_shard(tmp_path / "model.safetensors", ["a"])
     _write_index(tmp_path / "model.safetensors.index.json", {
         "a": "model.safetensors",
-        "ghost": "model.safetensors",  # not in file header
+        "ghost": "model.safetensors",
     })
     ok, msg = check(str(tmp_path), [])
     assert not ok and "not present in shard" in msg

@@ -21,11 +21,8 @@ def multi_source_manifest_sample_ids(
     *,
     block_hash: str,
     sample_count: int = 64,
-    max_turns_per_sample: int = 10,  # unused with phase sampling; kept for call-site compatibility
+    max_turns_per_sample: int = 10,
 ) -> list[str]:
-    """Deterministic phase-anchored sampling: one random rollout per unique instance_id pooled across
-    sources, stratified by STEP_TRIM (phase) x FAMILY_MIX (bug family). Returns ``shard:row:turn``
-    where turn is derived per-instance from rows_meta["first_edit"]. Requires the enriched manifest."""
     if "sources" not in manifest:
         raise ValueError(
             "dataset manifest must define a 'sources' array; single-source manifests are not "
@@ -62,7 +59,7 @@ def multi_source_manifest_sample_ids(
                 if other_language and other_language_budget <= 0:
                     continue
                 turn_idx = _turn_idx(phase, entry, rng)
-                if entry["asst"] <= turn_idx:  # need at least one assistant turn after the cut
+                if entry["asst"] <= turn_idx:
                     continue
                 entry["used"] = True
                 repo_counts[entry["repo"]] += 1
@@ -80,23 +77,21 @@ def multi_source_manifest_sample_ids(
 
 
 def _prefix_chars(phase: str, entry: dict[str, Any]) -> int:
-    if phase == "cold":  # cuts at turn 1-2, inherently small
+    if phase == "cold":
         return 0
     return int(entry.get("chars_at" if phase == "at_edit" else "chars_pre") or 0)
 
 
 def _turn_idx(phase: str, entry: dict[str, Any], rng: random.Random) -> int:
-    """Cut point, anchored on the first edit so every task is cut at the same stage of work."""
     if phase == "cold":
         return rng.choice((1, 2))
     first_edit = entry["first_edit"]
-    if first_edit <= 0:  # no edit detected: fall back to a shallow cut rather than dropping the row
+    if first_edit <= 0:
         return 1
     return max(1, first_edit - 2) if phase == "pre_edit" else first_edit
 
 
 def _apportion(spec: list[tuple[str, int]], count: int) -> dict[str, int]:
-    """Apportion ``count`` across named shares (largest remainder), preserving spec order."""
     total = sum(share for _, share in spec)
     if total <= 0:
         raise ValueError("apportion shares must sum to a positive value")
@@ -110,8 +105,6 @@ def _apportion(spec: list[tuple[str, int]], count: int) -> dict[str, int]:
 
 
 def _family_grid(count: int) -> dict[str, dict[str, int]]:
-    """Per-phase family quotas, exact on both margins: allocating each family against the CUMULATIVE
-    phase total cancels the rounding that per-phase apportionment would accumulate."""
     allocated = {name: 0 for name, _ in FAMILY_MIX}
     grid: dict[str, dict[str, int]] = {}
     cumulative = 0
@@ -126,13 +119,11 @@ def _family_grid(count: int) -> dict[str, dict[str, int]]:
 
 
 def _instance_pool(sources: list[dict[str, Any]], rng: random.Random) -> list[dict[str, Any]]:
-    """One random rollout per unique instance_id, pooled across ALL sources so an instance present in
-    two corpora is never drawn twice."""
     by_instance: dict[str, list[dict[str, Any]]] = {}
     for source in sources:
         for shard in source["shards"]:
             for row_idx, meta in enumerate(shard["rows_meta"]):
-                if meta.get("blocked"):  # benchmark contamination, flagged at manifest build
+                if meta.get("blocked"):
                     continue
                 by_instance.setdefault(str(meta["iid"]), []).append(
                     {
@@ -149,7 +140,7 @@ def _instance_pool(sources: list[dict[str, Any]], rng: random.Random) -> list[di
                     }
                 )
 
-    pool = [rng.choice(by_instance[iid]) for iid in sorted(by_instance)]  # sorted => deterministic
+    pool = [rng.choice(by_instance[iid]) for iid in sorted(by_instance)]
     rng.shuffle(pool)
     return pool
 

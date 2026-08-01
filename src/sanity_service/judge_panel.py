@@ -1,4 +1,3 @@
-"""Sanity judge panel - runs a single-model prompt against the sanity judge."""
 
 from __future__ import annotations
 
@@ -13,7 +12,6 @@ SANITY_DEFAULT_JUDGE_MODELS: tuple[str, ...] = ("z-ai/glm-5.2",)
 
 
 def make_client(settings: JudgeSettings | None = None) -> OpenRouterJudgeClient:
-    # Builds a judge client from the shared ALBEDO_JUDGE_* settings; caller owns its lifecycle.
     return OpenRouterJudgeClient(settings or get_judge_settings())
 
 
@@ -24,8 +22,6 @@ async def query_panel(
     models: tuple[str, ...] = SANITY_DEFAULT_JUDGE_MODELS,
     temperature: float | None = None,
 ) -> list[JudgeRawResponse]:
-    # Sends the prompt to all judges concurrently; one response per model, errors captured.
-    # temperature overrides the judge default per call (used by the injection re-check for variance).
     logger.info("[sanity/panel] querying {} judges: {}", len(models), list(models))
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
@@ -34,7 +30,7 @@ async def query_panel(
             result = await client.complete(model=model, messages=messages, temperature=temperature)
             logger.info("[sanity/panel] {} ok chars={}", model, len(result.raw or ""))
             return result
-        except Exception as exc:  # noqa: BLE001 - a dead judge must not abort the panel
+        except Exception as exc:
             logger.warning("[sanity/panel] {} failed: {}: {}", model, type(exc).__name__, exc)
             return JudgeRawResponse(model=model, provider=None, raw="", error=f"{type(exc).__name__}: {exc}")
 

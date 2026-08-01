@@ -1,8 +1,3 @@
-"""S3 publishing for chain_guard reuse detections.
-
-Mirrors the model_validation fault uploader: boto3 against the ALBEDO_S3_* bucket, public-read
-JSON, env-gated no-op when credentials are unset (so chain_reader runs fine without S3).
-"""
 from __future__ import annotations
 
 import functools
@@ -11,7 +6,7 @@ import os
 
 from loguru import logger as log
 
-import chain_reader.config  # noqa: F401 — import side-effect loads albedo/.env into os.environ
+import chain_reader.config
 
 S3_BUCKET = os.environ.get("ALBEDO_S3_BUCKET", "")
 S3_ENDPOINT = os.environ.get("ALBEDO_S3_ENDPOINT", "https://s3.hippius.com")
@@ -38,7 +33,6 @@ def _client():
 
 
 def put_detection(hotkey: str, block: int, detail: dict) -> str | None:
-    """Upload a reuse-detection report. No-op (None) when S3 is unconfigured."""
     if not ENABLED:
         log.debug("S3 disabled (ALBEDO_S3_* unset); skipping detection upload for {}", hotkey)
         return None
@@ -53,6 +47,6 @@ def put_detection(hotkey: str, block: int, detail: dict) -> str | None:
         uri = f"s3://{S3_BUCKET}/{key}"
         log.info("uploaded detection {}", uri)
         return uri
-    except Exception as exc:  # noqa: BLE001 — never wedge the reader on an upload
+    except Exception as exc:
         log.warning("S3 put({}) failed: {}", key, exc)
         return None

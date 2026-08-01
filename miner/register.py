@@ -1,15 +1,9 @@
-"""Register a hotkey on the subnet (recycle / burned registration), miner side.
-
-Mirrors what `btcli subnet register` does, but in-process with logging: shows the recycle
-cost, confirms, submits `burned_register`, then reports the assigned UID.
-"""
 from __future__ import annotations
 
 from loguru import logger
 
 
 def _neuron_uid(st, ss58: str, netuid: int) -> int | None:
-    """UID of ``ss58`` on ``netuid``, or None if not registered."""
     neuron = st.get_neuron_for_pubkey_and_subnet(ss58, netuid)
     if neuron is None or neuron.is_null:
         return None
@@ -18,9 +12,6 @@ def _neuron_uid(st, ss58: str, netuid: int) -> int | None:
 
 def register(coldkey: str, hotkey: str, netuid: int, network: str,
              *, assume_yes: bool = False, confirm=None):
-    """Register ``hotkey`` on ``netuid`` via recycle. Returns the UID (existing or new), or None
-    if aborted. ``confirm(text)->bool`` overrides the CLI [y/N] prompt (the TUI supplies its own).
-    """
     import bittensor as bt
 
     from miner.commit import build_wallet

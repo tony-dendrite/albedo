@@ -215,7 +215,7 @@ def _iid_from_parquet(dataset_root: str, shard_name: str, row_idx: int) -> str |
                 continue
             value = batch.column("instance_id")[row_idx - seen].as_py()
             return str(value) if value else None
-    except Exception:  # noqa: BLE001 - missing shard/column -> unresolved
+    except Exception:
         return None
     return None
 
@@ -250,7 +250,7 @@ class RepoContextService:
     def context_for(self, sample_id: str, assistant_output: str) -> GroundingContext:
         try:
             return self._context_for(sample_id, assistant_output)
-        except Exception as exc:  # noqa: BLE001 - total failure must degrade, not propagate
+        except Exception as exc:
             logger.warning(
                 "repo_context_fallback sample_id={} kind=none reason=unexpected error={}",
                 sample_id, f"{type(exc).__name__}: {exc}",
@@ -277,7 +277,7 @@ class RepoContextService:
                 if resolved is None:
                     return False
                 return self._ensure_snapshot(*resolved) is not None
-            except Exception as exc:  # noqa: BLE001 - prefetch is best-effort
+            except Exception as exc:
                 logger.warning(
                     "repo_context_prefetch_instance_failed instance={} error={}",
                     instance_id, f"{type(exc).__name__}: {exc}",
@@ -349,7 +349,7 @@ class RepoContextService:
     def _iid_from_manifest(self, shard_name: str, row_idx: int) -> tuple[str, str] | None:
         try:
             shards = self._manifest_shards()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             if not self._manifest_error_logged:
                 self._manifest_error_logged = True
                 logger.warning(
@@ -405,7 +405,7 @@ class RepoContextService:
                     data = self._github_json(f"/repos/{owner}/{repo}")
                     owner, repo = data["full_name"].split("/", 1)
                     sha = self._sha_from_api(owner, repo, ref)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.info(
                     "repo_context_sha_unresolved instance={} error={}",
                     ref.instance_id, f"{type(exc).__name__}: {exc}",
@@ -448,7 +448,7 @@ class RepoContextService:
                 (tmp_dir / _LISTING_NAME).write_text(json.dumps(listing))
                 (tmp_dir / _DONE_MARKER).write_text(json.dumps({"bytes": extracted_bytes}))
                 os.replace(tmp_dir, final)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
                 if (final / _DONE_MARKER).exists():
                     return final
@@ -628,7 +628,7 @@ class RepoContextService:
             return None
         try:
             row = _read_parquet_row(Path(self.settings.dataset_root) / shard_name, row_idx)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.info(
                 "repo_context_trajectory_unavailable shard={} row={} error={}",
                 shard_name, row_idx, f"{type(exc).__name__}: {exc}",

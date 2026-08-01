@@ -1,17 +1,3 @@
-"""Universal, spec-driven architecture check.
-
-Loads an external architecture spec (path from config.ARCH_SPEC_PATH / ALBEDO_ARCH_SPEC)
-that declares the currently-locked architecture, and compares a model's config.json against
-it. No model family is hard-coded — swapping the spec file changes the locked architecture
-with no code change.
-
-Spec format:
-{
-  "architectures": ["Qwen3ForCausalLM"],
-  "expected": { "model_type": "qwen3", "hidden_size": 2560, ... },
-  "forbidden_keys": ["auto_map", "quantization_config"]
-}
-"""
 from __future__ import annotations
 
 import functools
@@ -39,7 +25,6 @@ def _load_config_json(model_dir: str) -> dict[str, Any]:
 
 
 def check(model_dir: str, spec_path: str | None = None) -> tuple[bool, str]:
-    """Return (ok, message). message is empty when ok."""
     spec = _load_spec(spec_path or config.ARCH_SPEC_PATH)
     cfg = _load_config_json(model_dir)
 

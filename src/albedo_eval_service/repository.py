@@ -29,12 +29,6 @@ _ERROR_LINE = re.compile(r"[A-Za-z_][\w.]*(?:Error|Exception)\b")
 
 
 def _concise_fault(message: str | None, max_chars: int = 300) -> str:
-    """One readable line for dashboard-bound fault text — never a raw traceback.
-
-    Upstream fault messages should already be single-line, but any that still carry
-    an embedded traceback are reduced to their final exception line here so code
-    dumps never reach the public site.
-    """
     if not message:
         return ""
     lines = [line.strip() for line in message.splitlines() if line.strip()]
@@ -65,11 +59,6 @@ class ActiveEval:
 
 
 class EvalRepository:
-    """Postgres access for eval dispatching.
-
-    Methods keep transaction boundaries explicit because the service relies on
-    durable state transitions for crash recovery.
-    """
 
     def __init__(self, database_url: str):
         self.database_url = database_url
@@ -264,11 +253,6 @@ class EvalRepository:
             )
 
     def peek_next_challenger_model_uri(self) -> str | None:
-        """Best-effort look at the model the eval queue will most likely claim next.
-
-        Used to warm the remote model cache while the current eval runs; includes
-        PRE_EVAL_PASSED because the requeuer promotes those within a minute.
-        """
         with self._connect() as conn:
             row = conn.execute(
                 """
@@ -456,7 +440,6 @@ class EvalRepository:
                 return len(rows)
 
     def queue_pre_eval_passed(self, *, worker_id: str, limit: int = 100) -> int:
-        # Advances PRE_EVAL_PASSED submissions to EVAL_QUEUED so the eval dispatcher can claim them.
         with self._connect() as conn:
             with conn.transaction():
                 rows = conn.execute(
@@ -740,9 +723,6 @@ class EvalRepository:
                     },
                 )
                 if verdict is not None:
-                    # A soft fault (no_valid_generated_pairs, judge_provider_exhausted) still
-                    # uploads a full artifact set; without this those objects have no DB row.
-                    # Hard failures carry artifacts={} and insert nothing.
                     self._insert_artifacts_from_verdict_inside_tx(
                         conn, submission_id, attempt_id, verdict
                     )
@@ -893,7 +873,6 @@ class EvalRepository:
 
     @staticmethod
     def _hotkey_already_scored_inside_tx(conn: psycopg.Connection, hotkey: str) -> bool:
-        """Has another submission for this hotkey already reached eval (or beyond)?"""
         row = conn.execute(
             """
             SELECT 1

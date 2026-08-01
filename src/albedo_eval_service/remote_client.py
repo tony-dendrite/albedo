@@ -9,7 +9,6 @@ from .models import EvalRequest
 
 
 class RemoteEvalClient:
-    """HTTP client for the remote eval host tunnel API."""
 
     def __init__(self, *, base_url: str, auth_token: str = "", timeout_seconds: float = 30.0):
         headers = {}

@@ -1,8 +1,3 @@
-"""Download eval-run artifacts from the public S3 bucket, size-verified.
-
-Files land in <data_dir>/<eval_run_id>/<basename>; existing files with the
-expected size are skipped, so re-runs are cheap.
-"""
 
 from __future__ import annotations
 
@@ -31,7 +26,7 @@ def download_run(cfg: Config, run_id: str, files: dict[str, tuple[str, int]]) ->
                 tmp.rename(dest)
                 last_err = None
                 break
-            except Exception as e:  # noqa: BLE001 - retry any transient failure
+            except Exception as e:
                 last_err = e
         if last_err:
             raise RuntimeError(f"download failed for {url}: {last_err}")

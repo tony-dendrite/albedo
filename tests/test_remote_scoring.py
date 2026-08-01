@@ -32,8 +32,6 @@ def _samples(counts: dict[str, int]) -> list[EvalSample]:
 
 
 def test_category_prep_payload_carries_context_for_reference_anchoring():
-    # Prep is order-free (no sample_index) but carries messages + the trajectory turn budget so
-    # the judge service can generate the SOTA reference trajectory.
     samples = _samples({"swe-zero": 4, "mini-coder": 2})
     request = types.SimpleNamespace(eval_run_id=uuid4())
     payload = _category_prep_payload(request, samples, 3)
@@ -85,7 +83,7 @@ def test_collect_score_batches_preserves_payload_order():
     delays = {payload["batch_id"]: (6 - i) * 0.01 for i, payload in enumerate(payloads)}
 
     def send(payload):
-        time.sleep(delays[payload["batch_id"]])  # earlier batches finish later
+        time.sleep(delays[payload["batch_id"]])
         return {
             "scoring_records": [{"sample_id": f"{payload['batch_id']}-r"}],
             "summary": {"batch_id": payload["batch_id"]},
@@ -151,7 +149,6 @@ def test_websocket_scoring_client_sends_batches_concurrently(monkeypatch):
         scoring=types.SimpleNamespace(judge_count=3),
         dataset=types.SimpleNamespace(scoring_batch_size=2),
     )
-    # 3 batches must be in flight at once or the barrier breaks and the test fails.
     barrier = threading.Barrier(3, timeout=5)
 
     class StubHub:
@@ -203,5 +200,5 @@ def test_score_batch_payload_skips_errored_generations():
     )
     payloads = _score_batch_payloads(request, samples, king, challenger)
     emitted = {entry["sample_id"] for payload in payloads for entry in payload["samples"]}
-    assert samples[1].sample_id not in emitted  # errored pair dropped
+    assert samples[1].sample_id not in emitted
     assert len(emitted) == 2

@@ -1,15 +1,3 @@
-"""Hippius S3 artifacts.
-
-Two kinds of output, both in the `albedo` bucket:
-  1. The fingerprint corpus — TWO aggregate files updated for every fingerprinted model:
-       fingerprint.json  -> {model_uri: {method, layer_keys, norm_vector}}   (the "rest")
-       tensors.json      -> {model_uri: {layer_keys, tensor_samples}}         (the tensors)
-  2. Per-model fault.json — on a terminal miner fault, with the full explanation
-     (for a duplicate this includes the matched model + similarity + the fingerprint evidence).
-
-Env-gated and best-effort: when ALBEDO_S3_* is unset the uploader is disabled and the calls
-are no-ops, so validation still runs without publishing.
-"""
 from __future__ import annotations
 
 import functools
@@ -55,27 +43,22 @@ def _put(key: str, data: dict) -> str | None:
         uri = f"s3://{config.S3_BUCKET}/{key}"
         log.info("uploaded artifact {}", uri)
         return uri
-    except Exception as exc:  # noqa: BLE001 — never wedge validation on an upload
+    except Exception as exc:
         log.warning("S3 put({}) failed: {}", key, exc)
         return None
 
 
 def _get_json(key: str) -> dict:
-    """Load a JSON dict from the bucket, or {} if absent."""
     try:
         obj = _client().get_object(Bucket=config.S3_BUCKET, Key=key)
         data = json.loads(obj["Body"].read())
         return data if isinstance(data, dict) else {}
-    except Exception as exc:  # noqa: BLE001 — missing file -> start empty
+    except Exception as exc:
         log.debug(f"S3 get_json({key}) failed, starting empty: {exc}")
         return {}
 
 
 def update_fingerprint_corpus(model_uri: str, fingerprint: dict) -> tuple[str | None, str | None]:
-    """Add/replace this model's entry in the two aggregate corpus files (read-modify-write).
-
-    Returns (fingerprint_file_uri, tensors_file_uri). No-op (None, None) when disabled.
-    """
     if not ENABLED:
         log.debug("S3 disabled; skipping corpus update for {}", model_uri)
         return None, None
@@ -100,8 +83,5 @@ def update_fingerprint_corpus(model_uri: str, fingerprint: dict) -> tuple[str | 
 
 
 def put_fault(hotkey: str, digest: str, detail: dict) -> str | None:
-    """Upload a per-model miner-fault report (the full explanation of why it was rejected)."""
-    # "hippius_validation/" is the published S3 key prefix miners already fetch — do not
-    # rename it along with the package.
     key = f"hippius_validation/{hotkey}/{_safe_digest(digest)}/fault.json"
     return _put(key, detail)

@@ -20,12 +20,6 @@ class FaultDecision:
 
 
 def classify_failure_verdict(verdict: dict[str, Any]) -> FaultDecision:
-    """Normalize a remote failure verdict into the backend state machine.
-
-    The remote host is expected to return structured failure verdicts. Missing
-    or malformed fields are infra/retryable by default so miner faults are not
-    assigned accidentally.
-    """
 
     fault_class = str(verdict.get("fault_class") or UNKNOWN_FAULT)
     fault_code = str(verdict.get("fault_code") or "unknown_remote_failure")

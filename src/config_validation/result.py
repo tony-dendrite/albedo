@@ -1,4 +1,3 @@
-"""ValidationResult — the per-model outcome the pipeline emits as a JSONL record."""
 from __future__ import annotations
 
 import time
@@ -19,11 +18,9 @@ class ValidationResult:
 
     @property
     def valid(self) -> bool:
-        """True only if every check that ran passed."""
         return all(c.ok for c in self.checks)
 
     def to_jsonl_record(self, *, ts: float | None = None) -> dict[str, Any]:
-        """Flatten to a public-safe JSONL record (full fingerprint vectors excluded)."""
         fp = next((c.details.get("fingerprint") for c in self.checks
                    if c.name == "duplicate" and c.details.get("fingerprint")), None)
         fingerprint_summary = (

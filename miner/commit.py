@@ -1,4 +1,3 @@
-"""Commit the v7 reveal on-chain (miner side) with a preview + Y/N + registration check."""
 from __future__ import annotations
 
 import os
@@ -9,12 +8,10 @@ from config_validation.models import ModelRef
 
 
 def build_reveal(ref: ModelRef) -> str:
-    """The on-chain payload: ``v7|<repo>|<digest>`` (matches chain_reader's v7 parser)."""
     return f"v7|{ref.repo}|{ref.digest}"
 
 
 def build_wallet(coldkey: str, hotkey: str):
-    """Construct a bittensor wallet, honoring ALBEDO_WALLET_PATH if the miner set it."""
     import bittensor as bt
 
     kwargs = {"name": coldkey, "hotkey": hotkey}
@@ -25,7 +22,6 @@ def build_wallet(coldkey: str, hotkey: str):
 
 
 def registration_check(coldkey: str, hotkey: str, netuid: int, network: str) -> tuple[str, bool]:
-    """Return (hotkey_ss58, is_registered_on_netuid)."""
     import bittensor as bt
 
     wallet = build_wallet(coldkey, hotkey)
@@ -39,7 +35,6 @@ def registration_check(coldkey: str, hotkey: str, netuid: int, network: str) -> 
 
 
 def preview(ref: ModelRef, *, ss58: str, coldkey: str, hotkey: str, netuid: int, network: str) -> str:
-    """Human-readable summary of exactly what will be committed."""
     return (
         f"about to commit on-chain:\n"
         f"  payload : {build_reveal(ref)}\n"
@@ -50,7 +45,6 @@ def preview(ref: ModelRef, *, ss58: str, coldkey: str, hotkey: str, netuid: int,
 
 
 def submit(ref: ModelRef, *, coldkey: str, hotkey: str, netuid: int, network: str):
-    """Write the reveal on-chain. Caller must have done the registration check + confirm."""
     import bittensor as bt
 
     wallet = build_wallet(coldkey, hotkey)
@@ -67,7 +61,6 @@ def submit(ref: ModelRef, *, coldkey: str, hotkey: str, netuid: int, network: st
 
 def commit_reveal(ref: ModelRef, *, coldkey: str, hotkey: str, netuid: int, network: str,
                   assume_yes: bool = False):
-    """Full CLI path: registration check → preview → Y/N → submit. Returns the result or None."""
     ss58, registered = registration_check(coldkey, hotkey, netuid, network)
     if not registered:
         raise SystemExit(f"hotkey {ss58} is NOT registered on netuid {netuid} ({network}); "

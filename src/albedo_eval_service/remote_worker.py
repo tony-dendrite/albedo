@@ -195,7 +195,7 @@ class RemoteEvalWorker:
         def _post() -> None:
             try:
                 httpx.post(f"{url}/prefetch", json={"sample_ids": sample_ids}, timeout=30.0)
-            except Exception as exc:  # noqa: BLE001 - prefetch is best-effort
+            except Exception as exc:
                 logger.warning(
                     f"[remote-worker] repo_context_prefetch_failed eval_run={eval_run_id}: "
                     f"{type(exc).__name__}: {exc}"
@@ -850,11 +850,8 @@ def _completion_observation(sample: EvalSample) -> str:
 
 
 def _cleanup_stale_vllm_resources() -> None:
-    # Kill orphaned vLLM EngineCore/WorkerProc children left by a prior crash, then
-    # remove the stale /dev/shm IPC files they leave behind - accumulation causes EAGAIN.
     subprocess.run(["pkill", "-9", "-f", "vllm.v1.engine.core"], check=False)
     subprocess.run(["pkill", "-9", "-f", "vllm.v1.executor.multiproc"], check=False)
-    # Also kill any spawn_main processes left hanging from a prior NCCL-crash stuck subprocess.
     subprocess.run(["pkill", "-9", "-f", "multiprocessing.spawn.spawn_main"], check=False)
     for path in glob.glob("/dev/shm/psm_*") + glob.glob("/dev/shm/sem.mp-*"):
         try:

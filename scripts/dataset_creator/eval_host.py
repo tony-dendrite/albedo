@@ -1,15 +1,3 @@
-"""List and resolve eval-run artifacts from the eval machine's artifact dir.
-
-Two modes, chosen from env:
-- local (DATASET_CREATOR_EVAL_SSH_HOST unset): the pipeline runs ON the eval
-  machine (pm2), so the artifact dir is a local path — runs are read in place,
-  nothing is copied.
-- remote (ssh host set): workstation mode — run dirs are scp'd into
-  <data_dir>/<run_id>/, size-verified.
-
-A run is considered complete once verdict.json exists (written last).
-S3 stays as the fallback path (see download.py).
-"""
 
 from __future__ import annotations
 
@@ -29,7 +17,6 @@ def _require_dir(cfg: Config) -> str:
 
 
 def list_remote_runs(cfg: Config) -> dict[str, dict]:
-    """Return {run_id: {"files": {name: size}, "mtime": float}} from the artifact dir."""
     art_dir = _require_dir(cfg)
     if not cfg.eval_ssh_host:
         return _list_local(Path(art_dir))
@@ -72,10 +59,9 @@ def is_complete(files: dict[str, int]) -> bool:
 
 
 def fetch_run(cfg: Config, run_id: str, files: dict[str, int]) -> Path:
-    """Return the local dir holding this run's artifacts (copying only if remote)."""
     art_dir = _require_dir(cfg)
     if not cfg.eval_ssh_host:
-        return Path(art_dir) / run_id  # already local — read in place
+        return Path(art_dir) / run_id
     dest = cfg.run_dir(run_id)
     if dest.exists() and all(
             (dest / n).exists() and (dest / n).stat().st_size == s for n, s in files.items()):

@@ -1,10 +1,3 @@
-"""OpenAI-compatible gateway in front of vLLM.
-
-OpenWebUI points its OPENAI_API_BASE_URL here (not at vLLM directly). Normally it transparently
-stream-proxies to vLLM; while a coronation is mid-swap (engine.reloading) or vLLM is otherwise down,
-it returns a spec-valid chat completion whose content is an in-chat reload notice instead of an error —
-so users see "a new king is being loaded" rather than a broken connection.
-"""
 
 from __future__ import annotations
 

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Rescore an existing generated-samples.jsonl through the judge API."""
 
 from __future__ import annotations
 
