@@ -8,6 +8,8 @@ from typing import Any
 
 _SHARD_RE = re.compile(r"^(?:[A-Za-z0-9_][A-Za-z0-9_.-]*/)?data/train-[A-Za-z0-9_.-]*\.parquet$")
 
+SAMPLING_ALGO = "multi-source-manifest-sample-v1"
+
 STEP_TRIM: list[tuple[str, int]] = [("pre_edit", 45), ("at_edit", 35), ("cold", 20)]
 FAMILY_MIX: list[tuple[str, int]] = [("pr", 50), ("lm", 15), ("combine", 10), ("mechanical", 25)]
 REPO_CAP = 2
@@ -21,7 +23,6 @@ def multi_source_manifest_sample_ids(
     *,
     block_hash: str,
     sample_count: int = 64,
-    max_turns_per_sample: int = 10,
 ) -> list[str]:
     if "sources" not in manifest:
         raise ValueError(

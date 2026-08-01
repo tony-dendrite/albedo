@@ -58,6 +58,13 @@ def test_parse_instance_formats():
     assert (mini.owner, mini.repo, mini.commit) == ("seperman", "deepdiff", "4b8fa12")
     goat = parse_instance("mini-coder", "arp242__goatcounter.854b1dd2.lm_modify__1vcxllzm")
     assert (goat.owner, goat.repo, goat.commit) == ("arp242", "goatcounter", "854b1dd2")
+    rs = parse_instance("mini-coder-rs", "arp242__goatcounter.854b1dd2.lm_modify__1vcxllzm")
+    assert (rs.owner, rs.repo, rs.commit) == ("arp242", "goatcounter", "854b1dd2")
+    hero = parse_instance("swe-hero", "pandas-dev__pandas-dbf8aaf4a3f3b41e5c1a402473df5da43813948f")
+    assert (hero.owner, hero.repo, hero.pr) == ("pandas-dev", "pandas", None)
+    assert hero.commit == "dbf8aaf4a3f3b41e5c1a402473df5da43813948f"
+    ost = parse_instance("open-swe-traces", "python-attrs__attrs-770")
+    assert (ost.owner, ost.repo, ost.pr) == ("python-attrs", "attrs", "770")
     assert parse_instance("swe-zero", "owner__repo-notanumber") is None
     assert parse_instance("mini-coder", "noseparator") is None
     assert parse_instance("mini-coder", "owner__repo.ZZZZZZ") is None

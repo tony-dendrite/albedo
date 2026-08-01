@@ -89,7 +89,6 @@ class SanityDispatcher:
         samples = sample_prompts(
             seed=str(submission["block_hash"]),
             n=self.settings.sample_count,
-            max_turns=self.settings.max_turns_per_sample,
             manifest_path=self.settings.dataset_manifest_path,
             manifest_hash=self.settings.dataset_manifest_hash,
             dataset_root=self.settings.dataset_root,

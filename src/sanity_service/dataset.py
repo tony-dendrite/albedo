@@ -22,16 +22,16 @@ class SanitySample:
     sample_id: str = ""
 
 
-def sample_prompts(*, seed: str, n: int = 3, max_turns: int = 10, manifest_path: str = "", manifest_hash: str = "", dataset_root: str = "", ) -> list[SanitySample]:
+def sample_prompts(*, seed: str, n: int = 3, manifest_path: str = "", manifest_hash: str = "", dataset_root: str = "", ) -> list[SanitySample]:
     if manifest_path and dataset_root:
         from albedo_eval_service.dataset_manifest import load_manifest_file
-        from albedo_eval_service.remote_dataset import load_swe_zero_samples
+        from albedo_eval_service.remote_dataset import load_manifest_samples
         from albedo_eval_service.sampling import multi_source_manifest_sample_ids
 
         manifest = load_manifest_file(manifest_path, expected_sha256=manifest_hash)
         ids = multi_source_manifest_sample_ids(manifest, block_hash=str(seed))
         sample_ids = random.Random(str(seed)).sample(ids, min(n, len(ids)))
-        loaded = load_swe_zero_samples(dataset_root=dataset_root, sample_ids=sample_ids)
+        loaded = load_manifest_samples(dataset_root=dataset_root, sample_ids=sample_ids)
         return [SanitySample(s.prompt, s.messages, s.sample_id) for s in loaded]
     return _fallback_prompts(n)
 

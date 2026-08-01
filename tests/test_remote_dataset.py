@@ -4,10 +4,10 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from albedo_eval_service import remote_dataset
-from albedo_eval_service.remote_dataset import load_swe_zero_samples
+from albedo_eval_service.remote_dataset import load_manifest_samples
 
 
-def test_load_swe_zero_sample_from_messages_json(tmp_path):
+def test_load_manifest_sample_from_messages_json(tmp_path):
     shard_dir = tmp_path / "data"
     shard_dir.mkdir()
     messages = [
@@ -18,7 +18,7 @@ def test_load_swe_zero_sample_from_messages_json(tmp_path):
     table = pa.table({"messages": [json.dumps(messages)]})
     pq.write_table(table, shard_dir / "train-00000.parquet")
 
-    samples = load_swe_zero_samples(
+    samples = load_manifest_samples(
         dataset_root=tmp_path, sample_ids=["data/train-00000.parquet:0:0"]
     )
 
@@ -34,7 +34,7 @@ def test_load_swe_zero_sample_from_messages_json(tmp_path):
     assert samples[0].target == "Use the right assertion."
 
 
-def test_load_swe_zero_sample_uses_tokenizer_chat_template(tmp_path, monkeypatch):
+def test_load_manifest_sample_uses_tokenizer_chat_template(tmp_path, monkeypatch):
     captured = {}
 
     class _Tokenizer:
@@ -57,7 +57,7 @@ def test_load_swe_zero_sample_uses_tokenizer_chat_template(tmp_path, monkeypatch
     table = pa.table({"messages": [json.dumps(messages)]})
     pq.write_table(table, shard_dir / "train-00000.parquet")
 
-    samples = load_swe_zero_samples(
+    samples = load_manifest_samples(
         dataset_root=tmp_path,
         sample_ids=["data/train-00000.parquet:0:0"],
         tokenizer_path="/models/qwen",
@@ -74,7 +74,7 @@ def test_load_swe_zero_sample_uses_tokenizer_chat_template(tmp_path, monkeypatch
     }
 
 
-def test_load_swe_zero_sample_supplies_canonical_template_when_missing(tmp_path, monkeypatch):
+def test_load_manifest_sample_supplies_canonical_template_when_missing(tmp_path, monkeypatch):
     captured = {}
 
     class _Tokenizer:
@@ -96,7 +96,7 @@ def test_load_swe_zero_sample_supplies_canonical_template_when_missing(tmp_path,
     table = pa.table({"messages": [json.dumps(messages)]})
     pq.write_table(table, shard_dir / "train-00000.parquet")
 
-    samples = load_swe_zero_samples(
+    samples = load_manifest_samples(
         dataset_root=tmp_path,
         sample_ids=["data/train-00000.parquet:0:0"],
         tokenizer_path="/models/qwen",
@@ -113,13 +113,13 @@ def test_load_swe_zero_sample_supplies_canonical_template_when_missing(tmp_path,
     assert "enable_thinking" in captured["kwargs"]["chat_template"]
 
 
-def test_load_swe_zero_sample_from_prompt_column(tmp_path):
+def test_load_manifest_sample_from_prompt_column(tmp_path):
     shard_dir = tmp_path / "data"
     shard_dir.mkdir()
     table = pa.table({"prompt": ["Explain pytest fixtures."]})
     pq.write_table(table, shard_dir / "train-00001.parquet")
 
-    samples = load_swe_zero_samples(
+    samples = load_manifest_samples(
         dataset_root=tmp_path, sample_ids=["data/train-00001.parquet:0:0"]
     )
 
@@ -137,7 +137,7 @@ def test_load_sample_from_namespaced_source(tmp_path):
     table = pa.table({"messages": [json.dumps(messages)]})
     pq.write_table(table, shard_dir / "train-00000-of-00060.parquet")
 
-    samples = load_swe_zero_samples(
+    samples = load_manifest_samples(
         dataset_root=tmp_path,
         sample_ids=["mini-coder/data/train-00000-of-00060.parquet:0:0"],
     )

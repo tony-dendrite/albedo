@@ -207,12 +207,12 @@ class EvalRepository:
                         id, submission_id, stage_attempt_id, king_submission_id,
                         king_model_hash, challenger_model_hash, remote_host_id, state, gpu_count,
                         dataset_version, dataset_manifest_hash, dataset_sample_seed, dataset_sample_ids,
-                        dataset_max_turns_per_sample, dataset_sampling_algo, judge_config_hash, judge_count,
+                        dataset_sampling_algo, judge_config_hash, judge_count,
                         sample_count, started_at
                     )
                     VALUES (
                         %s, %s, %s, %s, %s, %s, %s, 'DISPATCHED', 8,
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, now()
+                        %s, %s, %s, %s, %s, %s, %s, %s, now()
                     )
                     """,
                     (
@@ -227,7 +227,6 @@ class EvalRepository:
                         request.dataset.manifest_hash,
                         request.dataset.sample_seed,
                         request.dataset.sample_ids,
-                        request.dataset.max_turns_per_sample,
                         request.dataset.sampling_algo,
                         request.scoring.judge_config_hash,
                         request.scoring.judge_count,

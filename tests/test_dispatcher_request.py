@@ -61,7 +61,6 @@ def test_build_eval_request_rejects_single_source_manifest(tmp_path):
         dataset_manifest_hash=manifest_hash,
         dataset_manifest_path=str(manifest_path),
         sample_count=3,
-        max_turns_per_sample=2,
         judge_config_hash="sha256:judge",
     )
 
@@ -103,7 +102,6 @@ def test_build_eval_request_samples_multi_source_manifest(tmp_path):
         dataset_manifest_hash=manifest_hash,
         dataset_manifest_path=str(manifest_path),
         sample_count=64,
-        max_turns_per_sample=2,
         judge_config_hash="sha256:judge",
     )
 

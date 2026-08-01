@@ -19,7 +19,7 @@ from .models import EvalRequest
 from .remote_artifacts import ArtifactUploader, RunArtifactSpool, build_artifact_uploader
 from .remote_config import RemoteSettings
 from .observation_format import detect_format, wrap
-from .remote_dataset import EvalSample, format_messages, load_swe_zero_samples
+from .remote_dataset import EvalSample, format_messages, load_manifest_samples
 from .remote_generation import (
     GenerationResult,
     Generator,
@@ -243,7 +243,9 @@ class RemoteEvalWorker:
         self, request: EvalRequest, *, tokenizer_path: str | None = None
     ) -> list[EvalSample]:
         if not self.settings.dataset_root:
-            raise ValueError("ALBEDO_REMOTE_DATASET_ROOT is required for SWE-ZERO parquet loading")
+            raise ValueError(
+                f"ALBEDO_REMOTE_DATASET_ROOT is required to load dataset {request.dataset.version}"
+            )
 
         sample_ids = list(request.dataset.sample_ids)
         if not sample_ids:
@@ -255,9 +257,8 @@ class RemoteEvalWorker:
                 manifest,
                 block_hash=request.dataset.sample_seed,
                 sample_count=request.dataset.sample_count,
-                max_turns_per_sample=request.dataset.max_turns_per_sample,
             )
-        return load_swe_zero_samples(
+        return load_manifest_samples(
             dataset_root=self.settings.dataset_root,
             sample_ids=sample_ids,
             tokenizer_path=tokenizer_path,

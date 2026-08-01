@@ -91,7 +91,6 @@ def _request():
             manifest_uri="s3://albedo-artifacts/datasets/swe-zero/manifest.json",
             manifest_hash="982a92bd85d122d287b15f2ddb4e2050b9e345fb3921aa9a63382c7af022bd7f",
             sample_count=2,
-            max_turns_per_sample=1,
             sample_seed="0xabc",
             sampling_algo="swe-zero-manifest-sample-v1",
             generation_batch_size=1,

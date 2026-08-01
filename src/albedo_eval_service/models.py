@@ -23,7 +23,6 @@ class DatasetConfig(BaseModel):
     manifest_uri: str
     manifest_hash: str
     sample_count: int
-    max_turns_per_sample: int = 10
     sample_seed: str
     sampling_algo: str
     generation_batch_size: int = 32

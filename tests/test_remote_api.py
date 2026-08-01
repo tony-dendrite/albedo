@@ -26,7 +26,6 @@ def _request() -> dict:
             manifest_uri="s3://albedo-artifacts/datasets/swe-zero/manifest.json",
             manifest_hash="982a92bd85d122d287b15f2ddb4e2050b9e345fb3921aa9a63382c7af022bd7f",
             sample_count=4,
-            max_turns_per_sample=2,
             sample_seed="0xabc",
             sampling_algo="swe-zero-manifest-sample-v1",
             sample_ids=["data/train-00000.parquet:0:0"],

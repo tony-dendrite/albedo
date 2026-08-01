@@ -48,7 +48,6 @@ def build_eval_request(
             manifest_uri=settings.dataset_manifest_uri,
             manifest_hash=settings.dataset_manifest_hash,
             sample_count=settings.sample_count,
-            max_turns_per_sample=settings.max_turns_per_sample,
             sample_seed=submission["block_hash"],
             sampling_algo=settings.sampling_algo,
             sample_ids=sample_ids,
@@ -72,7 +71,6 @@ def _build_sample_ids(settings: Settings, block_hash: str) -> list[str]:
         manifest,
         block_hash=block_hash,
         sample_count=settings.sample_count,
-        max_turns_per_sample=settings.max_turns_per_sample,
     )
 
 

@@ -32,7 +32,7 @@ class EvalSample:
     messages: list[dict[str, str]] | None = None
 
 
-def load_swe_zero_samples(
+def load_manifest_samples(
     *,
     dataset_root: str | Path,
     sample_ids: list[str],
@@ -72,13 +72,13 @@ def _load_sample(
 def _parse_sample_id(sample_id: str) -> tuple[str, int, int]:
     shard_name, row_idx_raw, turn_idx_raw = sample_id.rsplit(":", 2)
     if not _SHARD_RE.match(shard_name):
-        raise ValueError(f"unsupported SWE-ZERO shard in sample_id: {sample_id}")
+        raise ValueError(f"unsupported dataset shard in sample_id: {sample_id}")
     return shard_name, int(row_idx_raw), int(turn_idx_raw)
 
 
 def _read_parquet_row(path: Path, row_idx: int) -> dict[str, Any]:
     if not path.exists():
-        raise FileNotFoundError(f"SWE-ZERO shard not found: {path}")
+        raise FileNotFoundError(f"dataset shard not found: {path}")
     if row_idx < 0:
         raise ValueError("row_idx must be non-negative")
 
