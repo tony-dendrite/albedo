@@ -1,5 +1,5 @@
 import { POLL_MS } from "../config.js";
-import { fetchDashboard, fetchState, fetchBenchmarks, fetchManifest, fetchLlmsText, fetchRegistrationHistory } from "../fetch.js";
+import { fetchDashboard, fetchState, fetchBenchmarks, fetchModelScores, fetchManifest, fetchLlmsText, fetchRegistrationHistory } from "../fetch.js";
 import { normalize } from "../data.js";
 import { el, mount } from "../dom.js";
 import { fmtRelative } from "../format.js";
@@ -76,12 +76,12 @@ async function tick() {
 }
 
 async function tickBenchmarks() {
-  const data = await fetchBenchmarks();
+  const [data, modelScores] = await Promise.all([fetchBenchmarks(), fetchModelScores()]);
   if (!data) return;
-  const sig = JSON.stringify(data);
+  const sig = JSON.stringify([data, modelScores]);
   if (sig === benchmarkSig) return;
   benchmarkSig = sig;
-  renderBenchmarks($("benchmarks-wrap"), $("benchmarks-meta"), data);
+  renderBenchmarks($("benchmarks-wrap"), $("benchmarks-meta"), data, modelScores);
 }
 
 async function loadDatasets() {

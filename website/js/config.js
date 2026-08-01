@@ -12,6 +12,10 @@ export const BENCHMARK_ENDPOINTS = [
   "./data/benchmarks.json",
 ];
 
+export const MODEL_SCORE_ENDPOINTS = [
+  "./data/model-scores.json",
+];
+
 export const MANIFEST_ENDPOINTS = [
   "./datasets/manifest.meta.json",
 ];

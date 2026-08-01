@@ -184,15 +184,16 @@ def upload_to_hippius(key: str, path: Path) -> bool:
         import boto3
         from botocore.config import Config
 
+        region = os.environ.get("ALBEDO_S3_REGION") or ("auto" if "r2.cloudflarestorage.com" in endpoint else "decentralized")
         client = boto3.client(
             "s3",
             endpoint_url=endpoint,
             aws_access_key_id=access,
             aws_secret_access_key=secret,
-            region_name="decentralized",
+            region_name=region,
             config=Config(connect_timeout=15, read_timeout=60, retries={"mode": "adaptive", "max_attempts": 3}),
         )
-        client.put_object(
+        put_args = dict(
             Bucket=bucket,
             Key=key,
             Body=path.read_bytes(),
@@ -200,6 +201,13 @@ def upload_to_hippius(key: str, path: Path) -> bool:
             CacheControl="no-cache, must-revalidate",
             ACL="public-read",
         )
+        try:
+            client.put_object(**put_args)
+        except Exception as exc:
+            if "AccessControlListNotSupported" not in str(exc) and "NotImplemented" not in str(exc):
+                raise
+            put_args.pop("ACL", None)
+            client.put_object(**put_args)
         return True
     except Exception as exc:
         log.error("upload failed for %s: %s", key, exc)
@@ -233,7 +241,7 @@ def main() -> int:
     if not api_key:
         sys.exit("TAOSTATS_API_KEY is not set")
     netuid = args.netuid if args.netuid is not None else int(os.environ.get("ALBEDO_DASHBOARD_NETUID", "97"))
-    interval = float(os.environ.get("ALBEDO_REGISTRATION_HISTORY_INTERVAL_S", "300"))
+    interval = float(os.environ.get("ALBEDO_REGISTRATION_HISTORY_INTERVAL_S", "600"))
 
     if args.once:
         generate(api_key=api_key, netuid=netuid)

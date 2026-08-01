@@ -9,6 +9,7 @@ const BENCHMARK_LABELS = {
   swe_rebench_2026_03: "SWE-rebench",
 };
 
+const MODEL_SCORE_SUITE = "model_score";
 const BENCHMARK_ORDER = ["tau2_airline", "tau2_retail", "tau2_telecom", "swe_rebench_2026_03"];
 
 const PAGE_SIZES = [5, 10, 25, 50];
@@ -125,6 +126,37 @@ export function sortModels(models) {
 function isGenesis(model) {
   const identity = `${model?.label || ""} ${model?.model_repo || ""}`.toLowerCase();
   return identity.includes("genesis") || identity.includes("qwen/qwen3.6-35b-a3b");
+}
+
+export function mergeModelScores(data, rows) {
+  if (!Array.isArray(rows)) return data;
+  const scores = new Map(rows.filter(row => row?.run_id).map(row => [String(row.run_id).toLowerCase(), row]));
+  return {
+    ...data,
+    models: (data?.models || []).map(model => {
+      const number = modelKingNumber(model);
+      const key = isGenesis(model) ? "king-genesis" : number == null ? null : `king-${modelLabel(model).split("-").pop()}`.toLowerCase();
+      const row = scores.get(key);
+      const score = Number(row?.score);
+      if (!Number.isFinite(score)) return model;
+      return {
+        ...model,
+        runs: [
+          ...(model.runs || []).filter(run => run.suite !== MODEL_SCORE_SUITE),
+          {
+            id: `model-score:${row.run_id}`,
+            suite: MODEL_SCORE_SUITE,
+            score: score / 100,
+            state: "SUCCEEDED",
+            task_count: row.total,
+            passed_count: row.resolved,
+            score_meta: `${row.resolved ?? "—"}/${row.total ?? "—"} resolved`,
+            no_detail: true,
+          },
+        ],
+      };
+    }),
+  };
 }
 
 function detailHref(model, runId = null) {
@@ -251,7 +283,7 @@ function renderTile(model, suite, sorted, baseline, activity) {
   const previous = previousComparison(entry, sorted, model, suite);
   const running = activity?.running;
   const queued = activity?.queued || [];
-  const href = entry?.run_id ? detailHref(model, entry.run_id) : null;
+  const href = entry?.run_id && !entry.no_detail ? detailHref(model, entry.run_id) : null;
   const runNote = running
     ? [runningLabel(running, activity.labelByRepo), progressNote(running)].filter(Boolean).join(" · ")
     : queued.length ? `${queued.length} pending` : "";
@@ -267,7 +299,7 @@ function renderTile(model, suite, sorted, baseline, activity) {
       el("div", { class: "bench-tile-score-wrap" },
         el(href ? "a" : "span", { class: "bench-tile-score", href }, scored ? panelScore(entry.score) : "missing"),
         scored ? el("span", { class: "bench-tile-pass-count" },
-          `avg · ${entry.pass_count || 1} ${entry.pass_count === 1 ? "pass" : "passes"}`) : null),
+          entry.score_meta || `avg · ${entry.pass_count || 1} ${entry.pass_count === 1 ? "pass" : "passes"}`) : null),
       el("div", { class: `bench-tile-change ${previous.cls}` },
         el("strong", {}, previous.delta),
         el("span", {}, "since last"))),
@@ -351,7 +383,7 @@ function renderHistoryPanel(sorted, selectedModel, rerender) {
       BENCHMARK_ORDER.map(suite => {
         const entry = scores[suite];
         if (entry?.score == null) return el("td", { class: "r" }, el("span", { class: "muted-dash" }, "—"));
-        return el("td", { class: "r", title: `${entry.pass_count || 1} pass average` }, panelScore(entry.score));
+        return el("td", { class: "r", title: entry.score_meta || `${entry.pass_count || 1} pass average` }, panelScore(entry.score));
       }));
   });
 
@@ -367,7 +399,8 @@ function renderHistoryPanel(sorted, selectedModel, rerender) {
       : el("div", { class: "bench-history-empty" }, "no benchmark history yet"));
 }
 
-export function renderBenchmarks(container, metaNode, data) {
+export function renderBenchmarks(container, metaNode, data, modelScores = null) {
+  data = mergeModelScores(data, modelScores);
   const activeProgress = activeProgressByModelSuite(data);
   const models = (data?.models || []).filter(model => completedRuns(model).length || hasActiveProgress(model, activeProgress));
   if (!models.length) {
@@ -384,7 +417,7 @@ export function renderBenchmarks(container, metaNode, data) {
   const selected = sorted.find(model => !isGenesis(model)) || sorted[0];
   const baselineScores = suiteScores((data?.models || []).find(isGenesis));
   const activity = suiteActivity(data);
-  const rerender = () => renderBenchmarks(container, metaNode, data);
+  const rerender = () => renderBenchmarks(container, metaNode, data, modelScores);
   const scores = suiteScores(selected);
   const done = BENCHMARK_ORDER.filter(suite => scores[suite]?.score != null).length;
 

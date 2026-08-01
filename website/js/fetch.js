@@ -1,4 +1,4 @@
-import { DATA_ENDPOINTS, STATE_ENDPOINTS, BENCHMARK_ENDPOINTS, MANIFEST_ENDPOINTS, LLMS_URLS, REGISTRATION_ENDPOINTS } from "./config.js";
+import { DATA_ENDPOINTS, STATE_ENDPOINTS, BENCHMARK_ENDPOINTS, MODEL_SCORE_ENDPOINTS, MANIFEST_ENDPOINTS, LLMS_URLS, REGISTRATION_ENDPOINTS } from "./config.js";
 
 let llmsTextCache = null;
 const registrationCacheKey = "albedo.registrationHistory.v2";
@@ -25,6 +25,10 @@ export async function fetchState() {
 
 export async function fetchBenchmarks() {
   return fetchFirstJson(BENCHMARK_ENDPOINTS, { revalidate: true });
+}
+
+export async function fetchModelScores() {
+  return fetchFirstJson(MODEL_SCORE_ENDPOINTS, { revalidate: true });
 }
 
 export async function fetchBenchmarkRun(run) {
