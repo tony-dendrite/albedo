@@ -17,6 +17,7 @@ from albedo_eval_service.sampling import _SHARD_RE  # noqa: E402
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from build_manifest_meta import write_meta  # noqa: E402
 from prepare_datasets import SOURCES  # noqa: E402
 
 DEFAULT_VERSION = "mini-coder+open-swe+smith-rs+hero-v1"
@@ -168,12 +169,16 @@ def write_manifest(
     manifest = build_manifest_dict(Path(root), names, version=version, max_workers=max_workers)
     payload = json.dumps(manifest, sort_keys=True, indent=2).encode("utf-8")
     out_path.write_bytes(payload)
+    # the dashboard fetches a rows_meta-stripped copy; keep it in lockstep with the manifest
+    write_meta(manifest, out_path.with_name("manifest.meta.json"))
     return out_path, manifest, hashlib.sha256(payload).hexdigest()
 
 
 def print_manifest_summary(out_path: Path, manifest: dict, digest: str) -> None:
     sources = manifest["sources"]
     print(f"wrote {out_path} ({manifest['total_rows']} rows across {len(sources)} sources)")
+    meta_path = out_path.with_name("manifest.meta.json")
+    print(f"wrote {meta_path} (dashboard meta; upload as datasets/manifest.meta.json)")
     for source in sources:
         print(f"  {source['name']}: rows={source['total_rows']} shards={len(source['shards'])}")
     print()
