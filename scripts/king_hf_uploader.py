@@ -32,6 +32,7 @@ _DEFAULT_REPO_PREFIX = "albedo-qwen3.6-35b-king"
 _DEFAULT_QWEN_PATTERNS = ("qwen3.6", "qwen3-6", "qwen3_6")
 _DEFAULT_SIZE_PATTERNS = ("35b", "35-b")
 _DEFAULT_GENESIS_MARKERS = ("qwen3.6-35b-a3b-genesis", "35b-a3b-genesis")
+_DEFAULT_ASSUME_MIRRORED_THROUGH = 90
 
 _ROMAN_NUMERALS = (
     (1000, "M"), (900, "CM"), (500, "D"), (400, "CD"),
@@ -112,6 +113,7 @@ class Settings:
     qwen_patterns: tuple[str, ...]
     size_patterns: tuple[str, ...]
     genesis_markers: tuple[str, ...]
+    assume_mirrored_through: int
     force: bool
     verify: bool
     dry_run: bool
@@ -131,6 +133,7 @@ class KingUpload:
     activated_at: datetime
     reign_reason: str
     roman: str = ""
+    number: int = 0
     opponent_name: str = ""
     opponent_repo: str = ""
     opponent_url: str | None = None
@@ -309,6 +312,11 @@ def load_settings(args: argparse.Namespace) -> Settings:
         qwen_patterns=_csv_env("ALBEDO_KING_HF_QWEN_PATTERNS", _DEFAULT_QWEN_PATTERNS),
         size_patterns=_csv_env("ALBEDO_KING_HF_SIZE_PATTERNS", _DEFAULT_SIZE_PATTERNS),
         genesis_markers=_csv_env("ALBEDO_KING_HF_GENESIS_MARKERS", _DEFAULT_GENESIS_MARKERS),
+        assume_mirrored_through=int(
+            os.environ.get(
+                "ALBEDO_KING_HF_ASSUME_MIRRORED_THROUGH", str(_DEFAULT_ASSUME_MIRRORED_THROUGH)
+            )
+        ),
         force=args.force,
         verify=args.verify or _bool_env("ALBEDO_KING_HF_VERIFY", False),
         dry_run=args.dry_run,
@@ -403,6 +411,7 @@ def list_crowned_kings(conn: psycopg.Connection, settings: Settings) -> list[Kin
         king = dataclasses.replace(
             king,
             roman=to_roman(counter),
+            number=counter,
             opponent_name=opp_name,
             opponent_repo=opp_repo,
             opponent_url=opp_url,
@@ -854,6 +863,11 @@ def process_once(
     try:
         for king in kings:
             version = king.king_version
+            # Kings up to N are assumed already mirrored — skip without any HF API call
+            # (env ALBEDO_KING_HF_ASSUME_MIRRORED_THROUGH, 0 disables; --force overrides).
+            if not settings.force and king.number <= settings.assume_mirrored_through:
+                counts["skipped"] += 1
+                continue
             # Source is permanently gone (HTTP 404/410) — never touch Hippius or HF again.
             if version in state.permanent_skip:
                 counts["skipped"] += 1
@@ -932,9 +946,17 @@ def explain(settings: Settings) -> None:
     print(f"DRY RUN — {len(kings)} crowned Qwen3.6-35B king(s), oldest -> newest")
     print(f"eval dir: {settings.eval_dir}   work dir: {settings.work_dir}")
     print("-" * 72)
-    n_skip = n_up = n_hit = n_dl = 0
+    n_skip = n_up = n_hit = n_dl = n_assumed = 0
     for king in kings:
         repo_id = repo_id_for(king, settings)
+        if not settings.force and king.number <= settings.assume_mirrored_through:
+            n_assumed += 1
+            print(f"{king.king_name}  (king v{king.king_version})  ->  {repo_id}")
+            print(
+                f"    status : SKIP (king number <= {settings.assume_mirrored_through}, "
+                "assumed mirrored — no HF check)"
+            )
+            continue
         try:
             exists = already_uploaded(api, repo_id)
             status = "SKIP (already uploaded)" if exists else "WILL UPLOAD"
@@ -963,7 +985,8 @@ def explain(settings: Settings) -> None:
         print(f"    albedo.md: repo={king.hippius_repo}  link={king.hub_url}  hotkey={king.hotkey}")
     print("-" * 72)
     print(
-        f"summary: {len(kings)} kings | {n_skip} already on HF (skip) | "
+        f"summary: {len(kings)} kings | {n_assumed} assumed mirrored "
+        f"(<= {settings.assume_mirrored_through}) | {n_skip} already on HF (skip) | "
         f"{n_up} to upload ({n_hit} cached locally, {n_dl} would download)"
     )
 
@@ -1003,12 +1026,14 @@ def main() -> None:
     lock = acquire_pid_lock(settings.lock_path)  # noqa: F841
 
     logger.info(
-        "king HF uploader starting: namespace={} eval_dir={} work_dir={} poll={}s dry_run={}",
+        "king HF uploader starting: namespace={} eval_dir={} work_dir={} poll={}s dry_run={} "
+        "assume_mirrored_through=King {}",
         settings.hf_namespace,
         settings.eval_dir,
         settings.work_dir,
         settings.poll_interval_s,
         settings.dry_run,
+        settings.assume_mirrored_through,
     )
 
     if settings.dry_run:
