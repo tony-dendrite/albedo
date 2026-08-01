@@ -17,14 +17,16 @@ function loadEnv() {
   return env;
 }
 
+const env = loadEnv();
+
 module.exports = {
   apps: [
     {
       name: "albedo-judge-api",
       cwd: path.resolve(__dirname, ".."),
-      script: "uv",
-      args: "run --no-sync albedo-judge-api",
-      env: loadEnv(),
+      script: env.ALBEDO_JUDGE_PM2_SCRIPT || "uv",
+      args: env.ALBEDO_JUDGE_PM2_ARGS || "run --no-sync albedo-judge-api",
+      env,
     },
   ],
 };

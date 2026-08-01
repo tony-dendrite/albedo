@@ -20,6 +20,8 @@ function loadEnv() {
 const env = loadEnv();
 const sshTarget = `${env.ALBEDO_GPU_HOST_USER}@${env.ALBEDO_GPU_HOST_SSH_HOST}`;
 const sshPort = env.ALBEDO_GPU_HOST_SSH_PORT || "";
+const repoContextPort = env.ALBEDO_TUNNEL_BACKEND_LOCAL_REPO_CONTEXT_PORT || "";
+const repoContextRemotePort = env.ALBEDO_REPO_CONTEXT_API_PORT || "8093";
 
 module.exports = {
   apps: [
@@ -37,6 +39,9 @@ module.exports = {
         "ServerAliveCountMax=3",
         "-L",
         `${env.ALBEDO_TUNNEL_BACKEND_LOCAL_GPU_PORT}:127.0.0.1:${env.ALBEDO_REMOTE_EVAL_API_PORT}`,
+        ...(repoContextPort
+          ? ["-L", `${repoContextPort}:127.0.0.1:${repoContextRemotePort}`]
+          : []),
         sshTarget,
       ].join(" "),
       autorestart: true,
