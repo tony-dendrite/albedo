@@ -98,7 +98,7 @@ class _SnapshotTooLarge(Exception):
 
 def parse_instance(source: str, instance_id: str) -> RepoRef | None:
     try:
-        if source == "mini-coder":
+        if source.startswith("mini-coder"):
             parts = instance_id.split("__")
             if len(parts) < 2:
                 return None
@@ -114,11 +114,13 @@ def parse_instance(source: str, instance_id: str) -> RepoRef | None:
                         commit=tokens[index],
                     )
             return None
-        owner_repo, pr = instance_id.rsplit("-", 1)
+        owner_repo, tail = instance_id.rsplit("-", 1)
         owner, repo = owner_repo.split("__", 1)
-        if not pr.isdigit():
-            return None
-        return RepoRef(instance_id=instance_id, source=source, owner=owner, repo=repo, pr=pr)
+        if tail.isdigit():
+            return RepoRef(instance_id=instance_id, source=source, owner=owner, repo=repo, pr=tail)
+        if re.fullmatch(r"[0-9a-f]{40}", tail):
+            return RepoRef(instance_id=instance_id, source=source, owner=owner, repo=repo, commit=tail)
+        return None
     except ValueError:
         return None
 
