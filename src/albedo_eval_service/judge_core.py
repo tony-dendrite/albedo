@@ -672,10 +672,25 @@ def filter_reference_leaks(questions: list[dict[str, str]]) -> list[dict[str, st
     return [q for q in questions if "the reference" not in q["text"].casefold()]
 
 
+_EDIT_BLOCK_RE = re.compile(r"```(?:bash|sh)?[ \t]*\n(.*?)```", re.DOTALL)
 _EDIT_COMMAND_RE = re.compile(
-    r"sed\s+-i|>\s*[\w./]|>>\s*[\w./]|tee\s+[\w./-]|cat\s*>|str_replace|git apply|patch\s+-p"
-    r"|applypatch|cp\s+[\w./-]+\s+[\w./-]+|mv\s+[\w./-]+\s+[\w./-]+",
+    r"sed\s+-i"
+    # a redirect counts only to a real path: `2>/dev/null` and `2>&1` are not edits
+    r"|(?<![0-9&])>>?\s*(?!/dev/)[\w./~-]"
+    r"|tee\s+(?!/dev/)[\w./~-]|cat\s*>(?!/dev/)"
+    r"|str_replace|git\s+apply|patch\s+-p|applypatch"
+    r"|cp\s+[\w./-]+\s+[\w./-]+|mv\s+[\w./-]+\s+[\w./-]+",
 )
+
+
+def _edited_in_turn(text: str) -> bool:
+    """Whether a turn's shell commands change the repository.
+
+    Only bash blocks are scanned. Running the pattern over the whole turn made a `</think>` tag or
+    a `>` in prose read as a redirect, which marked every candidate as having edited and so left
+    apply_measurement_gate permanently inert.
+    """
+    return any(_EDIT_COMMAND_RE.search(cmd) for cmd in _EDIT_BLOCK_RE.findall(text or ""))
 _SUBMIT_RE = re.compile(r"COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT")
 _UNFOLDED_AVOID_RE = re.compile(
     r"^\s*(?:does[^?]{0,60}\bavoid|is[^?]{0,60}\bfree of|does[^?]{0,60}\brefrain)", re.IGNORECASE
@@ -692,7 +707,7 @@ def candidate_turn_texts_from_merged(text: str) -> list[str]:
 
 
 def trajectory_made_edit(turn_texts: list[str]) -> bool:
-    return any(_EDIT_COMMAND_RE.search(text or "") for text in turn_texts)
+    return any(_edited_in_turn(text) for text in turn_texts)
 
 
 def enforce_question_labels(
@@ -736,7 +751,7 @@ def apply_measurement_gate(
     if made_edit:
         return answers
     final_is_read = bool(candidate_turn_texts) and not (
-        _EDIT_COMMAND_RE.search(candidate_turn_texts[-1] or "")
+        _edited_in_turn(candidate_turn_texts[-1])
         or _SUBMIT_RE.search(candidate_turn_texts[-1] or "")
     )
     gated = dict(answers)
@@ -762,13 +777,47 @@ def apply_measurement_gate(
     return gated
 
 
+_THINK_PAIR_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+_STRAY_THINK_TAG_RE = re.compile(r"</?think>")
+
+
+def strip_leaked_reasoning(text: str) -> str:
+    """Drop model reasoning that leaked into a scored candidate turn.
+
+    vLLM's qwen3 reasoning parser leaves an orphaned closing tag (and occasionally the reasoning
+    itself) in the generated text. A `THOUGHT:` before the tag is the mini-coder-rs corpus's own
+    style and is real content, so only the stray tag is removed in that case.
+    """
+    cleaned = _THINK_PAIR_RE.sub("", text or "")
+    if "</think>" in cleaned:
+        head, _, tail = cleaned.partition("</think>")
+        cleaned = head + tail if "THOUGHT:" in head else tail
+    return _STRAY_THINK_TAG_RE.sub("", cleaned).strip()
+
+
+def strip_candidate_reasoning(trajectory: str) -> str:
+    """Apply strip_leaked_reasoning inside CANDIDATE OUTPUT blocks only.
+
+    Context turns and environment observations are left byte-for-byte intact: the mini-coder-rs
+    corpus legitimately carries `</think>` in its own assistant turns.
+    """
+
+    def _rewrite(match: re.Match[str]) -> str:
+        block, inner = match.group(0), match.group(1)
+        start, end = match.start(1) - match.start(0), match.end(1) - match.start(0)
+        stripped = strip_leaked_reasoning(inner)
+        return block[:start] + (stripped if stripped else inner) + block[end:]
+
+    return _CANDIDATE_BLOCK_RE.sub(_rewrite, trajectory or "")
+
+
 def build_judge_messages(*, response: str, questions: list[dict[str, str]]) -> list[dict[str, str]]:
     shown = [
         {"id": q["id"], "category": q.get("category", "overall"), "tag": q.get("tag", ""),
          "text": q["text"], "example_bad": q.get("example_bad", "")}
         for q in questions
     ]
-    cleaned = strip_reply_injection(response).rstrip()
+    cleaned = strip_candidate_reasoning(strip_reply_injection(response)).rstrip()
     return [
         {"role": "system", "content": JUDGE_SYSTEM},
         {

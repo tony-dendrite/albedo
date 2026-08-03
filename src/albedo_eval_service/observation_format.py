@@ -1,6 +1,9 @@
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
+
 RETURNCODE = "returncode"
 SWE_AGENT = "swe_agent"
 OPENHANDS = "openhands"
@@ -127,3 +130,161 @@ def truncation_notice(token_limit: int) -> str:
 
 def is_truncated(text: str) -> bool:
     return TRUNCATION_SENTINEL in (text or "")
+
+
+MISSING_COMMAND_MESSAGE = "No bash command found in assistant message."
+
+
+def missing_command_output(fmt: str) -> str:
+    return wrap(MISSING_COMMAND_MESSAGE, fmt, returncode=2)
+
+
+_TRAILER_RE = re.compile(
+    r"^\s*\[(?:The command (?:completed|timed out)|Current working directory|"
+    r"Python interpreter|Command finished)\b.*\]\s*$"
+)
+_VIEW_HEADER_RE = re.compile(r"^\s*Here's the (?:result of running|files and directories)\b")
+
+
+def observation_body(raw: str, fmt: str) -> str:
+    """The payload of an observation, with envelope, trailers and view header removed.
+
+    Horizontal whitespace is kept because source indentation is meaningful.
+    """
+    text = (raw or "").strip()
+    if fmt == RETURNCODE:
+        match = re.search(r"<output>\n(.*)\n?</output>", text, re.DOTALL)
+        return _strip_view_header(match.group(1).strip("\n") if match else "")
+    if fmt == SWE_AGENT:
+        if not text.startswith("OBSERVATION:"):
+            return _strip_view_header(text)
+        return _strip_view_header(text[len("OBSERVATION:") :].strip("\n"))
+    kept = [line for line in text.splitlines() if not _TRAILER_RE.match(line)]
+    return _strip_view_header("\n".join(kept).strip("\n"))
+
+
+def _strip_view_header(body: str) -> str:
+    lines = body.splitlines()
+    return "\n".join(lines[1:]).strip("\n") if lines and _VIEW_HEADER_RE.match(lines[0]) else body
+
+
+def has_content(raw: str, fmt: str) -> bool:
+    return bool(observation_body(raw, fmt).strip())
+
+
+_FIRST_BLOCK_RE = re.compile(r"```(?:bash|sh)?[ \t]*\n(.*?)```", re.DOTALL)
+
+
+def first_bash_block(assistant_output: str) -> str:
+    match = _FIRST_BLOCK_RE.search(assistant_output or "")
+    return match.group(1).strip() if match else ""
+
+
+_QUOTED_SPAN_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
+_CHAINED_RE = re.compile(r"&&|\|\||;|\n")
+_READ_HEAD_RE = re.compile(r"^\s*(?:cat|nl|head|tail|less|more|sed\s+-n)\b")
+_WRITE_RE = re.compile(r"(?<![0-9<>])>>?[ \t]*\S|<<-?[ \t]*['\"]?\w")
+_MAY_BE_EMPTY_TAIL_RE = re.compile(
+    r"\|[ \t]*(?:grep|rg|ag|ack|egrep|fgrep|awk|find|comm|diff|uniq|sort[ \t]+-u)\b"
+)
+
+
+def _unquoted(text: str) -> str:
+    """Blank quoted spans so metacharacters inside arguments are not read as chaining:
+    `sed -n '1,5p;10,12p' f.py` is one command."""
+    return _QUOTED_SPAN_RE.sub(lambda m: "'" + "_" * (len(m.group(0)) - 2) + "'", text)
+
+
+def requires_output(command: str) -> bool:
+    """True when the command cannot legitimately produce an empty observation.
+
+    A read of an existing file prints its content; a read of a missing one prints an error. Writes,
+    in-place edits and pipelines ending in a filter that can match nothing are excluded.
+    """
+    text = (command or "").strip()
+    if not text or not _READ_HEAD_RE.match(text.split("&&")[0]):
+        return False
+    if _WRITE_RE.search(text) or _MAY_BE_EMPTY_TAIL_RE.search(text):
+        return False
+    return bool(re.search(r"[\w./-]*[./][\w./-]+|\s[\w-]+\.\w{1,6}\b", text.split("&&")[0]))
+
+
+_SED_RANGE_RE = re.compile(r"^sed\s+-n\s+['\"][^'\"]*['\"]\s+\S+(?:\s*\|\s*(?:cat\s+-n|nl\b.*))?$")
+_SED_NUM_RANGE_RE = re.compile(r"(\d+)\s*,\s*(\d+)\s*p")
+_HEAD_TAIL_TAIL_RE = re.compile(r"\|\s*(?:head|tail)\s+-n?\s*(\d+)\s*$")
+_HEAD_TAIL_ONLY_RE = re.compile(r"^(?:head|tail)\s+-n?\s*(\d+)\s+\S+$")
+
+
+@dataclass(frozen=True)
+class CommandContract:
+    """The output length the command itself guarantees, when it states one unambiguously."""
+
+    max_lines: int | None = None
+
+    def __bool__(self) -> bool:
+        return self.max_lines is not None
+
+
+def command_contract(command: str) -> CommandContract:
+    masked = _unquoted((command or "").strip())
+    if not masked:
+        return CommandContract()
+    capped = _HEAD_TAIL_TAIL_RE.search(masked)          # a trailing pipe caps whatever precedes it
+    if capped:
+        return CommandContract(max_lines=int(capped.group(1)))
+    if _CHAINED_RE.search(masked):
+        return CommandContract()
+    only = _HEAD_TAIL_ONLY_RE.match(masked)
+    if only:
+        return CommandContract(max_lines=int(only.group(1)))
+    if _SED_RANGE_RE.match(masked):
+        ranges = _SED_NUM_RANGE_RE.findall(command)
+        if ranges:
+            return CommandContract(max_lines=sum(int(b) - int(a) + 1 for a, b in ranges))
+    return CommandContract()
+
+
+def contract_violation(raw: str, fmt: str, contract: CommandContract) -> str | None:
+    """The unmet guarantee, or None. Emptiness is left to has_content()/requires_output()."""
+    if not contract:
+        return None
+    lines = [line for line in observation_body(raw, fmt).splitlines() if line.strip()]
+    if lines and len(lines) > contract.max_lines:
+        return f"too_many_lines:{len(lines)}>{contract.max_lines}"
+    return None
+
+
+_RC_OUTPUT_RE = re.compile(r"(<returncode>\d+</returncode>\n<output>\n).*\n?</output>", re.DOTALL)
+
+
+def repair_to_contract(raw: str, fmt: str, contract: CommandContract) -> str:
+    """Truncate to the length the command states — exactly what `head`/`sed` do.
+
+    Deterministic and content-preserving, so it cannot add fabrication.
+    """
+    if not contract or not has_content(raw, fmt):
+        return raw
+    lines, kept, seen = observation_body(raw, fmt).splitlines(), [], 0
+    for line in lines:
+        if line.strip():
+            if seen >= contract.max_lines:
+                break
+            seen += 1
+        kept.append(line)
+    return raw if kept == lines else _replace_body(raw, fmt, kept)
+
+
+def _replace_body(raw: str, fmt: str, lines: list[str]) -> str:
+    """Put lines back inside the original envelope, keeping return code, header and trailer."""
+    body, text = "\n".join(lines), (raw or "").strip()
+    if fmt == RETURNCODE:
+        match = _RC_OUTPUT_RE.search(text)
+        return f"{match.group(1)}{body}\n</output>" if match else wrap(body, fmt)
+    if fmt == SWE_AGENT:
+        return f"OBSERVATION:\n{body}" if body else "OBSERVATION:"
+    rest, head, tail = text.splitlines(), [], []
+    if rest and _VIEW_HEADER_RE.match(rest[0]):
+        head, rest = rest[:1], rest[1:]
+    while rest and _TRAILER_RE.match(rest[-1]):
+        tail.insert(0, rest.pop())
+    return "\n".join(head + lines + tail)

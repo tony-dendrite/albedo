@@ -16,11 +16,19 @@ from pydantic import BaseModel, Field
 
 from .judge_config import JudgeSettings, get_judge_settings
 from .observation_format import (
+    CommandContract,
+    command_contract,
+    contract_violation,
     detect_format,
     empty_output,
+    first_bash_block,
     format_block,
+    has_content,
     is_truncated,
+    missing_command_output,
     repair_output,
+    repair_to_contract,
+    requires_output,
     valid_output,
     wrap,
 )
@@ -473,6 +481,17 @@ class ObservationSimulationService:
         self.repo_context = repo_context
 
     async def simulate(self, request: SimulateObservationRequest) -> str:
+        command = first_bash_block(request.assistant_output)
+        if not command:
+            fmt = detect_format(request.sample_id, request.messages)
+            logger.warning(
+                "observation_simulation_no_command eval_run_id={} sample_id={} fmt={} chars={}",
+                request.eval_run_id,
+                request.sample_id,
+                fmt,
+                len(request.assistant_output or ""),
+            )
+            return missing_command_output(fmt)
         context_block = None
         if self.repo_context is not None:
             context_block = await self.repo_context.context_for(
@@ -484,6 +503,8 @@ class ObservationSimulationService:
             assistant_output=request.assistant_output,
         )
         fmt = detect_format(request.sample_id, request.messages)
+        require_content = requires_output(command)
+        contract = command_contract(command)
         primary = self.settings.simulation_model or self.settings.evaluator_model
         fallback_model = self.settings.evaluator_model
         attempts: list[tuple[str, int]] = [
@@ -493,6 +514,7 @@ class ObservationSimulationService:
             attempts.append((fallback_model, 1))
 
         observation = ""
+        best_rank = -1
         for model, tries in attempts:
             single_shot = model == primary and primary != fallback_model
             messages = [
@@ -513,15 +535,25 @@ class ObservationSimulationService:
                     provider=(_evaluator_provider(self.settings)
                               if model == fallback_model
                               else _simulation_provider(self.settings)),
-                    accept=lambda raw: _usable_simulation_output(repair_output(raw, fmt), fmt),
+                    accept=lambda raw: _usable_simulation_output(
+                        repair_to_contract(repair_output(raw, fmt), fmt, contract), fmt,
+                        require_content=require_content, contract=contract,
+                    ),
                     **single_shot_kwargs,
                 )
                 if response.error:
                     if model != fallback_model:
                         break
                     raise ObservationSimulationUnavailable(response.error)
-                observation = repair_output(response.raw, fmt)
-                if _usable_simulation_output(observation, fmt):
+                candidate = repair_to_contract(
+                    repair_output(response.raw, fmt), fmt, contract
+                )
+                rank = _candidate_rank(
+                    candidate, fmt, require_content=require_content, contract=contract
+                )
+                if rank > best_rank:
+                    best_rank, observation = rank, candidate
+                if rank == _RANK_USABLE:
                     if model != primary:
                         logger.info(
                             "observation_simulation_fallback_used eval_run_id={} sample_id={} "
@@ -531,11 +563,14 @@ class ObservationSimulationService:
                     break
                 logger.warning(
                     "observation_simulation_unusable eval_run_id={} sample_id={} model={} "
-                    "attempt={}/{} reason={}",
+                    "attempt={}/{} reason={} kept_rank={}",
                     request.eval_run_id, request.sample_id, model, attempt + 1, tries,
-                    _unusable_reason(observation, fmt),
+                    _unusable_reason(
+                        candidate, fmt, require_content=require_content, contract=contract
+                    ),
+                    best_rank,
                 )
-            if _usable_simulation_output(observation, fmt):
+            if best_rank == _RANK_USABLE:
                 break
         if _looping_output(observation):
             collapsed = _collapse_looping(observation).strip()
@@ -859,17 +894,69 @@ def _role_violation(raw: str) -> bool:
     return bool(_ROLE_LEAK_RE.search(raw or ""))
 
 
-def _usable_simulation_output(raw: str, fmt: str) -> bool:
-    return valid_output(raw, fmt) and not _role_violation(raw) and not _looping_output(raw)
+_RANK_INVALID = 0
+_RANK_VALID = 1
+_RANK_HAS_CONTENT = 2
+_RANK_USABLE = 3
 
 
-def _unusable_reason(raw: str, fmt: str) -> str:
+def _candidate_rank(
+    raw: str,
+    fmt: str,
+    *,
+    require_content: bool = False,
+    contract: CommandContract | None = None,
+) -> int:
+    """How good an attempt is, so escalation keeps the best one rather than the last.
+
+    Escalating used to overwrite a usable primary result with whatever the fallback produced. In
+    practice the fallback often answers in the wrong dialect, which then collapsed to an empty
+    observation, or returned a worse contract violation — both strictly worse than the primary.
+    """
+    if not valid_output(raw, fmt):
+        return _RANK_INVALID
+    if _usable_simulation_output(
+        raw, fmt, require_content=require_content, contract=contract
+    ):
+        return _RANK_USABLE
+    if has_content(raw, fmt):
+        return _RANK_HAS_CONTENT
+    return _RANK_VALID
+
+
+def _usable_simulation_output(
+    raw: str,
+    fmt: str,
+    *,
+    require_content: bool = False,
+    contract: CommandContract | None = None,
+) -> bool:
+    return (
+        valid_output(raw, fmt)
+        and not _role_violation(raw)
+        and not _looping_output(raw)
+        and (not require_content or has_content(raw, fmt))
+        and (contract is None or contract_violation(raw, fmt, contract) is None)
+    )
+
+
+def _unusable_reason(
+    raw: str,
+    fmt: str,
+    *,
+    require_content: bool = False,
+    contract: CommandContract | None = None,
+) -> str:
     if not valid_output(raw, fmt):
         return "invalid_format"
     if _role_violation(raw):
         return "role_violation"
     if _looping_output(raw):
         return "looping"
+    if require_content and not has_content(raw, fmt):
+        return "no_content_for_read"
+    if contract is not None and (breach := contract_violation(raw, fmt, contract)):
+        return breach
     return "ok"
 
 

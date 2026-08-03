@@ -546,3 +546,86 @@ def test_parse_keeps_size_ladder_rungs():
     ladder = [q for q in parsed if q["category"] == "size"]
     assert len(ladder) == 6
     assert ok
+
+
+def test_strip_leaked_reasoning_handles_each_observed_pattern():
+    from albedo_eval_service.judge_core import strip_leaked_reasoning
+
+    # matched pair: reasoning block removed entirely
+    assert strip_leaked_reasoning("<think>secret plan</think>\n\nTHOUGHT: go") == "THOUGHT: go"
+    # orphaned close with nothing before it (2962 of 2971 real cases)
+    assert strip_leaked_reasoning("\n</think>\n\nTHOUGHT: go") == "THOUGHT: go"
+    # orphaned close preceded by leaked reasoning prose
+    assert strip_leaked_reasoning("raw reasoning here\n</think>\n\nTHOUGHT: go") == "THOUGHT: go"
+    # mini-coder-rs corpus style: THOUGHT: before the tag is real content, keep it
+    kept = strip_leaked_reasoning("THOUGHT: analyse\n</think>\n\n```bash\nls\n```")
+    assert kept.startswith("THOUGHT: analyse")
+    assert "</think>" not in kept
+    assert "```bash\nls\n```" in kept
+    # untouched when there is no tag
+    assert strip_leaked_reasoning("THOUGHT: plain") == "THOUGHT: plain"
+
+
+def test_strip_candidate_reasoning_only_touches_candidate_blocks():
+    from albedo_eval_service.judge_core import strip_candidate_reasoning
+
+    trajectory = (
+        "FULL CANDIDATE TRAJECTORY\n\n"
+        "CONTEXT USER (do not score):\n------\nTHOUGHT: ctx\n</think>\nkeep me\n------\n\n"
+        "CANDIDATE OUTPUT 1:\n------\n\n</think>\n\nTHOUGHT: work\n------\n\n"
+        "ENVIRONMENT OBSERVATION (context only, do not score):\n------\n"
+        "<returncode>0</returncode>\n</think>\n------"
+    )
+    out = strip_candidate_reasoning(trajectory)
+    # the candidate block is cleaned...
+    assert "CANDIDATE OUTPUT 1:\n------\nTHOUGHT: work\n------" in out
+    # ...and neither the context turn nor the observation is altered
+    assert "CONTEXT USER (do not score):\n------\nTHOUGHT: ctx\n</think>\nkeep me\n------" in out
+    assert "<returncode>0</returncode>\n</think>" in out
+    # a block that is nothing but reasoning is left alone rather than emptied
+    only = "CANDIDATE OUTPUT 1:\n------\n</think>\n------"
+    assert strip_candidate_reasoning(only) == only
+
+
+def test_edit_detection_ignores_prose_and_stderr_redirects():
+    """The pattern used to run over the whole turn, so `2>/dev/null`, a `>` in prose and the `>` of
+    a leaked `</think>` all read as a redirect. That marked every candidate as having edited, which
+    left apply_measurement_gate permanently inert in production."""
+    from albedo_eval_service.judge_core import trajectory_made_edit
+
+    def block(cmd):
+        return f"```bash\n{cmd}\n```"
+
+    for label in ("find . 2>/dev/null", "ls 2>&1", "pytest 1>/dev/null", "cmd | tee /dev/null"):
+        assert trajectory_made_edit([block(label)]) is False, label
+    assert trajectory_made_edit(["THOUGHT: a > b so we fix it"]) is False
+    assert trajectory_made_edit(["\n</think>\n\nTHOUGHT: x" + block("cat f.py")]) is False
+
+    for label in ("sed -i s/a/b/ f.py", "echo hi > out.txt", "cat >> f.py << EOF",
+                  "tee f.py", "cp a.py b.py", "patch -p1 < d.diff", "git apply d.diff"):
+        assert trajectory_made_edit([block(label)]) is True, label
+
+
+def test_measurement_gate_fires_for_a_candidate_that_only_explored():
+    from albedo_eval_service.judge_core import apply_measurement_gate
+
+    questions = [
+        {"id": "q_01", "requires": "action", "text": "Is the fix applied?"},
+        {"id": "q_02", "requires": "neutral", "text": "Does it avoid modifying unrelated files?"},
+        {"id": "q_03", "requires": "read", "text": "Is `foo()` located in `a.py`?"},
+    ]
+    gated = apply_measurement_gate(
+        {"q_01": "1", "q_02": "1", "q_03": "1"}, questions,
+        candidate_turn_texts=["```bash\ngrep -rn x . 2>/dev/null\n```"],
+        reference_made_edit=True,
+    )
+    assert gated["q_01"] == "0", "an action question cannot be earned without an edit"
+    assert "q_02" not in gated, "inaction-conditional do-no-harm is dropped, never awarded"
+    assert gated["q_03"] == "1", "a read question is still satisfiable"
+
+    # a candidate that did edit is left alone
+    untouched = apply_measurement_gate(
+        {"q_01": "1"}, questions[:1],
+        candidate_turn_texts=["```bash\nsed -i s/a/b/ f.py\n```"], reference_made_edit=True,
+    )
+    assert untouched == {"q_01": "1"}

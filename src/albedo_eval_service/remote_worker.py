@@ -18,7 +18,13 @@ from .judge_core import CHALLENGER_WIN_MARGIN, challenger_beats_king
 from .models import EvalRequest
 from .remote_artifacts import ArtifactUploader, RunArtifactSpool, build_artifact_uploader
 from .remote_config import RemoteSettings
-from .observation_format import detect_format, truncation_notice, wrap
+from .observation_format import (
+    detect_format,
+    first_bash_block,
+    missing_command_output,
+    truncation_notice,
+    wrap,
+)
 from .remote_dataset import EvalSample, format_messages, load_manifest_samples
 from .remote_generation import (
     GenerationResult,
@@ -393,6 +399,15 @@ class RemoteEvalWorker:
                 elif _assistant_submitted(result.text):
                     observations[key] = ObservationResult(
                         result.sample_id, _completion_observation(sample)
+                    )
+                elif not first_bash_block(result.text):
+                    logger.warning(
+                        f"[remote-worker] no bash command in assistant output side={side} "
+                        f"sample={result.sample_id} chars={len(result.text)}; "
+                        f"returning a missing-command observation instead of simulating"
+                    )
+                    observations[key] = ObservationResult(
+                        result.sample_id, _missing_command_observation(sample)
                     )
                 else:
                     jobs.append((side, sample, result))
@@ -872,6 +887,10 @@ def _assistant_submitted(output: str) -> bool:
 
 def _completion_observation(sample: EvalSample) -> str:
     return wrap(_COMPLETE_MARKER, detect_format(sample.sample_id, sample.messages))
+
+
+def _missing_command_observation(sample: EvalSample) -> str:
+    return missing_command_output(detect_format(sample.sample_id, sample.messages))
 
 
 def _cleanup_stale_vllm_resources() -> None:

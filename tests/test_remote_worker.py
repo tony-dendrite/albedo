@@ -34,6 +34,7 @@ from albedo_eval_service.remote_worker import (
     RemoteEvalWorker,
     _completion_observation,
     _merge_trajectory_results,
+    _missing_command_observation,
     _next_turn_samples,
 )
 
@@ -55,8 +56,13 @@ class RecordingGenerator:
             {"side": self.side, "sample_ids": [sample.sample_id for sample in samples]}
         )
         suffix = " challenger output" if self.side == "challenger" else " king"
+        # a real turn always carries a bash block; without one the worker now short-circuits to a
+        # missing-command observation instead of asking the simulator
         return [
-            GenerationResult(sample_id=sample.sample_id, text=sample.prompt + suffix)
+            GenerationResult(
+                sample_id=sample.sample_id,
+                text=f"{sample.prompt}{suffix}\n```bash\nls\n```",
+            )
             for sample in samples
         ]
 
@@ -617,3 +623,42 @@ def test_prefetch_repo_context_fires_only_when_configured(monkeypatch):
     )
     disabled._prefetch_repo_context(_request(), samples)
     assert not posted.wait(0.2)
+
+
+def test_missing_bash_command_bypasses_observation_simulator(tmp_path):
+    """A turn with no bash block must get a real command error, never a simulated observation.
+
+    Previously _command_only() fell back to the whole assistant message, so the simulator
+    invented a filesystem for models that emit a JSON tool call instead of a bash fence.
+    """
+
+    class FailingScorer:
+        def simulate_observation(self, **_kwargs):
+            raise AssertionError("simulator must not run when there is no bash command")
+
+    sample = types.SimpleNamespace(
+        sample_id="mini-coder-rs/data/train-00000.parquet:1156:2",
+        prompt="Task",
+        target=None,
+        messages=[{"role": "user", "content": "Task"}],
+    )
+    result = GenerationResult(
+        sample.sample_id,
+        'THOUGHT: read the file\n{"command": "sed -n \'590,670p\' /testbed/src/naive/date/mod.rs"}',
+    )
+    worker = RemoteEvalWorker(
+        RemoteSettings(dataset_root=str(tmp_path), scoring_backend="mock"),
+        generator_factory=lambda side, gpu_ids, model: RecordingGenerator(side=side, calls=[]),
+        scorer=FailingScorer(),
+    )
+
+    observations = worker._simulate_observations(
+        request=_request(),
+        samples_by_side={"challenger": [sample]},
+        results_by_side={"challenger": [result]},
+    )
+
+    observation = observations[("challenger", sample.sample_id)].observation
+    assert observation == _missing_command_observation(sample)
+    assert "No bash command found" in observation
+    assert "<returncode>2</returncode>" in observation
