@@ -19,6 +19,7 @@ from .observation_format import (
     detect_format,
     empty_output,
     format_block,
+    is_truncated,
     repair_output,
     valid_output,
     wrap,
@@ -872,6 +873,32 @@ def _unusable_reason(raw: str, fmt: str) -> str:
     return "ok"
 
 
+def _corrupted_side(
+    *,
+    side: str,
+    questions: list[dict[str, str]],
+    judge_models: list[str],
+) -> tuple[dict[str, dict[str, str | None]], list[dict[str, Any]]]:
+    per_judge_answers: dict[str, dict[str, str | None]] = {
+        model: {q["id"]: "0" for q in questions} for model in judge_models
+    }
+    records = [
+        {
+            "side": side,
+            "judge_model": model,
+            "provider": None,
+            "answers": per_judge_answers[model],
+            "explanations": {},
+            "yes_rate": judge_yes_rate(per_judge_answers[model], questions),
+            "parse_ok": True,
+            "error": None,
+            "corrupted": True,
+        }
+        for model in judge_models
+    ]
+    return per_judge_answers, records
+
+
 async def _judge_side(
     *,
     client: OpenRouterJudgeClient,
@@ -976,17 +1003,20 @@ async def _score_samples(
         questions = prepared.questions
         gate_flag = prepared.source.get("reference_made_edit")
         gate_flag = bool(gate_flag) if gate_flag is not None else None
+        async def _side(side: str, response_text: str):
+            if is_truncated(response_text):
+                return _corrupted_side(
+                    side=side, questions=questions, judge_models=request.judge_models
+                )
+            return await _judge_side(
+                client=client, settings=settings, side=side,
+                response_text=response_text, questions=questions,
+                judge_models=request.judge_models, reference_made_edit=gate_flag,
+            )
+
         (king_answers, king_recs), (chal_answers, chal_recs) = await asyncio.gather(
-            _judge_side(
-                client=client, settings=settings, side="previous_king",
-                response_text=sample.previous_king_output, questions=questions,
-                judge_models=request.judge_models, reference_made_edit=gate_flag,
-            ),
-            _judge_side(
-                client=client, settings=settings, side="challenger",
-                response_text=sample.challenger_output, questions=questions,
-                judge_models=request.judge_models, reference_made_edit=gate_flag,
-            ),
+            _side("previous_king", sample.previous_king_output),
+            _side("challenger", sample.challenger_output),
         )
         king_score = response_score(king_answers, questions)
         chal_score = response_score(chal_answers, questions)

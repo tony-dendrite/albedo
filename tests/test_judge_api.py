@@ -30,6 +30,7 @@ from albedo_eval_service.observation_format import (
     SWE_AGENT,
     detect_format,
     empty_output,
+    truncation_notice,
     valid_output,
 )
 from albedo_eval_service.judge_core import JUDGE_MODELS
@@ -278,6 +279,47 @@ def test_sample_unscored_if_a_judge_never_parses():
     )
     records = asyncio.run(_score_samples(client=fake, request=request, settings=settings, prep_store=store))
     assert records[0]["scored"] is False
+
+
+def test_truncated_side_scores_zero_without_calling_the_judge():
+    class RecordingClient(FakeClient):
+        def __init__(self):
+            super().__init__(n_questions=3)
+            self.judged = []
+
+        async def score(self, **kwargs):
+            self.judged.append(kwargs["messages"][1]["content"])
+            return await super().score(**kwargs)
+
+    settings = JudgeSettings(num_questions=3)
+    fake = RecordingClient()
+    store = QuestionPrepStore(settings, QuestionService(settings, fake))
+    request = ScoreBatchRequest(
+        eval_run_id="r", batch_id="b", total_sample_count=1, judge_models=list(JUDGE_MODELS[:1]),
+        samples=[
+            JudgeSample(
+                sample_id="s1", prompt="task",
+                previous_king_output="KING",
+                challenger_output=f"CANDIDATE OUTPUT 1:\n{truncation_notice(16384)}",
+            )
+        ],
+    )
+    record = asyncio.run(
+        _score_samples(client=fake, request=request, settings=settings, prep_store=store)
+    )[0]
+
+    assert record["scored"] is True
+    assert record["challenger_score"] == 0.0
+    assert record["king_score"] is not None
+
+    challenger_results = [r for r in record["judge_results"] if r["side"] == "challenger"]
+    assert challenger_results
+    assert all(r["corrupted"] for r in challenger_results)
+    assert all(r["parse_ok"] for r in challenger_results)
+    assert all(r["yes_rate"] == 0.0 for r in challenger_results)
+
+    assert len(fake.judged) == 1
+    assert all("KING" in judged for judged in fake.judged)
 
 
 def test_scoring_regenerates_questions_when_async_prep_failed():

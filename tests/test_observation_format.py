@@ -7,11 +7,14 @@ from albedo_eval_service.observation_format import (
     OPENHANDS,
     RETURNCODE,
     SWE_AGENT,
+    TRUNCATION_SENTINEL,
     classify,
     detect_format,
     empty_output,
     format_block,
+    is_truncated,
     repair_output,
+    truncation_notice,
     valid_output,
     wrap,
 )
@@ -98,3 +101,13 @@ def test_format_block_matches_the_format():
     assert format_block(RETURNCODE) == FORMAT_MINI_CODER
     assert format_block(SWE_AGENT) == FORMAT_SWE_AGENT
     assert format_block(OPENHANDS) == FORMAT_OPENHANDS
+
+
+def test_truncation_notice_is_detectable_and_names_the_limit():
+    notice = truncation_notice(16384)
+    assert TRUNCATION_SENTINEL in notice
+    assert "16384" in notice
+    assert is_truncated(notice)
+    assert is_truncated(f"CANDIDATE OUTPUT 1:\n------\n{notice}\n------")
+    assert not is_truncated("an ordinary candidate answer")
+    assert not is_truncated("")

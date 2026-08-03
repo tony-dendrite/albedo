@@ -18,7 +18,7 @@ from .judge_core import CHALLENGER_WIN_MARGIN, challenger_beats_king
 from .models import EvalRequest
 from .remote_artifacts import ArtifactUploader, RunArtifactSpool, build_artifact_uploader
 from .remote_config import RemoteSettings
-from .observation_format import detect_format, wrap
+from .observation_format import detect_format, truncation_notice, wrap
 from .remote_dataset import EvalSample, format_messages, load_manifest_samples
 from .remote_generation import (
     GenerationResult,
@@ -355,11 +355,11 @@ class RemoteEvalWorker:
             return (
                 _merge_trajectory_results(
                     samples, all_results["previous_king"], all_observations["previous_king"],
-                    side="previous_king",
+                    side="previous_king", token_limit=self.settings.max_new_tokens,
                 ),
                 _merge_trajectory_results(
                     samples, all_results["challenger"], all_observations["challenger"],
-                    side="challenger",
+                    side="challenger", token_limit=self.settings.max_new_tokens,
                 ),
             )
         finally:
@@ -388,6 +388,8 @@ class RemoteEvalWorker:
                     )
                 elif result.error:
                     observations[key] = ObservationResult(result.sample_id, "", result.error)
+                elif result.truncated:
+                    observations[key] = ObservationResult(result.sample_id, "")
                 elif _assistant_submitted(result.text):
                     observations[key] = ObservationResult(
                         result.sample_id, _completion_observation(sample)
@@ -538,7 +540,12 @@ class RemoteEvalWorker:
         category_prep_id: str | None = None,
     ) -> dict[str, object]:
         valid_pair_count = _valid_generated_pair_count(samples, king_results, challenger_results)
-        if valid_pair_count == 0:
+        total_sample_count = len(samples)
+        min_valid_fraction = self.settings.scoring_min_valid_fraction
+        if (
+            total_sample_count == 0
+            or valid_pair_count / total_sample_count < min_valid_fraction
+        ):
             return {
                 "records": [],
                 "summary": {
@@ -546,14 +553,17 @@ class RemoteEvalWorker:
                     "score_challenger": None,
                     "score_king": None,
                     "challenger_won": None,
-                    "valid_turns": 0,
-                    "total_turns": 0,
+                    "valid_turns": valid_pair_count,
+                    "total_turns": total_sample_count,
                     "judge_errors": 0,
                     "scored_sample_count": 0,
-                    "fault_class": "REMOTE_EVAL_FAULT",
-                    "fault_code": "no_valid_generated_pairs",
-                    "fault_message": "No sample pair had both king and challenger output",
-                    "retryable": True,
+                    "fault_class": "MINER_FAULT",
+                    "fault_code": "insufficient_valid_samples",
+                    "fault_message": (
+                        f"Only {valid_pair_count}/{total_sample_count} sample pairs had both "
+                        f"king and challenger output (< {min_valid_fraction:.0%})"
+                    ),
+                    "retryable": False,
                 },
             }
         try:
@@ -762,7 +772,7 @@ def _next_turn_samples(
         observation = observations.get((side, sample.sample_id))
         if result is None or result.error or observation is None or observation.error:
             continue
-        if _assistant_submitted(result.text):
+        if result.truncated or _assistant_submitted(result.text):
             continue
         messages = _base_messages(sample) + [
             {"role": "assistant", "content": result.text},
@@ -787,12 +797,14 @@ def _merge_trajectory_results(
     turn_observations: list[dict[tuple[str, str], ObservationResult]],
     *,
     side: str,
+    token_limit: int,
 ) -> list[GenerationResult]:
     result_maps = [{result.sample_id: result for result in results} for results in turn_results]
     merged = []
     for sample in samples:
         turns = _context_turns(sample)
         error = None
+        truncated = False
         for index, result_map in enumerate(result_maps):
             result = result_map.get(sample.sample_id)
             if result is None:
@@ -800,6 +812,17 @@ def _merge_trajectory_results(
                 break
             if result.error:
                 error = result.error
+                break
+            if result.truncated:
+                truncated = True
+                turns.append(
+                    {
+                        "role": "assistant",
+                        "content": truncation_notice(token_limit),
+                        "score_target": True,
+                        "truncated": True,
+                    }
+                )
                 break
             turns.append({"role": "assistant", "content": result.text, "score_target": True})
             if index >= len(turn_observations):
@@ -826,6 +849,7 @@ def _merge_trajectory_results(
                 text=format_scored_trajectory(turns),
                 error=None,
                 turns=turns,
+                truncated=truncated,
             )
         )
     return merged

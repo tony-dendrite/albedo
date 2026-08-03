@@ -262,6 +262,27 @@ def test_aggregate_scores_crowns_on_margin():
     assert below["challenger_won"] is False
 
 
+def test_aggregate_scores_averages_corrupted_zeros_into_the_score():
+    records = [_record(0.50, 0.55) for _ in range(80)] + [_record(0.50, 0.0) for _ in range(20)]
+    summary = aggregate_scores(records, min_valid_fraction=0.8)
+
+    assert summary["state"] == "succeeded"
+    assert summary["scored_sample_count"] == 100
+    assert summary["valid_turns"] == 100
+    assert summary["total_turns"] == 100
+    assert summary["score_challenger"] == 0.44
+    assert summary["score_king"] == 0.50
+
+
+def test_aggregate_scores_keeps_an_all_corrupted_run_valid_at_zero():
+    summary = aggregate_scores([_record(0.50, 0.0) for _ in range(100)], min_valid_fraction=0.8)
+
+    assert summary["state"] == "succeeded"
+    assert summary["score_challenger"] == 0.0
+    assert summary["scored_sample_count"] == 100
+    assert summary["challenger_won"] is False
+
+
 def test_aggregate_scores_fails_when_too_few_valid():
     records = [_record(0.3, 0.4) for _ in range(4)] + [
         _record(0.3, 0.4, scored=False) for _ in range(6)

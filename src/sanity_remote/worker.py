@@ -16,6 +16,7 @@ import httpx
 from loguru import logger
 
 from albedo_eval_service.canonical_model_config import canonical_max_model_len
+from albedo_eval_service.observation_format import truncation_notice
 from albedo_eval_service.remote_dataset import format_messages
 from sanity_remote.config import SanityRemoteSettings, get_remote_settings
 from sanity_remote.state import SanityRun
@@ -421,9 +422,11 @@ class VllmEngine:
                 )
                 return ""
             try:
-                choice = r.json()["choices"][0]
+                body = r.json()
+                choice = body["choices"][0]
                 raw = choice["text"] or ""
                 finish = choice.get("finish_reason", "unknown")
+                generated = int((body.get("usage") or {}).get("completion_tokens") or 0)
                 answer = _strip_thinking(raw)
                 logger.info(
                     "[sanity-remote] prompt finish={} thinking={} answer_words={}",
@@ -431,6 +434,13 @@ class VllmEngine:
                     "<think>" in raw or "</think>" in raw,
                     len(answer.split()),
                 )
+                if finish == "length" and generated >= max_tokens:
+                    logger.warning(
+                        "[sanity-remote] response hit the {} token limit ({} generated) - model fault",
+                        max_tokens,
+                        generated,
+                    )
+                    return truncation_notice(max_tokens)
                 return answer
             except (KeyError, IndexError, ValueError):
                 logger.warning("[sanity-remote] malformed vLLM response body - model fault")

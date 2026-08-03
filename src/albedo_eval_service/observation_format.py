@@ -5,6 +5,8 @@ RETURNCODE = "returncode"
 SWE_AGENT = "swe_agent"
 OPENHANDS = "openhands"
 
+TRUNCATION_SENTINEL = "MODEL_RESPONSE_TOKEN_LIMIT_EXCEEDED"
+
 FORMAT_MINI_CODER = """OUTPUT FORMAT:
 - Your reply MUST have exactly this shape, with no text before or after:
 <returncode>RC</returncode>
@@ -114,3 +116,14 @@ def wrap(body: str, fmt: str, *, returncode: int = 0) -> str:
 
 def empty_output(fmt: str) -> str:
     return wrap("", fmt)
+
+
+def truncation_notice(token_limit: int) -> str:
+    return (
+        f"{TRUNCATION_SENTINEL}: Model returned over {token_limit} tokens in one response, "
+        "stopping conversation."
+    )
+
+
+def is_truncated(text: str) -> bool:
+    return TRUNCATION_SENTINEL in (text or "")

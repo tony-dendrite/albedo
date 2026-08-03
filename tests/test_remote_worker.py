@@ -21,9 +21,11 @@ from albedo_eval_service.remote_config import RemoteSettings
 from albedo_eval_service.remote_generation import (
     GenerationResult,
     VllmProcessGenerator,
+    _generate_payload,
     _vllm_worker,
     format_scored_trajectory,
 )
+from albedo_eval_service.observation_format import TRUNCATION_SENTINEL
 from albedo_eval_service.remote_models import ResolvedModel
 from albedo_eval_service.remote_scoring import ScoringResult
 from albedo_eval_service.remote_state import RemoteRun
@@ -318,11 +320,146 @@ def test_submit_echo_stops_future_trajectory_turns(monkeypatch):
         ],
         [{("challenger", "sample-1"): observation}],
         side="challenger",
+        token_limit=16384,
     )
 
     assert merged[0].error is None
     assert "CANDIDATE OUTPUT 2" not in merged[0].text
     assert "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in merged[0].text
+
+
+def test_generate_payload_flags_only_responses_that_hit_the_per_response_cap():
+    class _LLM:
+        def __init__(self, completions):
+            self._completions = completions
+
+        def generate(self, prompts, params):
+            return [types.SimpleNamespace(outputs=[c]) for c in self._completions]
+
+    at_cap = types.SimpleNamespace(text="a", finish_reason="length", token_ids=[0] * 16384)
+    context_bound = types.SimpleNamespace(text="b", finish_reason="length", token_ids=[0] * 900)
+    finished = types.SimpleNamespace(text="c", finish_reason="stop", token_ids=[0] * 12)
+
+    payload = _generate_payload(
+        _LLM([at_cap, context_bound, finished]),
+        None,
+        ["p1", "p2", "p3"],
+        ["s1", "s2", "s3"],
+        16384,
+    )
+
+    assert {r["sample_id"]: r["truncated"] for r in payload["results"]} == {
+        "s1": True,
+        "s2": False,
+        "s3": False,
+    }
+
+
+def _trajectory_sample(sample_id: str = "sample-1"):
+    return types.SimpleNamespace(
+        sample_id=sample_id,
+        prompt="Task",
+        target=None,
+        messages=[{"role": "user", "content": "Task"}],
+    )
+
+
+def test_truncated_response_ends_trajectory_and_stays_valid(monkeypatch):
+    monkeypatch.setattr(
+        "albedo_eval_service.remote_worker.format_messages", lambda messages, **_kwargs: "next"
+    )
+    sample = _trajectory_sample()
+    oversized = "x" * 200
+    truncated = GenerationResult("sample-1", oversized, truncated=True)
+    observation = ObservationResult("sample-1", "")
+
+    assert _next_turn_samples(
+        [sample],
+        [truncated],
+        {("challenger", "sample-1"): observation},
+        side="challenger",
+    ) == []
+
+    merged = _merge_trajectory_results(
+        [sample],
+        [[truncated], []],
+        [{("challenger", "sample-1"): observation}],
+        side="challenger",
+        token_limit=16384,
+    )
+
+    assert merged[0].error is None
+    assert merged[0].truncated is True
+    assert TRUNCATION_SENTINEL in merged[0].text
+    assert "16384" in merged[0].text
+    assert oversized not in merged[0].text
+    assert "CANDIDATE OUTPUT 2" not in merged[0].text
+
+
+def _pairs_worker(scorer):
+    return RemoteEvalWorker(
+        RemoteSettings(
+            scoring_backend="mock", upload_artifacts=False, resolve_model_artifacts=False
+        ),
+        scorer=scorer,
+    )
+
+
+def test_score_pairs_is_terminal_when_too_few_valid_pairs():
+    class NeverCalled:
+        def score(self, **_kwargs):
+            raise AssertionError("scorer must not run when too few pairs are valid")
+
+        def simulate_observation(self, **_kwargs):
+            return ""
+
+    samples = [_trajectory_sample(f"s{index}") for index in range(10)]
+    king_results = [GenerationResult(sample.sample_id, "king") for sample in samples]
+    challenger_results = [
+        GenerationResult(sample.sample_id, "", "vllm timed out") for sample in samples[:9]
+    ] + [GenerationResult("s9", "challenger")]
+
+    summary = _pairs_worker(NeverCalled())._score_pairs(
+        request=_request(),
+        samples=samples,
+        king_results=king_results,
+        challenger_results=challenger_results,
+    )["summary"]
+
+    assert summary["state"] == "failed"
+    assert summary["fault_class"] == "MINER_FAULT"
+    assert summary["fault_code"] == "insufficient_valid_samples"
+    assert summary["retryable"] is False
+    assert summary["valid_turns"] == 1
+    assert summary["total_turns"] == 10
+
+
+def test_score_pairs_counts_truncated_pairs_as_valid():
+    scored = {}
+
+    class Recording:
+        def score(self, *, request, samples, king_results, challenger_results, category_prep_id=None):
+            scored["samples"] = len(samples)
+            return ScoringResult(records=[], summary={"state": "succeeded"})
+
+        def simulate_observation(self, **_kwargs):
+            return ""
+
+    samples = [_trajectory_sample(f"s{index}") for index in range(10)]
+    king_results = [GenerationResult(sample.sample_id, "king") for sample in samples]
+    challenger_results = [
+        GenerationResult(sample.sample_id, "notice", truncated=True) for sample in samples
+    ]
+
+    result = _pairs_worker(Recording())._score_pairs(
+        request=_request(),
+        samples=samples,
+        king_results=king_results,
+        challenger_results=challenger_results,
+    )
+
+    assert scored["samples"] == 10
+    assert result["summary"]["state"] == "succeeded"
 
 
 def test_submit_echo_bypasses_observation_simulator(tmp_path):
@@ -410,7 +547,7 @@ def test_vllm_worker_stops_on_qwen_im_end(monkeypatch):
         def generate(self, prompts, params):
             captured["prompts"] = prompts
             captured["params_obj"] = params
-            choice = types.SimpleNamespace(text="done")
+            choice = types.SimpleNamespace(text="done", finish_reason="stop")
             return [types.SimpleNamespace(outputs=[choice])]
 
     class _Queue:
@@ -440,7 +577,9 @@ def test_vllm_worker_stops_on_qwen_im_end(monkeypatch):
 
     assert captured["params"]["stop_token_ids"] == [248046]
     assert captured["llm"]["enable_prefix_caching"] is True
-    assert queue.payload == {"results": [{"sample_id": "sample-1", "text": "done", "error": None}]}
+    assert queue.payload == {
+        "results": [{"sample_id": "sample-1", "text": "done", "error": None, "truncated": False}]
+    }
 
 
 def test_prefetch_repo_context_fires_only_when_configured(monkeypatch):

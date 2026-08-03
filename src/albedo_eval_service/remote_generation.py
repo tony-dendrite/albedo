@@ -20,6 +20,7 @@ class GenerationResult:
     text: str
     error: str | None = None
     turns: list[dict[str, Any]] | None = None
+    truncated: bool = False
 
 
 class Generator(Protocol):
@@ -235,7 +236,9 @@ def _vllm_worker(
         params = SamplingParams(**params_kwargs)
 
         if request_queue is None:
-            queue.put(_generate_payload(llm, params, prompts or [], sample_ids or []))
+            queue.put(
+                _generate_payload(llm, params, prompts or [], sample_ids or [], max_new_tokens)
+            )
             return
 
         while True:
@@ -243,7 +246,9 @@ def _vllm_worker(
             if request is None:
                 return
             try:
-                payload = _generate_payload(llm, params, request["prompts"], request["sample_ids"])
+                payload = _generate_payload(
+                    llm, params, request["prompts"], request["sample_ids"], max_new_tokens
+                )
             except Exception as exc:
                 logger.exception(f"[remote-gen] vLLM request failed model={model} gpu_ids={gpu_ids}: {exc}")
                 payload = {"error": f"{type(exc).__name__}: {exc}"}
@@ -254,10 +259,24 @@ def _vllm_worker(
         queue.put({"error": f"{type(exc).__name__}: {exc}"})
 
 
-def _generate_payload(llm: Any, params: Any, prompts: list[str], sample_ids: list[str]) -> dict[str, Any]:
+def _generate_payload(
+    llm: Any,
+    params: Any,
+    prompts: list[str],
+    sample_ids: list[str],
+    token_limit: int,
+) -> dict[str, Any]:
     outputs = llm.generate(prompts, params)
     results = []
     for sample_id, output in zip(sample_ids, outputs, strict=True):
-        text = output.outputs[0].text if output.outputs else ""
-        results.append({"sample_id": sample_id, "text": text, "error": None})
+        completion = output.outputs[0] if output.outputs else None
+        text = completion.text if completion is not None else ""
+        truncated = (
+            completion is not None
+            and completion.finish_reason == "length"
+            and len(completion.token_ids or ()) >= token_limit
+        )
+        results.append(
+            {"sample_id": sample_id, "text": text, "error": None, "truncated": truncated}
+        )
     return {"results": results}
