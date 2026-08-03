@@ -21,7 +21,7 @@ class SanitySettings(BaseSettings):
     dataset_root: str = ""
     sample_count: int = 3
     trajectory_assistant_turns: int = 8
-    gen_max_tokens: int = 32768
+    gen_max_tokens: int = 16384
 
     skip_viability: bool = False
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from albedo_eval_service.observation_format import is_truncated
+
 _CODE_KEYWORDS = {
     "def","class","import","from","return","if","elif","else","for","while","try","except","finally","with","as","lambda",
     "yield","raise","assert","pass","del","global","nonlocal","and","or","not","in","is","async","await","print","self",
@@ -28,6 +30,12 @@ class CheckResult:
     reason: str = ""
 
 
+
+
+def check_truncated(text: str) -> CheckResult:
+    if is_truncated(text):
+        return CheckResult(False, "response exceeded the model response token limit")
+    return CheckResult(True)
 
 
 def check_empty(text: str) -> CheckResult:
@@ -72,6 +80,7 @@ def check_vocabulary(text: str, min_ratio: float = 0.3) -> CheckResult:
 
 def check_one(text: str, min_tokens: int = 5, max_repetition: float = 0.85, min_vocab_ratio: float = 0.3,) -> CheckResult:
     for result in [
+        check_truncated(text),
         check_empty(text),
         check_length(text, min_tokens),
         check_repetition(text, max_repetition),
