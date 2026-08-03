@@ -13,6 +13,7 @@ CONNECTIONS = int(os.environ.get("ALBEDO_FASTDL_CONNECTIONS", "8"))
 CHUNK_BYTES = int(os.environ.get("ALBEDO_FASTDL_CHUNK_MB", "10")) * 1024 * 1024
 FILE_RETRIES = int(os.environ.get("ALBEDO_FASTDL_FILE_RETRIES", "3"))
 RETRY_BACKOFF_S = float(os.environ.get("ALBEDO_FASTDL_RETRY_BACKOFF_S", "10"))
+REDIRECT_HOPS = int(os.environ.get("ALBEDO_FASTDL_REDIRECT_HOPS", "5"))
 
 _TMP_SUFFIX = ".fastdl"
 
@@ -98,21 +99,28 @@ def _sha256(path: Path, heartbeat: Path | None = None) -> str:
 
 def _resolve_signed_url(url: str, headers: dict[str, str]) -> str:
     import urllib.error
+    import urllib.parse
     import urllib.request
 
     class _NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, *args, **kwargs):
             return None
 
-    request = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.build_opener(_NoRedirect).open(request, timeout=30):
-            return url
-    except urllib.error.HTTPError as err:
-        location = err.headers.get("Location") if 300 <= err.code < 400 else None
-        if location is None:
-            raise
-        return location
+    opener = urllib.request.build_opener(_NoRedirect)
+    origin = urllib.parse.urlsplit(url).netloc
+    for _ in range(REDIRECT_HOPS):
+        request = urllib.request.Request(url, headers=headers)
+        try:
+            with opener.open(request, timeout=30):
+                return url
+        except urllib.error.HTTPError as err:
+            location = err.headers.get("Location") if 300 <= err.code < 400 else None
+            if location is None:
+                raise
+            url = urllib.parse.urljoin(url, location)
+            if urllib.parse.urlsplit(url).netloc != origin:
+                return url
+    return url
 
 
 def _fetch_one(url: str, tmp: Path, spec: ShardSpec, headers: dict[str, str]) -> None:
