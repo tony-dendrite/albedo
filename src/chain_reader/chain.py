@@ -54,8 +54,10 @@ def _decode_commitment_pair(pair: tuple[Any, Any]) -> tuple[str, list[tuple[int,
     return key, out
 
 
-def _iter_revealed(subtensor: Any, netuid: int) -> Iterator[tuple[str, int, str]]:
-    qm = subtensor.query_map(module="Commitments", name="RevealedCommitments", params=[netuid])
+def _iter_revealed(subtensor: Any, netuid: int, block: int | None = None) -> Iterator[tuple[str, int, str]]:
+    qm = subtensor.query_map(
+        module="Commitments", name="RevealedCommitments", params=[netuid], block=block
+    )
     for k, v in qm:
         hotkey = str(getattr(k, "value", k))
         data = getattr(v, "value", v)
@@ -154,13 +156,14 @@ _warned_no_uid: set[str] = set()
 
 
 def scan_commitments(subtensor: Any, netuid: int, start_block: int = 0,
-                     uids: dict[str, int] | None = None) -> list[Commit]:
+                     uids: dict[str, int] | None = None,
+                     at_block: int | None = None) -> list[Commit]:
     if uids is None:
         uids = _uid_map(subtensor, netuid)
 
     commits: list[Commit] = []
     n_total = n_skipped = 0
-    for hotkey, block, data in _iter_revealed(subtensor, netuid):
+    for hotkey, block, data in _iter_revealed(subtensor, netuid, at_block):
         n_total += 1
         if block < start_block:
             n_skipped += 1

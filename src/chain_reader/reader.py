@@ -35,18 +35,19 @@ async def run() -> None:
             try:
                 cur = await asyncio.to_thread(subtensor.get_current_block)
                 if cur != last_block:
-                    snapshot = await asyncio.to_thread(chain.metagraph_snapshot, subtensor, config.NETUID, cur)
+                    at_block = max(cur - config.SCAN_LAG_BLOCKS, 0)
+                    snapshot = await asyncio.to_thread(chain.metagraph_snapshot, subtensor, config.NETUID, at_block)
 
                     swaps = guard_swap.find_swaps(await guard_db.load_uid_state(pool), snapshot)
                     if swaps:
-                        swaps = await asyncio.to_thread(chain.confirm_swaps, subtensor, swaps, cur)
+                        swaps = await asyncio.to_thread(chain.confirm_swaps, subtensor, swaps, at_block)
                     if swaps:
                         n_ledgered = await guard_db.record_swaps(pool, swaps, config.NETUID, cur)
                         log.warning("hotkey swaps detected={} newly_ledgered={}", len(swaps), n_ledgered)
                     await guard_db.refresh_registration_blocks(pool, snapshot)
 
                     uid_map = {hotkey: uid for uid, hotkey, _reg in snapshot}
-                    commits = await asyncio.to_thread(chain.scan_commitments, subtensor, config.NETUID, config.START_BLOCK, uid_map)
+                    commits = await asyncio.to_thread(chain.scan_commitments, subtensor, config.NETUID, config.START_BLOCK, uid_map, at_block)
                     n_new = await db.insert_new_commits(pool, commits)
                     log.info("block={} scanned={} new={}", cur, len(commits), n_new)
                     last_block = cur
