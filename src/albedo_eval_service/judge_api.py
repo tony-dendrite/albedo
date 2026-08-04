@@ -180,7 +180,7 @@ def _simulation_provider(settings: JudgeSettings) -> dict[str, Any] | None:
     allowed = [p.strip() for p in settings.simulation_providers.split(",") if p.strip()]
     if not allowed:
         return None
-    return {"only": allowed}
+    return {"order": allowed, "allow_fallbacks": False}
 
 
 _COMPLETE_MARKER = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
@@ -216,14 +216,6 @@ class ReferenceTrajectoryService:
         reference, model, made_edit, _ = await self._generate_once(
             sample, eval_run_id, extra_turns=0
         )
-        if made_edit:
-            return reference, model, made_edit
-        try:
-            longer = await self._generate_once(sample, eval_run_id, extra_turns=2)
-        except QuestionScoringUnavailable:
-            return reference, model, made_edit
-        if longer[2]:
-            return longer[0], longer[1], longer[2]
         return reference, model, made_edit
 
     async def reroll_for_material(

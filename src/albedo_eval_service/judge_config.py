@@ -35,7 +35,7 @@ class JudgeSettings(BaseSettings):
     simulation_max_tokens: int = 4096
     simulation_loop_reruns: int = 0
     simulation_model: str = "deepseek/deepseek-v4-flash-0731"
-    simulation_providers: str = "cloudflare"
+    simulation_providers: str = "deepseek,cloudflare"
     answer_max_tokens: int = 20000
     question_prep_ttl_seconds: float = 14400.0
     repo_context_url: str = ""

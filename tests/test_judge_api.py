@@ -130,7 +130,7 @@ def test_observation_simulation_primary_single_shot_then_fallback():
     assert observation == _RC_OBSERVATION
     (primary_call,) = client.calls
     assert primary_call["model"] == "openai/gpt-5.6-luna"
-    assert primary_call["provider"] == {"only": ["openai"]}
+    assert primary_call["provider"] == {"order": ["openai"], "allow_fallbacks": False}
     assert primary_call["parse_retries"] == 1
     assert primary_call["retry_count"] == 0
     assert primary_call["max_tokens"] == 123

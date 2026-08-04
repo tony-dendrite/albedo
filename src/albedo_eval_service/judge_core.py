@@ -675,11 +675,12 @@ def filter_reference_leaks(questions: list[dict[str, str]]) -> list[dict[str, st
 _EDIT_BLOCK_RE = re.compile(r"```(?:bash|sh)?[ \t]*\n(.*?)```", re.DOTALL)
 _EDIT_COMMAND_RE = re.compile(
     r"sed\s+-i"
-    # a redirect counts only to a real path: `2>/dev/null` and `2>&1` are not edits
-    r"|(?<![0-9&])>>?\s*(?!/dev/)[\w./~-]"
-    r"|tee\s+(?!/dev/)[\w./~-]|cat\s*>(?!/dev/)"
+    # a write counts only to a repo path: `2>/dev/null`, `2>&1` and /tmp scratch files
+    # (reproduction scripts) are not edits
+    r"|(?<![0-9&])>>?\s*(?!/dev/|/tmp/)[\w./~-]"
+    r"|tee\s+(?!/dev/|/tmp/)[\w./~-]|cat\s*>>?\s*(?!/dev/|/tmp/)[\w./~-]"
     r"|str_replace|git\s+apply|patch\s+-p|applypatch"
-    r"|cp\s+[\w./-]+\s+[\w./-]+|mv\s+[\w./-]+\s+[\w./-]+",
+    r"|cp\s+[\w./-]+\s+(?!/dev/|/tmp/)[\w./-]+|mv\s+[\w./-]+\s+(?!/dev/|/tmp/)[\w./-]+",
 )
 
 

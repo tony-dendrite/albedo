@@ -183,6 +183,10 @@ def first_bash_block(assistant_output: str) -> str:
 _QUOTED_SPAN_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
 _CHAINED_RE = re.compile(r"&&|\|\||;|\n")
 _READ_HEAD_RE = re.compile(r"^\s*(?:cat|nl|head|tail|less|more|sed\s+-n)\b")
+_CD_PREFIX_RE = re.compile(r"^\s*cd\s+\S+\s*&&\s*")
+_ALWAYS_PRINTS_RE = re.compile(
+    r"^\s*(?:git\s+(?:log|show|status|branch)\b|ls\b|pwd\b|tree\b|which\s+\S|wc\s+\S|echo\s+\S)"
+)
 _WRITE_RE = re.compile(r"(?<![0-9<>])>>?[ \t]*\S|<<-?[ \t]*['\"]?\w")
 _MAY_BE_EMPTY_TAIL_RE = re.compile(
     r"\|[ \t]*(?:grep|rg|ag|ack|egrep|fgrep|awk|find|comm|diff|uniq|sort[ \t]+-u)\b"
@@ -201,10 +205,12 @@ def requires_output(command: str) -> bool:
     A read of an existing file prints its content; a read of a missing one prints an error. Writes,
     in-place edits and pipelines ending in a filter that can match nothing are excluded.
     """
-    text = (command or "").strip()
-    if not text or not _READ_HEAD_RE.match(text.split("&&")[0]):
+    text = _CD_PREFIX_RE.sub("", (command or "").strip())
+    if not text or _WRITE_RE.search(text) or _MAY_BE_EMPTY_TAIL_RE.search(text):
         return False
-    if _WRITE_RE.search(text) or _MAY_BE_EMPTY_TAIL_RE.search(text):
+    if _ALWAYS_PRINTS_RE.match(text):
+        return True
+    if not _READ_HEAD_RE.match(text.split("&&")[0]):
         return False
     return bool(re.search(r"[\w./-]*[./][\w./-]+|\s[\w-]+\.\w{1,6}\b", text.split("&&")[0]))
 
