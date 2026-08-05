@@ -39,7 +39,7 @@ PROMPT_READ_LABEL_CAP = 5
 PROMPT_NEGATIVE_CAP = 6
 LENGTH_BOUND_QUESTIONS = 2
 LENGTH_BOUND_MULTIPLIERS = ("TEN", "TWENTY")
-VALID_TAGS = ("explore", "verification", "action", "economy")
+VALID_TAGS = ("explore", "verification", "action", "continuity", "economy")
 
 
 def step_counts(n: int) -> dict[str, int]:
@@ -286,6 +286,125 @@ are the environment's replies):
 
 Return STRICT JSON only, exactly {n} questions, no prose and no code fences:
 {{"questions":[{{"text":"...","example_bad":"...","requires":"action|read|neutral","tag":"explore|verification|action|economy"}}]}}"""
+
+BEHAVIOR_K = 8
+
+BEHAVIOR_HEADS = {
+    "cold": "Opening trim: the conversation was cut near its start; competent work is exploration "
+    "that CONVERGES. A completed or verified fix must NOT be required by any question.",
+    "pre_edit": "At-the-fix trim: the conversation was cut just before the first edit; competent "
+    "work makes a grounded, well-aimed edit.",
+    "at_edit": "Verification trim: the conversation already contains the first edit; competent "
+    "work verifies it precisely and closes out.",
+}
+
+_WASTE_NOTE = """ WASTE MEANS ONLY: re-issuing a command whose output was already received, \
+verbatim retries of failed commands, or spending most turns on one repeated action type. \
+Re-reading a region AFTER changing it is verification, not waste. The existence, creation, \
+timing, or repetition of reproduction scripts is OUTSIDE this behaviour — never mention \
+reproduction at all."""
+
+BEHAVIOR_PARTS = {
+    "cold": [
+        """PRECISION READS: code is read with explicit line ranges, positioned by lines or \
+symbols earlier output showed; later reads zoom into regions earlier searches located; no \
+whole-file dumps of large files.""",
+        """ISSUE-ANCHORED NARROWING: searches use identifiers from the issue text; each \
+successive search narrows using what prior output showed; the faulty region is displayed \
+before any conclusion about it.""",
+        """CONVERGENCE AND ORIENTATION: repository state is checked with a git command; the \
+final output commits to one specific file or symbol as the target, with a stated reason.""",
+    ],
+    "pre_edit": [
+        """GROUNDED TARGETS: every modified file was displayed beforehand; every path and \
+symbol used appeared in prior context or observations; line numbers in edits are consistent \
+with displayed line numbers. Phrase each so a single invented target fails the question.""",
+        """ANCHORED EDIT: the exact region being changed is displayed shortly before the \
+modifying command; the edit targets the symbol the displayed code showed as faulty; claims \
+about earlier output are backed by visibly displayed content.""",
+        """NO WASTE: no command is re-issued after its output was already received; after a \
+failed command the next differs in tool, target, or arguments.""" + _WASTE_NOTE,
+    ],
+    "at_edit": [
+        """SCOPED TESTS AND DIFF: the repository's existing test suite is run scoped to the \
+changed area; the accumulated change is reviewed with git diff before finishing; the diff is \
+confined to files the issue implicates.""",
+        """TARGETED VERIFICATION: a ranged read verifies the changed region's exact content \
+after modification; each verification command is aimed at the changed symbol; closing claims \
+match what the last observations visibly show.""",
+        """NO WASTE: no command whose output was already received is repeated; most turns are \
+not one repeated action type.""" + _WASTE_NOTE,
+    ],
+}
+
+BEHAVIOR_GOLD = {
+    "cold": ["Does the candidate read code with explicit line ranges instead of whole-file dumps?",
+             "Is a ranged read positioned by a line or symbol a previous observation showed?",
+             "Does a search use identifiers taken from the issue text itself?",
+             "Does the candidate check repository state with a git command before concluding?"],
+    "pre_edit": ["Is every file the candidate modifies previously displayed in an observation?",
+                 "Is the exact region being changed displayed shortly before the modifying command?",
+                 "Does the candidate avoid re-issuing a command whose output it already received?"],
+    "at_edit": ["Does the candidate run the existing test suite scoped to the changed area?",
+                "Does the candidate review the accumulated change with git diff before finishing?",
+                "Does a ranged read verify the changed region's exact content after modification?"],
+}
+
+_BEHAVIOR_COMMON = """Each question: yes/no, at most 16 words, YES = the good behaviour is \
+present, judgeable from the trajectory text alone, one property per question. NEVER ask for: \
+writing or running a reproduction script, seeing a failure before editing, running code after \
+every edit, or generic diligence. Return STRICT JSON only: \
+{"questions":[{"text":"...","example_bad":"..."}]}"""
+
+_NO_TESTS_NOTE = ("\nNo test suite is visible in this sample's context — replace test-suite "
+                  "questions with additional diff-review or targeted-verification variants.")
+
+
+def build_behavior_messages(
+    *, phase: str, index: int, task: str, prefix_tail: str, k: int, tests_seen: bool,
+) -> list[dict[str, str]]:
+    part = BEHAVIOR_PARTS[phase][index]
+    if phase == "at_edit" and index == 0 and not tests_seen:
+        part += _NO_TESTS_NOTE
+    gold = "\n".join(f"  GOOD: {t}" for t in BEHAVIOR_GOLD[phase])
+    system = (
+        f"You write EXACTLY {k} yes/no checklist questions testing ONE behaviour of a "
+        f"coding-agent trajectory.\n\n{BEHAVIOR_HEADS[phase]}\n\nTHE BEHAVIOUR:\n{part}\n\n"
+        f"CANONICAL FORM — match this style:\n{gold}\n\nRULES:\n"
+        f"- INSTANTIATE: at least 3 of the questions must name a concrete file, symbol, or code "
+        f"fragment copied verbatim from the sample context below (never invented, never guessed "
+        f"from conventions); questions with no such target keep the generic form.\n"
+        f"- One property, one question: two questions a trajectory could only pass or fail "
+        f"together are duplicates — replace one with a different property of this behaviour.\n"
+        f"- Questions address the trajectory only; never reference these instructions.\n\n"
+        + _BEHAVIOR_COMMON
+    )
+    user = (f"SAMPLE CONTEXT:\n{(task or '')[:4000]}\n\nLAST CONTEXT TURNS:\n{prefix_tail}"
+            f"\n\nWrite the {k} questions.")
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+_BEHAVIOR_BANNED_RE = re.compile(
+    r"reproduc|\brepro\b|failure[^?]{0,40}before[^?]{0,20}(edit|fix|chang)"
+    r"|(run|execut)[^?]{0,25}after (each|every) edit", re.IGNORECASE)
+_BEHAVIOR_REPEAT_FORM_RE = re.compile(r"avoid|re-?issu|retr|repeat|already received", re.IGNORECASE)
+_BEHAVIOR_FILE_RE = re.compile(r"[\w/-]+\.(?:py|rs|go|js|ts|c|h|java|php|rb)\b")
+
+
+def filter_behavior_questions(
+    questions: list[dict[str, str]], context: str
+) -> list[dict[str, str]]:
+    """Deterministic backstop for prompt drift: drop banned-theme questions (repetition-form
+    mentions of a repro command are fine) and questions naming files absent from the context."""
+    kept = []
+    for question in questions:
+        text = question.get("text", "")
+        if _BEHAVIOR_BANNED_RE.search(text) and not _BEHAVIOR_REPEAT_FORM_RE.search(text):
+            continue
+        if any(f not in context for f in _BEHAVIOR_FILE_RE.findall(text)):
+            continue
+        kept.append(question)
+    return kept
 
 SECTION_DIRECTIVES: dict[str, str] = {
     "workflow": """SECTION 1 of 5 — WORKFLOW AND VERIFICATION BACKBONE. Write EXACTLY {k} \
@@ -634,8 +753,367 @@ def format_section_directives(n: int) -> str:
     return "\n\n".join(formatted)
 
 
+_TESTS_VISIBLE_RE = re.compile(
+    r"(^|[\s'\"/(=])tests?/|test_[a-z0-9_]+\.(py|go|rs|js|ts)|_test\.(go|rs|py)|pytest|cargo test",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def tests_visible(messages: list[dict[str, str]] | None) -> bool:
+    return any(_TESTS_VISIBLE_RE.search(m.get("content") or "") for m in messages or [])
+
+
+def sample_phase(messages: list[dict[str, str]] | None) -> str:
+    """Trim phase, inferred from the prefix the sampler produced: the cut lands near the start
+    (cold), just before the first edit (pre_edit), or just after it (at_edit)."""
+    turns = [m.get("content") or "" for m in messages or [] if m.get("role") == "assistant"]
+    if any(_edited_in_turn(t) for t in turns):
+        return "at_edit"
+    return "cold" if len(turns) <= 2 else "pre_edit"
+
+
+# Content-question rubric (origin: new_rubric_prompt_v3.py; tuned: aim 36-40, >=5
+# fix-property action questions when an edit is demonstrated, explore cap 25%).
+RUBRIC_MIN_QUESTIONS = 20
+RUBRIC_MAX_QUESTIONS = 40
+RUBRIC_NEGATIVE_CAP = 5
+RUBRIC_ECONOMY_CAP = 3
+RUBRIC_LENGTH_BOUNDS = 2
+RUBRIC_REFERENCE_TARGET = 0.9
+
+CONTENT_QUESTION_SYSTEM = """You write an evaluation checklist that decides which of two coding agents worked \
+better on ONE task. A judge answers your yes/no questions about a candidate TRAJECTORY: the original \
+conversation, then CANDIDATE OUTPUT blocks, then ENVIRONMENT OBSERVATION blocks between them. The \
+judge scores ONLY the CANDIDATE OUTPUT blocks.
+
+===== THE CONTRACT =====
+
+The user message contains a REFERENCE TRAJECTORY: a strong agent's own continuation of this task, \
+from the same starting point, under the same turn limit. It is PROOF OF WHAT IS ACHIEVABLE, not a \
+script. Two runs of the same strong agent share almost nothing of their surface — different \
+commands, files, order. What they share is the MILESTONES: the same defect found, the same \
+behaviour exercised, an equivalent fix, the fix checked. Your checklist measures milestones.
+
+Two requirements, both enforced by code after you finish:
+1. The reference must score {target:.0%}+ on your checklist — every question it fails is DELETED \
+downstream, so writing one wastes a slot.
+2. THE REROUTE TEST, per question: a second strong agent that never saw the reference, exploring \
+in its own order with its own commands, landing an equivalent fix — would it pass? Independent \
+reruns of this task vote on your questions and DELETE what they fail. A question only the \
+reference's particular walk can pass does not survive.
+
+===== STEP 1 — READ THE TASK, FOR COMPREHENSION ONLY =====
+
+Extract: what is broken, what "fixed" means, the declared workflow steps (quoted in the SCORED \
+WINDOW). Never mine the task for questions — "is the file named in the issue opened?" is the \
+assignment restated, and a symbol that appears only in the task text can never be quoted from the \
+reference, so no question about it can exist.
+
+===== STEP 2 — MILESTONES, AND THE VISIBILITY RULE =====
+
+Reduce the reference to task facts: THE DEFECT (its site, and its mechanism), THE REPRODUCTION, \
+THE CHANGE, THE VERIFICATION, THE CLOSE. Everything else — which tool, what was read on the way, \
+counts, reactions to observations, exploration order — is the WALK. The walk is not evidence; \
+walk questions die on the reroute test.
+
+Whether a milestone is DEMONSTRATED depends on its kind:
+- RUNS (reproduction, verification): demonstrated by the aimed command itself, whatever the \
+environment returned. Observations here are unreliable — commands that should fail report \
+success, and some observations come back empty. The visible command, aimed at the right thing, \
+is the demonstration.
+- CONTENT (a defect shown or named, an edit made): demonstrated only by what is VISIBLE — an \
+observation that actually displays it, the reference's own sentence that names it, or the edit \
+block itself. **An empty observation shows nothing: a "is X shown?" question anchored on it \
+fails everyone, including the reference.** Announcing or planning demonstrates nothing.
+
+===== STEP 3 — THE LEDGER =====
+
+One verdict per workflow step, about the reference's own blocks only:
+  "demonstrated"     — completed inside its blocks by the STEP 2 standard. Questions come from here.
+  "not_demonstrated" — not. **ZERO questions.** This gate OUTRANKS every count target and balance \
+rule below. Deriving is not demonstrating: "the PR implies", "so a correct fix would", "implying \
+the change must" are the signatures of a question you are FORBIDDEN to write.
+
+What the CONVERSATION PREFIX did is irrelevant to the verdict — record it as \
+"already_done_in_conversation"; a step the prefix already did is still fully askable when the \
+reference did its own work on it.
+
+===== THE PREFIX IS NOT THE CANDIDATE'S WORK =====
+
+Everything before the first CANDIDATE OUTPUT block was generated in advance. Apply this test to \
+every question: **would a candidate that produced NOTHING AT ALL pass it on the strength of the \
+conversation alone? If yes, DELETE IT.**
+  DEAD: "Has the faulty function been located?"                        (the prefix located it)
+  LIVE: "Does the change alter the branch that returns early on zero?" (only the candidate can)
+Where the prefix supplies a fact, bake it into the question as context — never as the thing scored.
+
+===== STEP 4 — THE ANSWER KEY =====
+
+Write the evidence FIRST, then the question from it. Every "evidence" field is the class prefix \
+plus **A VERBATIM QUOTE from a reference block** — paste the exact words of the command, the \
+observation line, or the reference's own sentence that makes the answer 1. Paraphrase is not \
+evidence; a checklist whose evidence does not quote is REGENERATED by code. No quote, no question.
+
+The class fixes the tag:
+
+  DIAGNOSIS (tag "explore") — exactly TWO askable properties per defect: THE SITE (the file or \
+function that is broken) and THE MECHANISM (why it misbehaves). Do not slice finer; fine-grained \
+symbol tours are the walk. Match the verb to the quote: quoted from a displayed region -> ask \
+"shown"; quoted from the reference's own sentence -> "named"; both available -> "shown or named".
+  REPRODUCTION / CHECK (tag "verification") — a run and what it targeted, never which tool, never \
+a required environment verdict.
+      BAD:  "Does the post-edit observation show every test passing?"
+      GOOD: "Is a check that exercises the changed code run after the last edit?"
+  CHANGE (tag "action") — the semantic property of an edit A REFERENCE BLOCK VISIBLY MADE (a guard \
+added, a formula reweighted, a call redirected, the fix confined to the defect region). What the \
+fix "must" be, however clearly implied, is not evidence.
+  ORDER (tag "continuity") — two milestones joined, both inside the candidate's own blocks: the \
+site diagnosed is the site edited; the failure is exercised before the edit; a run comes after \
+the edit it checks; the behaviour exercised before is re-exercised after. One join per adjacent \
+demonstrated pair.
+  ECONOMY (tag "economy") — the section below.
+
+BANNED ANCHORS — these fail the reroute test, always:
+  - which tool or command (grep vs find, flags, "recursive", "line-numbered")
+  - counts and sizes of the walk (occurrences, line counts, wc)
+  - reactions to observations ("after the empty git log...", "is the search retried/broadened")
+  - incidental reads: anything visited that is not the defect site, the repro material, or the \
+edited code
+  - exploration order ("the first command", "before reading X"). Milestone order is askable; walk \
+order never.
+
+And three quieter failures: TOO SPECIFIC for the quote (ask at the level the quoted words \
+support); ASSUMING A CHAIN (an edit quoted does not license a verification question — each \
+milestone needs its own quote); GENERIC HYGIENE ("is every path grounded?" has no quote behind \
+it). Grounding, precisely: a value is grounded when the conversation OR the candidate's own \
+observations showed it before use; only a value visible in neither is invented.
+
+===== HOW MANY =====
+
+Between {min_n} and {max_n}, aiming for 36-40. Downstream pruning deletes what independent reruns \
+fail, and AT LEAST TWENTY questions must survive it — so provision generously, and only through \
+milestone properties that a rerun would share:
+  CHANGE: each separate semantic property of the fix; the edit landing in the diagnosed function; \
+the fix confined to the defect region; each edited site when there are several.
+  REPRODUCTION: the failure exercised at all; what the pre-edit run targets; that it precedes the \
+first edit.
+  VERIFICATION: a run after the last edit; what it targets; that it exercises the exact changed \
+symbol or behaviour.
+  ORDER: one join per adjacent demonstrated pair (diagnosis->edit, repro->edit, edit->check, \
+repro->check).
+  DIAGNOSIS: the site, the mechanism — two, never more.
+Never provision by slicing diagnosis finer or with walk anchors; those die downstream and the \
+slots are wasted. Balance: at most 25% tagged "explore"; if an edit was demonstrated, write one "action" question \
+per semantic property of the fix — AT LEAST FIVE in total — and two "verification" where a check \
+was demonstrated; roughly one in ten \
+"economy". A reference that only located and diagnosed supports 8-14 questions, and that short \
+checklist is CORRECT — the {min_n} floor never licenses a question on a not_demonstrated step.
+
+===== NAMING, UNIQUENESS, PHRASING =====
+
+- Names of the defect site and edited code are fair game (every solver reaches them); names of \
+walk artifacts are banned with their anchors. When unsure, name the role: "the function that \
+computes confidence". NEVER reveal that a reference exists.
+- One property, one question. A goal and its tool are ONE question; "opens the file / finds the \
+line / changes the line" is ONE property. Of several questions about the same change, keep the \
+most concrete one. No file, symbol or command is the subject of more than two questions.
+- Target in the first three words; at most 14 words; one verifiable condition; phrased so YES = \
+GOOD; no question beginning with "If"; never address a turn by number (milestone anchors like \
+"before any edit" instead; a numbered TASK workflow step is allowed); self-contained — the judge \
+sees only your question and the trajectory; "tries", "mentions", "recognizes" earn nothing; at \
+most {negative_cap} questions in negative form.
+
+===== OUTPUT ECONOMY: ROUGHLY ONE IN TEN, AT MOST {economy_cap} =====
+
+A student that reaches the milestones in five times the teacher's text has not learned the \
+teacher's economy. Only here may the words words, characters, sentences, paragraph, quoting, \
+restating, re-printing, code block, chain-of-thought appear. Tag "economy", step 0.
+
+Write exactly {bound_n} LENGTH BOUNDS from REFERENCE MEASUREMENTS in the user message, never \
+estimated — the teacher's measured size plus TEN PERCENT, rounded up to the nearest ten, stated \
+as a literal number:
+  TOTAL:        "Is total CANDIDATE OUTPUT at most <1.1 x measured REFERENCE STEP words> words?"
+  LONGEST TURN: "Is the longest single output at most <1.1 x measured longest step> words?"
+The judge compares them to programmatic measurements of the candidate. The reference passes its \
+own bounds by construction. A third economy question, if any, is a structural waste check the \
+reference passes. Never tone or formatting.
+
+===== FIELDS AND OUTPUT =====
+
+Per question: "step" (workflow step, 0 for economy/cross-step), "evidence" ("CLASS: " + verbatim \
+quote), "text", "example_bad" (one concrete near-miss sentence: a competent-looking trajectory on \
+a DIFFERENT route that still fails this check), "tag".
+
+Before emitting, run the reroute test once over the whole list and delete what fails it.
+
+Output ONLY strict JSON, no prose, no code fences:
+{{"ledger":{{"steps":[{{"step":1,"text":"the step as the task words it","already_done_in_conversation"\
+:true,"demonstrated_by_reference":true,"verdict":"demonstrated|not_demonstrated"}}],"frontier_step":3,\
+"reference_finished":false,"focus":"one sentence naming what the checklist measures"}},\
+"questions":[{{"step":3,"evidence":"CLASS: verbatim quote from a reference block","text":"...",\
+"example_bad":"...","tag":"explore|action|continuity|verification|economy"}}]}}"""
+
+CONTENT_SCORED_WINDOW_BLOCK = """SCORED WINDOW — the hard boundaries. These are facts; the ledger is yours to \
+derive.
+
+DECLARED WORKFLOW of this task, quoted verbatim:
+{workflow_text}
+
+THE CONVERSATION ALREADY CONTAINS {prefix_turns} assistant turns, ending where the candidate takes \
+over. Everything those turns did is context, not credit.
+
+THE CANDIDATE GETS {candidate_turns} TURNS. Nothing before the first CANDIDATE OUTPUT block and \
+nothing after those turns can satisfy any question. The reference was generated from the same point \
+under the same limit, which is what makes its demonstrated milestones a fair standard.
+
+OBSERVATION FORMAT of this trajectory: {observation_format}
+Success and failure appear in observations as: {success_marker}
+Never write a question that depends on a signal this format does not carry."""
+
+CONTENT_QUESTION_USER = """TASK — the system prompt the agent operates under, and the conversation so far. \
+Read for comprehension only; do not mine it for questions:
+------
+{task}
+------
+
+REFERENCE TRAJECTORY — a strong agent's continuation from the same point under the same turn \
+limit. It proves what is achievable; its milestones are the standard, its route is not:
+------
+{reference}
+------
+
+{reference_measurements}
+
+{scored_window}
+
+Now:
+1. Reduce the reference to its milestones (defect site + mechanism, reproduction, change, \
+verification, close), applying the VISIBILITY RULE — runs are demonstrated by the aimed command, \
+content only by what an observation, the reference's own sentence, or an edit block visibly shows. \
+Discard the walk.
+2. Record the ledger. not_demonstrated steps get ZERO questions, whatever the count target.
+3. Write {min_n}-{max_n} questions, aiming 36-40 so that at least twenty survive downstream \
+pruning, every evidence field carrying its class prefix and a VERBATIM QUOTE from a reference \
+block. At most 25% explore (two diagnosis properties only: site, mechanism); one action question per \
+semantic property of the fix, at least five when an edit is demonstrated, and two verification \
+where demonstrated; one in ten economy with both bounds computed \
+from REFERENCE MEASUREMENTS plus ten percent.
+4. Run the reroute test over the list; delete what only the reference's own walk can pass.
+
+Return STRICT JSON only, no prose and no code fences:
+{{"ledger":{{"steps":[{{"step":1,"text":"...","already_done_in_conversation":true,\
+"demonstrated_by_reference":true,"verdict":"demonstrated|not_demonstrated"}}],"frontier_step":3,\
+"reference_finished":false,"focus":"..."}},"questions":[{{"step":3,"evidence":"CLASS: ...",\
+"text":"...","example_bad":"...","tag":"explore|action|continuity|verification|economy"}}]}}"""
+
+_WORKFLOW_HEAD_RE = re.compile(
+    r"(## Recommended Workflow|<PROBLEM_SOLVING_WORKFLOW>|Follow these steps to resolve the issue:"
+    r"|Phase 1\. READING)", re.IGNORECASE)
+
+_OBSERVATION_SUCCESS_MARKERS = {
+    "returncode": "<returncode>N</returncode> around <output>; failure = non-zero returncode or "
+    "error text in the output",
+    "swe_agent": "plain OBSERVATION text; failure is only visible as error text in it",
+    "openhands": "[Command finished with exit code N] trailers; failure = non-zero exit code or "
+    "error text",
+}
+
+# rubric tags carry no requires label; map them so the gate and label caps keep working
+RUBRIC_TAG_REQUIRES = {"action": "action", "continuity": "action", "verification": "action",
+                   "explore": "read", "economy": "neutral"}
+
+
+def _workflow_text(task: str) -> str:
+    m = _WORKFLOW_HEAD_RE.search(task or "")
+    if not m:
+        return "The task declares no numbered workflow."
+    tail = task[m.start():]
+    stop = re.search(r"\n## (?!Recommended)|</PROBLEM_SOLVING_WORKFLOW>|\n<(?!/)[A-Z_]+>", tail)
+    return tail[: stop.end() if stop else 1500][:1500]
+
+
+def _reference_measurements(reference: str) -> str:
+    steps = re.split(r"^REFERENCE STEP \d+:$", reference, flags=re.M)[1:]
+    words = [len(s.split("\nENVIRONMENT OBSERVATION:\n")[0].split()) for s in steps] or [0]
+    return (
+        "REFERENCE MEASUREMENTS (programmatic):\n"
+        f"- total REFERENCE STEP words: {sum(words)}\n"
+        f"- longest single REFERENCE STEP: {max(words)} words\n"
+        f"- REFERENCE STEP count: {len(words)}"
+    )
+
+
+def content_question_schema() -> dict[str, Any]:
+    step = {
+        "type": "object",
+        "properties": {
+            "step": {"type": "integer"}, "text": {"type": "string"},
+            "already_done_in_conversation": {"type": "boolean"},
+            "demonstrated_by_reference": {"type": "boolean"},
+            "verdict": {"type": "string", "enum": ["demonstrated", "not_demonstrated"]},
+        },
+        "required": ["step", "text", "already_done_in_conversation",
+                     "demonstrated_by_reference", "verdict"],
+        "additionalProperties": False,
+    }
+    question = {
+        "type": "object",
+        "properties": {
+            "step": {"type": "integer"}, "evidence": {"type": "string"},
+            "text": {"type": "string"}, "example_bad": {"type": "string"},
+            "tag": {"type": "string", "enum": list(VALID_TAGS)},
+        },
+        "required": ["step", "evidence", "text", "example_bad", "tag"],
+        "additionalProperties": False,
+    }
+    return {
+        "type": "object",
+        "properties": {
+            "ledger": {
+                "type": "object",
+                "properties": {
+                    "steps": {"type": "array", "items": step},
+                    "frontier_step": {"type": "integer"},
+                    "reference_finished": {"type": "boolean"},
+                    "focus": {"type": "string"},
+                },
+                "required": ["steps", "frontier_step", "reference_finished", "focus"],
+                "additionalProperties": False,
+            },
+            "questions": {
+                # the prompt itself allows 8-14 when the reference only diagnosed
+                "type": "array", "minItems": 8, "maxItems": RUBRIC_MAX_QUESTIONS,
+                "items": question,
+            },
+        },
+        "required": ["ledger", "questions"],
+        "additionalProperties": False,
+    }
+
+
+def build_content_question_messages(
+    *, task: str, reference: str, fmt: str, prefix_turns: int, candidate_turns: int,
+) -> list[dict[str, str]]:
+    system = CONTENT_QUESTION_SYSTEM.format(
+        target=RUBRIC_REFERENCE_TARGET, min_n=RUBRIC_MIN_QUESTIONS, max_n=RUBRIC_MAX_QUESTIONS,
+        negative_cap=RUBRIC_NEGATIVE_CAP, economy_cap=RUBRIC_ECONOMY_CAP,
+        bound_n=RUBRIC_LENGTH_BOUNDS,
+    )
+    window = CONTENT_SCORED_WINDOW_BLOCK.format(
+        workflow_text=_workflow_text(task), prefix_turns=prefix_turns,
+        candidate_turns=candidate_turns, observation_format=fmt,
+        success_marker=_OBSERVATION_SUCCESS_MARKERS.get(fmt, _OBSERVATION_SUCCESS_MARKERS["returncode"]),
+    )
+    user = CONTENT_QUESTION_USER.format(
+        task=task.rstrip(), reference=reference.rstrip(), min_n=RUBRIC_MIN_QUESTIONS,
+        max_n=RUBRIC_MAX_QUESTIONS, reference_measurements=_reference_measurements(reference),
+        scored_window=window,
+    )
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
 def build_question_messages(
-    *, task: str, n: int, reference: str | None = None, reference_made_edit: bool | None = None
+    *, task: str, n: int, reference: str | None = None, reference_made_edit: bool | None = None,
 ) -> list[dict[str, str]]:
     section = format_section_directives(n)
     if reference is None:
@@ -675,11 +1153,12 @@ def filter_reference_leaks(questions: list[dict[str, str]]) -> list[dict[str, st
 _EDIT_BLOCK_RE = re.compile(r"```(?:bash|sh)?[ \t]*\n(.*?)```", re.DOTALL)
 _EDIT_COMMAND_RE = re.compile(
     r"sed\s+-i"
-    # a write counts only to a repo path: `2>/dev/null`, `2>&1` and /tmp scratch files
-    # (reproduction scripts) are not edits
-    r"|(?<![0-9&])>>?\s*(?!/dev/|/tmp/)[\w./~-]"
+    # a write counts only to a repo path: `2>/dev/null`, `2>&1`, /tmp scratch files
+    # (reproduction scripts), `->`/`=>` arrows and `x > 5` comparisons are not edits —
+    # the redirect target must look like a path (contain . or /)
+    r"|(?<![-=0-9&])>>?\s*(?!/dev/|/tmp/)(?=[\w.~/-]*[./])[\w./~-]"
     r"|tee\s+(?!/dev/|/tmp/)[\w./~-]|cat\s*>>?\s*(?!/dev/|/tmp/)[\w./~-]"
-    r"|str_replace|git\s+apply|patch\s+-p|applypatch"
+    r"|str_replace|git\s+apply|patch\s+-p|applypatch|>{7}\s*REPLACE"
     r"|cp\s+[\w./-]+\s+(?!/dev/|/tmp/)[\w./-]+|mv\s+[\w./-]+\s+(?!/dev/|/tmp/)[\w./-]+",
 )
 
@@ -1173,6 +1652,8 @@ def parse_questions(raw: str, n: int) -> tuple[list[dict[str, str]], bool]:
                 "category": classify_question_category(text),
                 "requires": str(item.get("requires", "neutral")),
                 "tag": t if (t := str(item.get("tag", "")).strip().lower()) in VALID_TAGS else "",
+                **({"evidence": e} if (e := str(item.get("evidence", "")).strip()) else {}),
+                **({"step": item["step"]} if isinstance(item.get("step"), int) else {}),
             })
     out = out[:n]
     for position, question in enumerate(out, start=1):
@@ -1204,11 +1685,6 @@ def parse_answers(
 
 
 
-REQUIRES_WEIGHTS = {
-    "action": float(_os.environ.get("ALBEDO_EXP_W_ACTION", "2.0")),
-    "read": float(_os.environ.get("ALBEDO_EXP_W_READ", "0.75")),
-    "neutral": float(_os.environ.get("ALBEDO_EXP_W_NEUTRAL", "0.25")),
-}
 SIZE_FACTOR_FLOOR = float(_os.environ.get("ALBEDO_EXP_SIZE_FLOOR", "0.6"))
 
 
@@ -1217,11 +1693,7 @@ def judge_yes_rate(
 ) -> float | None:
     if questions:
         size_ids = {q.get("id") for q in questions if q.get("category") == "size"}
-        weight_by_id = {
-            q.get("id"): REQUIRES_WEIGHTS.get(q.get("requires", "neutral"), 1.0)
-            for q in questions
-        }
-        num = den = 0.0
+        bits: list[int] = []
         size_num = size_den = 0.0
         for qid, value in answers.items():
             if value not in _ANSWER_TO_BIT:
@@ -1230,12 +1702,10 @@ def judge_yes_rate(
                 size_num += _ANSWER_TO_BIT[value]
                 size_den += 1
                 continue
-            w = weight_by_id.get(qid, 1.0)
-            num += w * _ANSWER_TO_BIT[value]
-            den += w
-        if not den:
+            bits.append(_ANSWER_TO_BIT[value])
+        if not bits:
             return None
-        rate = num / den
+        rate = mean(bits)
         if size_den:
             rate *= SIZE_FACTOR_FLOOR + (1 - SIZE_FACTOR_FLOOR) * (size_num / size_den)
         return round(rate, 6)

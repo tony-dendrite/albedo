@@ -50,8 +50,19 @@ from .judge_core import (
     question_floor,
     question_schema,
     response_score,
+    sample_phase,
+    tests_visible,
+    build_content_question_messages,
+    content_question_schema,
+    build_behavior_messages,
+    filter_behavior_questions,
+    BEHAVIOR_K,
+    RUBRIC_MIN_QUESTIONS,
+    RUBRIC_MAX_QUESTIONS,
+    RUBRIC_TAG_REQUIRES,
 )
 from .judge_openrouter import OpenRouterJudgeClient
+from .remote_generation import format_scored_trajectory
 from .notifications import EvalErrorNotification, notify_eval_error
 
 
@@ -234,7 +245,8 @@ class ReferenceTrajectoryService:
                 "reference_reroll_failed sample_id={} error={}", sample.sample_id, exc
             )
             return None
-        if steps < 2 or model == exclude_model:
+        pool = [m.strip() for m in self.settings.sota_models.split(",") if m.strip()]
+        if steps < 2 or (model == exclude_model and len(pool) > 1):
             return None
         logger.info(
             "reference_reroll_used sample_id={} replaced={} with={}/{}steps window={}",
@@ -311,6 +323,28 @@ class ReferenceTrajectoryService:
         return reference, model, made_edit, len(generated)
 
 
+
+# Questions the reference itself fails are deleted; too few survivors means the
+# reference/checklist pair is unusable and the reference is rerolled.
+PRUNE_MIN_SURVIVORS = 8
+_REF_STEP_SPLIT_RE = re.compile(r"^REFERENCE STEP \d+:$", re.M)
+
+
+def _reference_document(messages: list[dict[str, str]], reference: str) -> str:
+    """Render the reference trajectory as a judgeable candidate document."""
+    turns: list[dict[str, Any]] = [
+        {"role": m.get("role", "user"), "content": m.get("content", "")}
+        for m in messages if m.get("content")
+    ]
+    for segment in _REF_STEP_SPLIT_RE.split(reference)[1:]:
+        body, _, observation = segment.partition("\nENVIRONMENT OBSERVATION:\n")
+        turns.append({"role": "assistant", "content": body.strip(), "score_target": True})
+        if observation.strip():
+            turns.append({"role": "user", "content": observation.strip(),
+                          "environment_observation": True})
+    return format_scored_trajectory(turns)
+
+
 class QuestionService:
 
     def __init__(
@@ -378,55 +412,148 @@ class QuestionService:
         reference_made_edit: bool,
     ) -> QuestionPrepResult:
         n = self.settings.num_questions
-
-        def _accept(raw: str) -> bool:
-            questions, ok = parse_questions(raw, n)
-            if reference is not None:
-                questions = filter_reference_leaks(questions)
-                questions, _ = enforce_question_labels(
-                    questions, reference_made_edit=reference_made_edit
-                )
-            return ok and len(questions) >= question_floor(n)
-
-        response = await self.client.complete(
-            purpose="questions",
-            model=self.settings.evaluator_model,
-            messages=build_question_messages(
-                task=sample.prompt, n=n, reference=reference,
-                reference_made_edit=reference_made_edit if reference is not None else None,
-            ),
-            temperature=self.settings.temperature,
-            max_tokens=self.settings.question_max_tokens,
-            provider=_evaluator_provider(self.settings),
-            response_schema=question_schema(n),
-            accept=_accept,
+        prefix = getattr(sample, "messages", None)
+        phase = sample_phase(prefix)
+        # content questions are pruned against the reference below; behaviour questions
+        # are calibrated by the measured model deltas instead and skip pruning
+        use_rubric = reference is not None and n >= RUBRIC_MIN_QUESTIONS
+        do_behavior = n >= 3 * BEHAVIOR_K
+        n_generic = RUBRIC_MAX_QUESTIONS if use_rubric else n
+        generic_floor = 6 if use_rubric else question_floor(n_generic)
+        prefix_tail = "\n".join(
+            f"[{m.get('role')}] {(m.get('content') or '')[:800]}" for m in (prefix or [])[-3:]
         )
-        if response.error:
-            raise QuestionScoringUnavailable(response.error)
-        questions, ok = parse_questions(response.raw, n)
+        context_text = (sample.prompt or "") + "\n" + prefix_tail
+
+        def _content_call():
+            def _accept(raw: str) -> bool:
+                questions, ok = parse_questions(raw, n_generic)
+                if reference is not None:
+                    questions = filter_reference_leaks(questions)
+                return (len(questions) >= generic_floor) if use_rubric else (
+                    ok and len(questions) >= generic_floor
+                )
+
+            if use_rubric:
+                messages = build_content_question_messages(
+                    task=sample.prompt, reference=reference,
+                    fmt=detect_format(sample.sample_id, prefix),
+                    prefix_turns=sum(1 for m in prefix or [] if m.get("role") == "assistant"),
+                    candidate_turns=self.settings.sota_trajectory_turns,
+                )
+            else:
+                messages = build_question_messages(
+                    task=sample.prompt, n=n_generic, reference=reference,
+                    reference_made_edit=reference_made_edit if reference is not None else None,
+                )
+            return self.client.complete(
+                purpose="questions", model=self.settings.evaluator_model, messages=messages,
+                temperature=self.settings.temperature,
+                max_tokens=self.settings.question_max_tokens,
+                provider=_evaluator_provider(self.settings),
+                response_schema=content_question_schema() if use_rubric else question_schema(n_generic),
+                accept=_accept,
+            )
+
+        def _behavior_call(index: int):
+            return self.client.complete(
+                purpose="questions", model=self.settings.evaluator_model,
+                messages=build_behavior_messages(
+                    phase=phase, index=index, task=sample.prompt, prefix_tail=prefix_tail,
+                    k=BEHAVIOR_K, tests_seen=tests_visible(prefix),
+                ),
+                temperature=self.settings.temperature,
+                max_tokens=self.settings.question_max_tokens,
+                provider=_evaluator_provider(self.settings),
+                response_schema=question_schema(BEHAVIOR_K),
+                accept=lambda raw: len(parse_questions(raw, BEHAVIOR_K)[0]) >= 5,
+            )
+
+        calls = [_content_call()] + ([_behavior_call(i) for i in range(3)] if do_behavior else [])
+        responses = await asyncio.gather(*calls)
+        response = responses[0]
+        for r in responses:
+            if r.error:
+                raise QuestionScoringUnavailable(r.error)
+        content_qs, ok = parse_questions(responses[0].raw, n_generic)
+        if use_rubric:
+            ok = len(content_qs) >= generic_floor
+            for q in content_qs:
+                q["requires"] = RUBRIC_TAG_REQUIRES.get(q.get("tag"), q.get("requires") or "neutral")
         drops: dict[str, int] = {}
         if reference is not None:
-            questions = filter_reference_leaks(questions)
-            questions, drops = enforce_question_labels(
-                questions, reference_made_edit=reference_made_edit
+            content_qs = filter_reference_leaks(content_qs)
+            content_qs, drops = enforce_question_labels(
+                content_qs, reference_made_edit=reference_made_edit
             )
-        if not ok or len(questions) < question_floor(n):
+        if not ok or len(content_qs) < generic_floor:
             raise QuestionScoringUnavailable(
-                f"evaluator returned {len(questions)}/{n} well-formed questions"
+                f"evaluator returned {len(content_qs)}/{generic_floor}+ well-formed questions"
             )
+        pruned_info: dict[str, object] = {}
+        if reference is not None:
+            try:
+                kept_qs, self_rate = await self._prune_against_reference(
+                    sample, reference, content_qs
+                )
+            except Exception as exc:
+                logger.warning(
+                    "reference_prune_failed sample_id={} error={} keeping_unpruned",
+                    sample.sample_id, f"{type(exc).__name__}: {exc}",
+                )
+            else:
+                prune_floor = min(PRUNE_MIN_SURVIVORS, max(4, len(content_qs) // 2))
+                if len(kept_qs) < prune_floor:
+                    raise QuestionScoringUnavailable(
+                        f"reference pruning left {len(kept_qs)}/{len(content_qs)} questions"
+                    )
+                pruned_info = {"reference_self_score": self_rate,
+                               "pruned_out": len(content_qs) - len(kept_qs)}
+                content_qs = kept_qs
+        behavior_qs: list[dict[str, str]] = []
+        for r in responses[1:]:
+            qs, _ = parse_questions(r.raw, BEHAVIOR_K)
+            behavior_qs.extend(qs)
+        behavior_qs = filter_behavior_questions(behavior_qs, context_text)
+        for q in behavior_qs:
+            q["requires"] = "action"
+        questions = behavior_qs + content_qs
+        for position, question in enumerate(questions, start=1):
+            question["id"] = f"q_{position:02d}"
         source: dict[str, object] = {
             "provider": response.provider,
             "model": self.settings.evaluator_model,
             "n_questions": len(questions),
             "question_mode": "sota_anchored" if reference is not None else "task_only",
+            "sample_phase": phase,
+            "behavior_questions_kept": len(behavior_qs),
             "reference_made_edit": reference_made_edit if reference is not None else None,
             "enforcement_drops": drops,
         }
         if reference_model:
             source["reference_model"] = reference_model
+        source.update(pruned_info)
         if reference is not None:
             source["reference_trajectory"] = reference
         return QuestionPrepResult(questions=questions, source=source)
+
+
+    async def _prune_against_reference(
+        self, sample: QuestionPrepSample | JudgeSample, reference: str,
+        questions: list[dict[str, str]],
+    ) -> tuple[list[dict[str, str]], float | None]:
+        document = _reference_document(getattr(sample, "messages", None) or [], reference)
+        _, recs = await _judge_side(
+            client=self.client, settings=self.settings, side="reference",
+            response_text=document, questions=questions,
+            judge_models=[self.settings.evaluator_model], reference_made_edit=None,
+        )
+        record = recs[0] if recs else {}
+        if not record.get("parse_ok"):
+            raise RuntimeError("reference judge returned unparseable answers")
+        answers = record.get("answers") or {}
+        kept = [q for q in questions if str(answers.get(q["id"], "1")) == "1"]
+        return kept, record.get("yes_rate")
 
 
 class RepoContextClient:
@@ -1082,6 +1209,8 @@ async def _score_samples(
         questions = prepared.questions
         gate_flag = prepared.source.get("reference_made_edit")
         gate_flag = bool(gate_flag) if gate_flag is not None else None
+        if prepared.source.get("pruned_out") is not None:
+            gate_flag = None  # pruning already calibrated the checklist to the reference
         async def _side(side: str, response_text: str):
             if is_truncated(response_text):
                 return _corrupted_side(
