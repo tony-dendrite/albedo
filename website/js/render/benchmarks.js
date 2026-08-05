@@ -2,15 +2,18 @@ import { el, mount } from "../dom.js";
 import { pct, fmtDateTime, fmtRelative } from "../format.js";
 import { modelRepo, kingTitleName } from "../model.js";
 
+const MODEL_SCORE_SUITE = "model_score";
+
 const BENCHMARK_LABELS = {
   tau2_airline: "Tau2 Airline",
   tau2_retail: "Tau2 Retail",
   tau2_telecom: "Tau2 Telecom",
   swe_rebench_2026_03: "SWE-rebench",
+  model_score: "SWE-bench Verified"
 };
 
-const MODEL_SCORE_SUITE = "model_score";
-const BENCHMARK_ORDER = ["tau2_airline", "tau2_retail", "tau2_telecom", "swe_rebench_2026_03"];
+// const BENCHMARK_ORDER = ["tau2_airline", "tau2_retail", "tau2_telecom", "swe_rebench_2026_03", MODEL_SCORE_SUITE];
+const BENCHMARK_ORDER = ["swe_rebench_2026_03", MODEL_SCORE_SUITE];
 
 const PAGE_SIZES = [5, 10, 25, 50];
 const ACTIVE_STATES = new Set(["QUEUED", "CLAIMED", "LOADING_MODEL", "RUNNING", "SCORING"]);
@@ -240,21 +243,24 @@ function svgEl(tag, attrs = {}, ...children) {
   return node;
 }
 
-function renderSpark(sorted, suite) {
+function renderSpark(sorted, suite, width = 360) {
   const points = [...sorted].reverse()
     .map(model => ({ label: modelLabel(model), score: suiteScores(model)[suite]?.score }))
     .filter(point => point.score != null);
-  const svg = svgEl("svg", { viewBox: "0 0 360 44", preserveAspectRatio: "none", role: "img" });
-  svg.append(svgEl("line", { x1: 6, y1: 36, x2: 354, y2: 36, stroke: "currentColor", "stroke-width": 1, opacity: 0.15 }));
+  const svg = svgEl("svg", { viewBox: `0 0 ${width} 44`, preserveAspectRatio: "xMidYMid", role: "img" });
+
+  // line below graph
+  svg.append(svgEl("line", { x1: 6, y1: 36, x2: width - 6, y2: 36, stroke: "currentColor", "stroke-width": 1, opacity: 0.15 }));
+
   if (!points.length) {
-    svg.append(svgEl("text", { x: 180, y: 27, "text-anchor": "middle", "font-size": 8, fill: "currentColor", opacity: 0.45 }, "no score"));
+    svg.append(svgEl("text", { x: width / 2, y: 27, "text-anchor": "middle", "font-size": 8, fill: "currentColor", opacity: 0.45 }, "no score"));
     return svg;
   }
   let min = Math.min(...points.map(point => point.score));
   let max = Math.max(...points.map(point => point.score));
   if (min === max) { min -= 0.005; max += 0.005; }
   const coords = points.map((point, i) => ({
-    x: points.length === 1 ? 180 : 6 + (i / (points.length - 1)) * 348,
+    x: points.length === 1 ? width / 2 : 6 + (i / (points.length - 1)) * (width - 12),
     y: 36 - ((point.score - min) / (max - min)) * 28,
     point,
   }));
@@ -287,6 +293,17 @@ function renderTile(model, suite, sorted, baseline, activity) {
   const runNote = running
     ? [runningLabel(running, activity.labelByRepo), progressNote(running)].filter(Boolean).join(" · ")
     : queued.length ? `${queued.length} pending` : "";
+
+  const chartSvgElement = el("div", { class: "bench-tile-chart" }, renderSpark(sorted, suite));
+  let chartWidth = 0;
+  const chartObserver = new ResizeObserver(entries => {
+    const w = Math.round(entries[0].contentRect.width);
+    if (!w || w === chartWidth) return;
+    chartWidth = w;
+    chartSvgElement.replaceChildren(renderSpark(sorted, suite, w));
+  });
+  chartObserver.observe(chartSvgElement);
+
   return el("article", {
     class: "bench-tile",
     "data-status": scored ? "completed" : "missing",
@@ -303,7 +320,7 @@ function renderTile(model, suite, sorted, baseline, activity) {
       el("div", { class: `bench-tile-change ${previous.cls}` },
         el("strong", {}, previous.delta),
         el("span", {}, "since last"))),
-    el("div", { class: "bench-tile-chart" }, renderSpark(sorted, suite)),
+    chartSvgElement,
     el("div", { class: "bench-tile-status" },
       el("span", {}, genesis.label),
       el("span", { class: `bench-delta ${genesis.cls}`, title: "delta vs genesis" }, genesis.delta)),

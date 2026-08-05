@@ -708,7 +708,7 @@ td.judge .judge-ver { color: var(--color-fg-4); font-size: 10px; }
 .bench-history-toggle:hover { border-color: var(--color-border-hover); color: var(--color-fg); }
 .bench-tile-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
 }
 .bench-tile {
