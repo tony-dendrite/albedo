@@ -20,7 +20,7 @@ def _client():
         endpoint_url=config.S3_ENDPOINT,
         aws_access_key_id=config.S3_ACCESS_KEY,
         aws_secret_access_key=config.S3_SECRET_KEY,
-        region_name="decentralized",
+        region_name="auto",
         config=Config(connect_timeout=15, read_timeout=60,
                       retries={"mode": "adaptive", "max_attempts": 3}),
     )
