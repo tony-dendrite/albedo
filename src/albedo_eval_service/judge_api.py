@@ -45,6 +45,7 @@ from .judge_core import (
     format_reference_trajectory,
     trajectory_made_edit,
     judge_yes_rate,
+    duplicate_economy_bounds,
     parse_answers,
     parse_questions,
     question_floor,
@@ -518,6 +519,13 @@ class QuestionService:
         for q in behavior_qs:
             q["requires"] = "action"
         questions = behavior_qs + content_qs
+        economy_duplicates: list[dict[str, str]] = []
+        if use_rubric and reference is not None:
+            try:
+                economy_duplicates = duplicate_economy_bounds(questions, reference)
+                questions = questions + economy_duplicates
+            except Exception:
+                economy_duplicates = []
         for position, question in enumerate(questions, start=1):
             question["id"] = f"q_{position:02d}"
         source: dict[str, object] = {
@@ -529,6 +537,7 @@ class QuestionService:
             "behavior_questions_kept": len(behavior_qs),
             "reference_made_edit": reference_made_edit if reference is not None else None,
             "enforcement_drops": drops,
+            "economy_duplicate_bounds_added": len(economy_duplicates),
         }
         if reference_model:
             source["reference_model"] = reference_model

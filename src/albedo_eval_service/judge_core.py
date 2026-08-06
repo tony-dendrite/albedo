@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os as _os
 import re
 from difflib import SequenceMatcher
@@ -651,7 +652,9 @@ candidate's outputs, replies, THOUGHTs, or responses use the "CANDIDATE OUTPUT w
 (the candidate's own scored blocks only); use the whole-document total only when a question \
 explicitly asks about the entire document. Read "under/below/shorter than/within/less than N" as \
 measured < N, "at most N" as measured <= N, and a hedged number ("roughly/about N") as exactly N. \
-Cite the measurement in the explanation (e.g. "measured 212 candidate-output words, under 250").
+Cite the measurement in the explanation (e.g. "measured 212 candidate-output words, under 250"), \
+then re-check that comparison before picking 1 or 0 — the answer must match the numbers you just \
+cited, not just their wording.
 
 For "explanation", give exactly ONE sentence citing the specific part of the trajectory — quote a \
 short fragment, or name the command/flag/text from the candidate outputs or observation — that \
@@ -711,10 +714,17 @@ def candidate_output_measure(text: str) -> dict[str, int]:
     if not blocks:
         blocks = [text]
     words = [len(b.split()) for b in blocks]
+    chars = [len(b) for b in blocks]
+    prose_words = [len(_FENCE_RE.sub("", b).split()) for b in blocks]
     return {
         "blocks": len(_CANDIDATE_BLOCK_RE.findall(text)),
         "total_words": sum(words),
         "max_words": max(words) if words else 0,
+        "total_chars": sum(chars),
+        "max_chars": max(chars) if chars else 0,
+        "total_prose_words": sum(prose_words),
+        "avg_words": round(sum(words) / len(blocks)) if blocks else 0,
+        "avg_chars": round(sum(chars) / len(blocks)) if blocks else 0,
     }
 
 
@@ -728,6 +738,12 @@ def measurements_block(text: str) -> str:
         f"the candidate's own outputs): {c['total_words']}\n"
         f"- longest single CANDIDATE OUTPUT: {c['max_words']} words "
         f"({c['blocks']} scored blocks)\n"
+        f"- CANDIDATE OUTPUT characters, all scored blocks combined: {c['total_chars']}\n"
+        f"- longest single CANDIDATE OUTPUT: {c['max_chars']} characters\n"
+        f"- CANDIDATE OUTPUT prose words, all scored blocks combined, excluding fenced code: "
+        f"{c['total_prose_words']}\n"
+        f"- average CANDIDATE OUTPUT words per turn: {c['avg_words']} ({c['blocks']} scored blocks)\n"
+        f"- average CANDIDATE OUTPUT characters per turn: {c['avg_chars']}\n"
         f"- total words of the whole document incl. context/observations: {m['total_words']}\n"
         f"- total characters: {m['total_chars']}\n"
         f"- fenced code blocks: {m['code_blocks']} (longest: {m['code_lines']} lines, "
@@ -777,8 +793,8 @@ def sample_phase(messages: list[dict[str, str]] | None) -> str:
 RUBRIC_MIN_QUESTIONS = 20
 RUBRIC_MAX_QUESTIONS = 40
 RUBRIC_NEGATIVE_CAP = 5
-RUBRIC_ECONOMY_CAP = 3
-RUBRIC_LENGTH_BOUNDS = 2
+RUBRIC_ECONOMY_CAP = 8
+RUBRIC_LENGTH_BOUNDS = 7
 RUBRIC_REFERENCE_TARGET = 0.9
 
 CONTENT_QUESTION_SYSTEM = """You write an evaluation checklist that decides which of two coding agents worked \
@@ -905,8 +921,8 @@ repro->check).
 Never provision by slicing diagnosis finer or with walk anchors; those die downstream and the \
 slots are wasted. Balance: at most 25% tagged "explore"; if an edit was demonstrated, write one "action" question \
 per semantic property of the fix — AT LEAST FIVE in total — and two "verification" where a check \
-was demonstrated; roughly one in ten \
-"economy". A reference that only located and diagnosed supports 8-14 questions, and that short \
+was demonstrated; exactly {bound_n} "economy" length bounds (plus at most one structural-waste \
+check). A reference that only located and diagnosed supports 8-14 questions, and that short \
 checklist is CORRECT — the {min_n} floor never licenses a question on a not_demonstrated step.
 
 ===== NAMING, UNIQUENESS, PHRASING =====
@@ -923,19 +939,29 @@ GOOD; no question beginning with "If"; never address a turn by number (milestone
 sees only your question and the trajectory; "tries", "mentions", "recognizes" earn nothing; at \
 most {negative_cap} questions in negative form.
 
-===== OUTPUT ECONOMY: ROUGHLY ONE IN TEN, AT MOST {economy_cap} =====
+===== OUTPUT ECONOMY: AT MOST {economy_cap} =====
 
 A student that reaches the milestones in five times the teacher's text has not learned the \
 teacher's economy. Only here may the words words, characters, sentences, paragraph, quoting, \
 restating, re-printing, code block, chain-of-thought appear. Tag "economy", step 0.
 
 Write exactly {bound_n} LENGTH BOUNDS from REFERENCE MEASUREMENTS in the user message, never \
-estimated — the teacher's measured size plus TEN PERCENT, rounded up to the nearest ten, stated \
+estimated — the teacher's measured size plus TWENTY PERCENT, rounded up to the nearest ten, stated \
 as a literal number:
-  TOTAL:        "Is total CANDIDATE OUTPUT at most <1.1 x measured REFERENCE STEP words> words?"
-  LONGEST TURN: "Is the longest single output at most <1.1 x measured longest step> words?"
+  TOTAL WORDS:   "Is total CANDIDATE OUTPUT at most <1.2 x measured REFERENCE STEP words> words?"
+  LONGEST WORDS: "Is the longest single output at most <1.2 x measured longest step words> words?"
+  TOTAL CHARS:   "Is total CANDIDATE OUTPUT at most <1.2 x measured REFERENCE STEP characters> \
+characters?"
+  LONGEST CHARS: "Is the longest single output at most <1.2 x measured longest step characters> \
+characters?"
+  PROSE WORDS:   "Is CANDIDATE OUTPUT prose, apart from code blocks, at most <1.2 x measured \
+REFERENCE STEP prose words> words?"
+  AVG WORDS:     "Is the average CANDIDATE OUTPUT per turn at most <1.2 x measured average \
+REFERENCE STEP words> words?"
+  AVG CHARS:     "Is the average CANDIDATE OUTPUT per turn at most <1.2 x measured average \
+REFERENCE STEP characters> characters?"
 The judge compares them to programmatic measurements of the candidate. The reference passes its \
-own bounds by construction. A third economy question, if any, is a structural waste check the \
+own bounds by construction. An eighth economy question, if any, is a structural waste check the \
 reference passes. Never tone or formatting.
 
 ===== FIELDS AND OUTPUT =====
@@ -996,8 +1022,8 @@ Discard the walk.
 pruning, every evidence field carrying its class prefix and a VERBATIM QUOTE from a reference \
 block. At most 25% explore (two diagnosis properties only: site, mechanism); one action question per \
 semantic property of the fix, at least five when an edit is demonstrated, and two verification \
-where demonstrated; one in ten economy with both bounds computed \
-from REFERENCE MEASUREMENTS plus ten percent.
+where demonstrated; exactly {bound_n} economy length bounds, all computed \
+from REFERENCE MEASUREMENTS plus twenty percent.
 4. Run the reroute test over the list; delete what only the reference's own walk can pass.
 
 Return STRICT JSON only, no prose and no code fences:
@@ -1034,13 +1060,90 @@ def _workflow_text(task: str) -> str:
 
 def _reference_measurements(reference: str) -> str:
     steps = re.split(r"^REFERENCE STEP \d+:$", reference, flags=re.M)[1:]
-    words = [len(s.split("\nENVIRONMENT OBSERVATION:\n")[0].split()) for s in steps] or [0]
+    bodies = [s.split("\nENVIRONMENT OBSERVATION:\n")[0].strip() for s in steps] or [""]
+    words = [len(b.split()) for b in bodies]
+    chars = [len(b) for b in bodies]
+    prose_words = [len(_FENCE_RE.sub("", b).split()) for b in bodies]
     return (
         "REFERENCE MEASUREMENTS (programmatic):\n"
         f"- total REFERENCE STEP words: {sum(words)}\n"
         f"- longest single REFERENCE STEP: {max(words)} words\n"
+        f"- total REFERENCE STEP characters: {sum(chars)}\n"
+        f"- longest single REFERENCE STEP: {max(chars)} characters\n"
+        f"- total REFERENCE STEP prose words (outside fenced code): {sum(prose_words)}\n"
+        f"- average REFERENCE STEP words: {round(sum(words) / len(bodies))}\n"
+        f"- average REFERENCE STEP characters: {round(sum(chars) / len(bodies))}\n"
         f"- REFERENCE STEP count: {len(words)}"
     )
+
+
+_ECONOMY_DUPLICATE_MULTIPLIER = 2.0
+
+
+def _reference_raw_measurements(reference: str) -> dict[str, int]:
+    """Same computation as _reference_measurements(), as raw numbers instead of formatted text -
+    used by duplicate_economy_bounds() to recompute a bound at a different multiplier without
+    reparsing the LLM's own generated question text."""
+    steps = re.split(r"^REFERENCE STEP \d+:$", reference, flags=re.M)[1:]
+    bodies = [s.split("\nENVIRONMENT OBSERVATION:\n")[0].strip() for s in steps] or [""]
+    words = [len(b.split()) for b in bodies]
+    chars = [len(b) for b in bodies]
+    prose_words = [len(_FENCE_RE.sub("", b).split()) for b in bodies]
+    return {
+        "total_words": sum(words),
+        "max_words": max(words),
+        "total_chars": sum(chars),
+        "max_chars": max(chars),
+        "total_prose_words": sum(prose_words),
+        "avg_words": round(sum(words) / len(bodies)),
+        "avg_chars": round(sum(chars) / len(bodies)),
+    }
+
+
+_ECONOMY_TEMPLATE_METRICS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("total_words", re.compile(r"^Is total CANDIDATE OUTPUT at most (\d[\d,]*) words\?$", re.IGNORECASE)),
+    ("max_words", re.compile(r"^Is the longest single output at most (\d[\d,]*) words\?$", re.IGNORECASE)),
+    ("total_chars", re.compile(
+        r"^Is total CANDIDATE OUTPUT at most (\d[\d,]*) characters\?$", re.IGNORECASE
+    )),
+    ("max_chars", re.compile(
+        r"^Is the longest single output at most (\d[\d,]*) characters\?$", re.IGNORECASE
+    )),
+    ("total_prose_words", re.compile(
+        r"^Is CANDIDATE OUTPUT prose, apart from code blocks, at most (\d[\d,]*) words\?$", re.IGNORECASE
+    )),
+    ("avg_words", re.compile(
+        r"^Is the average CANDIDATE OUTPUT per turn at most (\d[\d,]*) words\?$", re.IGNORECASE
+    )),
+    ("avg_chars", re.compile(
+        r"^Is the average CANDIDATE OUTPUT per turn at most (\d[\d,]*) characters\?$", re.IGNORECASE
+    )),
+)
+
+
+def duplicate_economy_bounds(
+    questions: list[dict[str, str]],
+    reference: str,
+    *,
+    multiplier: float = _ECONOMY_DUPLICATE_MULTIPLIER,
+) -> list[dict[str, str]]:
+    raw = _reference_raw_measurements(reference)
+    duplicates: list[dict[str, str]] = []
+    for question in questions:
+        if question.get("category") != "size":
+            continue
+        text = (question.get("text") or "").strip()
+        for metric, pattern in _ECONOMY_TEMPLATE_METRICS:
+            match = pattern.match(text)
+            if not match:
+                continue
+            new_bound = math.ceil(raw[metric] * multiplier / 10) * 10
+            start, end = match.span(1)
+            duplicate = dict(question)
+            duplicate["text"] = f"{text[:start]}{new_bound}{text[end:]}"
+            duplicates.append(duplicate)
+            break
+    return duplicates
 
 
 def content_question_schema() -> dict[str, Any]:
@@ -1107,7 +1210,7 @@ def build_content_question_messages(
     user = CONTENT_QUESTION_USER.format(
         task=task.rstrip(), reference=reference.rstrip(), min_n=RUBRIC_MIN_QUESTIONS,
         max_n=RUBRIC_MAX_QUESTIONS, reference_measurements=_reference_measurements(reference),
-        scored_window=window,
+        scored_window=window, bound_n=RUBRIC_LENGTH_BOUNDS,
     )
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
@@ -1552,7 +1655,7 @@ _MEASUREMENT_BOUND_RE = re.compile(
     r"|\b(?:words?|characters?|sentences?|lines)\b[^?]{0,40}\b\d{2,6}\b",
     re.IGNORECASE,
 )
-MEASUREMENT_QUESTION_LIMIT = 7
+MEASUREMENT_QUESTION_LIMIT = 8
 
 
 def is_measurement_bound_question(text: str) -> bool:
@@ -1685,30 +1788,9 @@ def parse_answers(
 
 
 
-SIZE_FACTOR_FLOOR = float(_os.environ.get("ALBEDO_EXP_SIZE_FLOOR", "0.6"))
-
-
 def judge_yes_rate(
     answers: dict[str, str | None], questions: list[dict[str, str]] | None = None
 ) -> float | None:
-    if questions:
-        size_ids = {q.get("id") for q in questions if q.get("category") == "size"}
-        bits: list[int] = []
-        size_num = size_den = 0.0
-        for qid, value in answers.items():
-            if value not in _ANSWER_TO_BIT:
-                continue
-            if qid in size_ids:
-                size_num += _ANSWER_TO_BIT[value]
-                size_den += 1
-                continue
-            bits.append(_ANSWER_TO_BIT[value])
-        if not bits:
-            return None
-        rate = mean(bits)
-        if size_den:
-            rate *= SIZE_FACTOR_FLOOR + (1 - SIZE_FACTOR_FLOOR) * (size_num / size_den)
-        return round(rate, 6)
     bits = [_ANSWER_TO_BIT[v] for v in answers.values() if v in _ANSWER_TO_BIT]
     return round(mean(bits), 6) if bits else None
 
