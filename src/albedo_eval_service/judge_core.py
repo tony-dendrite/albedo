@@ -1291,6 +1291,12 @@ _ACTION_VERB_RE = re.compile(r"\b(edit|modif|submit|propagat|verif|appl|patch|ch
 _COMPLETED_WORK_RE = re.compile(
     r"\b(submit|final output|after the edit|the edit .{0,30}(applied|made|verified))\b", re.IGNORECASE
 )
+
+READ_CAPS_BY_PHASE = {
+    "cold": 10,
+    "pre_edit": 7,
+    "at_edit": 5
+}
 READ_ONLY_QUESTION_CAP = 5
 
 
@@ -1303,11 +1309,13 @@ def trajectory_made_edit(turn_texts: list[str]) -> bool:
 
 
 def enforce_question_labels(
-    questions: list[dict[str, str]], *, reference_made_edit: bool
+    questions: list[dict[str, str]], *, phase: str, reference_made_edit: bool
 ) -> tuple[list[dict[str, str]], dict[str, int]]:
     kept: list[dict[str, str]] = []
     drops = {"read_cap": 0, "unfolded_avoid": 0, "no_edit_dead_weight": 0}
     read_kept = 0
+    read_only_question_cap = READ_CAPS_BY_PHASE.get(phase, READ_ONLY_QUESTION_CAP)
+
     for question in questions:
         text = question.get("text", "")
         requires = question.get("requires") or "neutral"
@@ -1321,7 +1329,7 @@ def enforce_question_labels(
             drops["no_edit_dead_weight"] += 1
             continue
         if requires == "read" and not is_size:
-            if read_kept >= READ_ONLY_QUESTION_CAP:
+            if read_kept >= read_only_question_cap:
                 drops["read_cap"] += 1
                 continue
             read_kept += 1

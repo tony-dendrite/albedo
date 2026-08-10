@@ -486,7 +486,7 @@ class QuestionService:
         if reference is not None:
             content_qs = filter_reference_leaks(content_qs)
             content_qs, drops = enforce_question_labels(
-                content_qs, reference_made_edit=reference_made_edit
+                content_qs, phase=phase, reference_made_edit=reference_made_edit
             )
         if not ok or len(content_qs) < generic_floor:
             raise QuestionScoringUnavailable(
