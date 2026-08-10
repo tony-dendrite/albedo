@@ -275,6 +275,7 @@ class ReferenceTrajectoryService:
                 model=model,
                 messages=convo,
                 temperature=0.0,
+                eval_run_id=eval_run_id,
                 max_tokens=self.settings.sota_max_tokens,
                 provider=_evaluator_provider(self.settings)
                 if model == self.settings.evaluator_model
