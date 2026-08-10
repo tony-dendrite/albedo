@@ -9,6 +9,15 @@ from difflib import SequenceMatcher
 from statistics import mean
 from typing import Any
 
+from albedo_eval_service.observation_format import (
+    THINK_CLOSE_RE,
+    THINK_OPEN_RE,
+    THINK_PAIR_RE,
+    THINK_TAG_RE,
+    mask_fenced_spans,
+    unmask_fenced_spans,
+)
+
 CHALLENGER_WIN_MARGIN = 0.03
 QUESTION_FLOOR_FRACTION = 0.22
 GENERIC_HYGIENE_QUESTION_LIMIT = 3
@@ -1360,8 +1369,18 @@ def apply_measurement_gate(
     return gated
 
 
-_THINK_PAIR_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
-_STRAY_THINK_TAG_RE = re.compile(r"</?think>")
+NO_VISIBLE_OUTPUT = "[no visible output]"
+_COMMAND_FENCE_RE = re.compile(r"```(?:bash|sh|shell)[ \t]*\n", re.IGNORECASE)
+
+
+def _drop_unclosed_reasoning(text: str, fences: list[str]) -> str:
+    match = THINK_OPEN_RE.search(text)
+    if not match:
+        return text
+    tail = text[match.end():]
+    if _COMMAND_FENCE_RE.search(unmask_fenced_spans(tail, fences)):
+        return text[: match.start()] + tail
+    return text[: match.start()]
 
 
 def strip_leaked_reasoning(text: str) -> str:
@@ -1371,11 +1390,14 @@ def strip_leaked_reasoning(text: str) -> str:
     itself) in the generated text. A `THOUGHT:` before the tag is the mini-coder-rs corpus's own
     style and is real content, so only the stray tag is removed in that case.
     """
-    cleaned = _THINK_PAIR_RE.sub("", text or "")
-    if "</think>" in cleaned:
-        head, _, tail = cleaned.partition("</think>")
+    masked, fences = mask_fenced_spans(text or "")
+    cleaned = THINK_PAIR_RE.sub("", masked)
+    cleaned = _drop_unclosed_reasoning(cleaned, fences)
+    if THINK_CLOSE_RE.search(cleaned):
+        head, tail = THINK_CLOSE_RE.split(cleaned, 1)
         cleaned = head + tail if "THOUGHT:" in head else tail
-    return _STRAY_THINK_TAG_RE.sub("", cleaned).strip()
+    cleaned = THINK_TAG_RE.sub("", cleaned)
+    return unmask_fenced_spans(cleaned, fences).strip()
 
 
 def strip_candidate_reasoning(trajectory: str) -> str:
@@ -1389,7 +1411,9 @@ def strip_candidate_reasoning(trajectory: str) -> str:
         block, inner = match.group(0), match.group(1)
         start, end = match.start(1) - match.start(0), match.end(1) - match.start(0)
         stripped = strip_leaked_reasoning(inner)
-        return block[:start] + (stripped if stripped else inner) + block[end:]
+        if not stripped:
+            stripped = NO_VISIBLE_OUTPUT if inner.strip() else inner
+        return block[:start] + stripped + block[end:]
 
     return _CANDIDATE_BLOCK_RE.sub(_rewrite, trajectory or "")
 
