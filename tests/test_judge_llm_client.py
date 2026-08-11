@@ -266,3 +266,85 @@ async def _budget_across_evals():
     finally:
         await client.aclose()
     return hits
+
+async def _swap_content_transports(client, settings, hits, engy_body):
+    """OpenRouter answers 'ok'; engy answers 200 with `engy_body` (dict) verbatim."""
+    def make(tag):
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content.decode())
+            hits.append((tag, body["model"]))
+            if tag == "engy":
+                return httpx.Response(200, json=engy_body)
+            return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+        return handler
+
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(
+        base_url=settings.openrouter_base_url.rstrip("/"),
+        transport=httpx.MockTransport(make("openrouter")),
+    )
+    await client._engy.aclose()
+    client._engy = httpx.AsyncClient(
+        base_url=settings.engy_base_url.rstrip("/"),
+        transport=httpx.MockTransport(make("engy")),
+    )
+
+
+def test_engy_empty_200_counts_and_retries_on_openrouter():
+    """The miner-restart failure mode: 200 with no choices/usage."""
+    hits, result, client_errors = asyncio.run(_content_failure({}))
+    assert hits == [("engy", "deepseek-v4-flash-0731"),
+                    ("openrouter", "deepseek/deepseek-v4-flash-0731")]
+    assert result.error is None and result.raw == "ok"
+    assert client_errors == {"eval-1": 1}
+
+
+def test_engy_garbage_rejected_by_accept_counts_and_retries_on_openrouter():
+    garbage = {"choices": [{"message": {"content": "### assistant I think we should..."}}]}
+    hits, result, client_errors = asyncio.run(
+        _content_failure(garbage, accept=lambda raw: raw == "ok"))
+    assert hits == [("engy", "deepseek-v4-flash-0731"),
+                    ("openrouter", "deepseek/deepseek-v4-flash-0731")]
+    assert result.raw == "ok"
+    assert client_errors == {"eval-1": 1}
+
+
+async def _content_failure(engy_body, accept=None):
+    hits: list[tuple[str, str]] = []
+    settings, client = _engy_client(None)
+    await _swap_content_transports(client, settings, hits, engy_body)
+    try:
+        result = await client.complete(
+            model="deepseek/deepseek-v4-flash-0731", messages=[{"role": "user", "content": "x"}],
+            purpose="simulate", eval_run_id="eval-1", accept=accept,
+        )
+    finally:
+        await client.aclose()
+    return hits, result, dict(client._engy_errors)
+
+
+def test_content_failures_alone_exhaust_the_engy_budget():
+    hits = asyncio.run(_content_failures_exhaust())
+    # budget 2: calls 1-2 try engy (empty) and rescue on OR; calls 3-4 skip engy
+    assert [h[0] for h in hits] == [
+        "engy", "openrouter",
+        "engy", "openrouter",
+        "openrouter",
+        "openrouter",
+    ]
+
+
+async def _content_failures_exhaust():
+    hits: list[tuple[str, str]] = []
+    settings, client = _engy_client(None, engy_max_errors=2)
+    await _swap_content_transports(client, settings, hits, {})
+    try:
+        for _ in range(4):
+            await client.complete(
+                model="deepseek/deepseek-v4-flash-0731",
+                messages=[{"role": "user", "content": "x"}],
+                purpose="simulate", eval_run_id="eval-1",
+            )
+    finally:
+        await client.aclose()
+    return hits

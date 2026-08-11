@@ -149,8 +149,26 @@ class JudgeLLMClient:
                     retry_count=transport_budget,
                     eval_run_id=eval_run_id,
                 )
-                if last.error is None and (accept is None or accept(last.raw)):
+                if _usable(last, accept):
                     return last
+                if last.provider == "engy":
+                    self._engy_errors[eval_run_id] += 1
+                    logger.warning(
+                        f"[judge-llm] engy unusable content, error "
+                        f"{self._engy_errors[eval_run_id]}/{self.settings.engy_max_errors} "
+                        f"eval_run_id={eval_run_id} model={model} purpose={purpose}, "
+                        f"retrying this call on openrouter"
+                    )
+                    last = await self._score_with_retries(
+                        model=model, messages=messages, response_schema=response_schema,
+                        schema_name=schema_name, temperature=temperature,
+                        max_tokens=max_tokens, provider=provider,
+                        base_shift=parse_attempt * (transport_budget + 1),
+                        purpose=purpose, retry_count=transport_budget,
+                        eval_run_id=eval_run_id, force_openrouter=True,
+                    )
+                    if _usable(last, accept):
+                        return last
             return last
 
     async def _score_with_retries(
@@ -167,6 +185,7 @@ class JudgeLLMClient:
         purpose: str = "other",
         retry_count: int | None = None,
         eval_run_id: str = "",
+        force_openrouter: bool = False,
     ) -> JudgeRawResponse:
         transport_budget = self.settings.retry_count if retry_count is None else retry_count
         last_error = ""
@@ -183,6 +202,7 @@ class JudgeLLMClient:
                     provider_shift=base_shift + attempt,
                     purpose=purpose,
                     eval_run_id=eval_run_id,
+                    force_openrouter=force_openrouter,
                 )
             except Exception as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
@@ -212,8 +232,9 @@ class JudgeLLMClient:
         provider_shift: int = 0,
         purpose: str = "other",
         eval_run_id: str = "",
+        force_openrouter: bool = False,
     ) -> JudgeRawResponse:
-        on_engy = self._use_engy(purpose, model, eval_run_id)
+        on_engy = not force_openrouter and self._use_engy(purpose, model, eval_run_id)
         client = self._engy if on_engy else self._client
         provider_block = provider if provider is not None else JUDGE_PROVIDER_PINS.get(model, {})
         provider_block = _rotate_order(provider_block, provider_shift)
@@ -263,8 +284,21 @@ class JudgeLLMClient:
             f"cost={float(usage.get('cost') or 0.0):.8f}"
         )
         raw = _message_content(body.get("choices", []))
+        if on_engy and not raw.strip():
+            logger.warning(
+                f"[judge-llm] engy returned empty content eval_run_id={eval_run_id} "
+                f"model={model} body={str(body)[:200]}"
+            )
         provider = "engy" if on_engy else _provider_name(model)
         return JudgeRawResponse(model=model, provider=provider, raw=raw)
+
+
+def _usable(result: JudgeRawResponse, accept: Callable[[str], bool] | None) -> bool:
+    if result.error is not None:
+        return False
+    if result.provider == "engy" and not result.raw.strip():
+        return False
+    return accept is None or accept(result.raw)
 
 
 def _rotate_order(provider: dict[str, Any], shift: int) -> dict[str, Any]:
