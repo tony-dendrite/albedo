@@ -48,9 +48,7 @@ class JudgeSettings(BaseSettings):
     question_prep_ttl_seconds: float = 14400.0
     repo_context_url: str = ""
     repo_context_timeout_seconds: float = 20.0
-
     slack_error_webhook_url: str = ""
-
 
 @lru_cache
 def get_judge_settings() -> JudgeSettings:

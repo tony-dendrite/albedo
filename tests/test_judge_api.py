@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
+
 from albedo_eval_service.judge_api import (
     BASE_PROMPT,
     JudgeSample,
@@ -56,9 +58,20 @@ class FakeClient:
 
     async def score(self, *, model, messages, response_schema=None, schema_name="", max_tokens=None, provider=None, accept=None, purpose=""):
         ids = response_schema["properties"]["answers"]["items"]["properties"]["id"]["enum"]
-        answer = 1 if "CHAL" in messages[1]["content"] else 0
+        content = messages[1]["content"]
+        answer = 0 if "KING" in content and "CHAL" not in content else 1
         raw = json.dumps({"answers": [{"id": qid, "answer": answer, "explanation": "e"} for qid in ids]})
         return JudgeRawResponse(model=model, provider="fake", raw=raw)
+
+
+def _reference_backed_service(settings, fake):
+    from albedo_eval_service.judge_api import ReferenceTrajectoryService
+
+    simulator = ObservationSimulationService(settings, fake)
+    return QuestionService(settings, fake, ReferenceTrajectoryService(settings, fake, simulator))
+
+
+_MESSAGES = [{"role": "user", "content": "fix the bug"}]
 
 
 def test_evaluator_provider_is_always_fp8():
@@ -180,9 +193,9 @@ def test_observation_simulation_falls_back_on_invalid_format():
 
 
 def test_scoring_scores_both_sides_independently():
-    settings = JudgeSettings(num_questions=3)
-    fake = FakeClient(n_questions=3)
-    store = QuestionPrepStore(settings, QuestionService(settings, fake))
+    settings = JudgeSettings(num_questions=3, sota_trajectory_turns=1)
+    fake = FakeClient(n_questions=8)
+    store = QuestionPrepStore(settings, _reference_backed_service(settings, fake))
     request = ScoreBatchRequest(
         eval_run_id="run-1",
         batch_id="score-0001",
@@ -194,6 +207,7 @@ def test_scoring_scores_both_sides_independently():
                 prompt="task",
                 previous_king_output="KING answer",
                 challenger_output="CHAL answer",
+                messages=_MESSAGES,
             )
         ],
     )
@@ -270,12 +284,13 @@ class OneJudgeBrokenClient:
 
 
 def test_sample_unscored_if_a_judge_never_parses():
-    settings = JudgeSettings(num_questions=3)
-    fake = OneJudgeBrokenClient(n_questions=3)
-    store = QuestionPrepStore(settings, QuestionService(settings, fake))
+    settings = JudgeSettings(num_questions=3, sota_trajectory_turns=1)
+    fake = OneJudgeBrokenClient(n_questions=8)
+    store = QuestionPrepStore(settings, _reference_backed_service(settings, fake))
     request = ScoreBatchRequest(
         eval_run_id="r", batch_id="b", total_sample_count=1, judge_models=list(JUDGE_MODELS[:3]),
-        samples=[JudgeSample(sample_id="s1", prompt="task", previous_king_output="KING", challenger_output="CHAL")],
+        samples=[JudgeSample(sample_id="s1", prompt="task", previous_king_output="KING",
+                              challenger_output="CHAL", messages=_MESSAGES)],
     )
     records = asyncio.run(_score_samples(client=fake, request=request, settings=settings, prep_store=store))
     assert records[0]["scored"] is False
@@ -284,16 +299,18 @@ def test_sample_unscored_if_a_judge_never_parses():
 def test_truncated_side_scores_zero_without_calling_the_judge():
     class RecordingClient(FakeClient):
         def __init__(self):
-            super().__init__(n_questions=3)
+            super().__init__(n_questions=8)
             self.judged = []
 
         async def score(self, **kwargs):
-            self.judged.append(kwargs["messages"][1]["content"])
+            content = kwargs["messages"][1]["content"]
+            if "KING" in content or "CHAL" in content:
+                self.judged.append(content)
             return await super().score(**kwargs)
 
-    settings = JudgeSettings(num_questions=3)
+    settings = JudgeSettings(num_questions=3, sota_trajectory_turns=1)
     fake = RecordingClient()
-    store = QuestionPrepStore(settings, QuestionService(settings, fake))
+    store = QuestionPrepStore(settings, _reference_backed_service(settings, fake))
     request = ScoreBatchRequest(
         eval_run_id="r", batch_id="b", total_sample_count=1, judge_models=list(JUDGE_MODELS[:1]),
         samples=[
@@ -301,6 +318,7 @@ def test_truncated_side_scores_zero_without_calling_the_judge():
                 sample_id="s1", prompt="task",
                 previous_king_output="KING",
                 challenger_output=f"CANDIDATE OUTPUT 1:\n{truncation_notice(16384)}",
+                messages=_MESSAGES,
             )
         ],
     )
@@ -325,7 +343,7 @@ def test_truncated_side_scores_zero_without_calling_the_judge():
 def test_scoring_regenerates_questions_when_async_prep_failed():
     class PrepFailsOnceClient(FakeClient):
         def __init__(self):
-            super().__init__(n_questions=3)
+            super().__init__(n_questions=8)
             self.complete_calls = 0
 
         async def complete(self, **kwargs):
@@ -334,9 +352,9 @@ def test_scoring_regenerates_questions_when_async_prep_failed():
                 raise RuntimeError("prep broke")
             return await super().complete(**kwargs)
 
-    settings = JudgeSettings(num_questions=3)
+    settings = JudgeSettings(num_questions=3, sota_trajectory_turns=1)
     fake = PrepFailsOnceClient()
-    store = QuestionPrepStore(settings, QuestionService(settings, fake))
+    store = QuestionPrepStore(settings, _reference_backed_service(settings, fake))
 
     async def run():
         prep_id = store.start(
@@ -351,6 +369,7 @@ def test_scoring_regenerates_questions_when_async_prep_failed():
                             prompt="task",
                             previous_king_output="",
                             challenger_output="",
+                            messages=_MESSAGES,
                         )
                     ],
                 },
@@ -368,6 +387,7 @@ def test_scoring_regenerates_questions_when_async_prep_failed():
                     prompt="task",
                     previous_king_output="KING",
                     challenger_output="CHAL",
+                    messages=_MESSAGES,
                 )
             ],
         )
@@ -378,7 +398,7 @@ def test_scoring_regenerates_questions_when_async_prep_failed():
     records = asyncio.run(run())
 
     assert records[0]["scored"] is True
-    assert fake.complete_calls == 2
+    assert fake.complete_calls == 4
 
 
 class _AnchorFakeClient:
@@ -442,8 +462,8 @@ def test_prepare_anchors_on_reference_and_filters_leaks():
     assert all("the reference" not in q["text"].casefold() for q in result.questions)
 
 
-def test_prepare_falls_back_to_task_only_when_reference_fails():
-    from albedo_eval_service.judge_api import QuestionPrepSample
+def test_prepare_raises_when_reference_generation_and_reroll_both_fail():
+    from albedo_eval_service.judge_api import QuestionPrepSample, QuestionScoringUnavailable
 
     fake = _AnchorFakeClient(fail_reference=True)
     service = _anchor_service(fake)
@@ -451,18 +471,20 @@ def test_prepare_falls_back_to_task_only_when_reference_fails():
         sample_id="s:1:1", prompt="TASK",
         messages=[{"role": "user", "content": "fix"}], assistant_turns=2,
     )
-    result = asyncio.run(service.prepare(sample, eval_run_id="run-1"))
-    assert result.source["question_mode"] == "task_only"
+    with pytest.raises(QuestionScoringUnavailable):
+        asyncio.run(service.prepare(sample, eval_run_id="run-1"))
     assert not fake.saw_reference_prompt
 
 
-def test_prepare_without_messages_stays_task_only():
+def test_prepare_raises_when_sample_has_no_messages():
+    from albedo_eval_service.judge_api import QuestionScoringUnavailable
+
     fake = _AnchorFakeClient()
     service = _anchor_service(fake)
-    result = asyncio.run(service.prepare(JudgeSample(
-        sample_id="s:1:1", prompt="TASK", previous_king_output="k", challenger_output="c",
-    )))
-    assert result.source["question_mode"] == "task_only"
+    with pytest.raises(QuestionScoringUnavailable):
+        asyncio.run(service.prepare(JudgeSample(
+            sample_id="s:1:1", prompt="TASK", previous_king_output="k", challenger_output="c",
+        )))
     assert not fake.saw_reference_prompt
 
 

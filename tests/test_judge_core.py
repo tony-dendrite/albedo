@@ -10,7 +10,6 @@ from albedo_eval_service.judge_core import (
     NEGATIVE_QUESTION_LIMIT,
     aggregate_scores,
     build_judge_messages,
-    build_question_messages,
     challenger_beats_king,
     classify_question_category,
     is_terminal_gate_question,
@@ -33,51 +32,6 @@ def test_judge_panel_allows_any_fp8_provider():
     for model in JUDGE_MODELS:
         assert JUDGE_PROVIDER_PINS[model] == {"allow_fallbacks": True, "quantizations": ["fp8"]}
         assert "order" not in JUDGE_PROVIDER_PINS[model]
-
-
-def test_question_prompt_requires_trajectory_coverage():
-    system, user = (m["content"] for m in build_question_messages(task="Fix bug", n=50))
-
-    assert "The full checklist for this task is 50 yes/no questions" in system
-    assert "===== RULE 1: EVERY QUESTION MUST BE UNIQUE (the most important rule) =====" in system
-    assert "===== RULE 2: PUT THE TARGET IN THE FIRST THREE WORDS =====" in system
-    assert "===== RULE 3: EVERY QUESTION MUST BE FAILABLE =====" in system
-    assert '"tag":"explore|verification|action|economy"' in system
-    assert "SECTION 1 of 5 — WORKFLOW AND VERIFICATION BACKBONE. Write EXACTLY 24 questions." in user
-    assert "SECTION 2 of 5 — TERMINAL INTEGRITY. Write EXACTLY 6 questions." in user
-    assert "SECTION 3 of 5 — FAILURE REACTION. Write EXACTLY 4 questions." in user
-    assert "SECTION 4 of 5 — GROUNDING AND CORRECTNESS. Write EXACTLY 11 questions." in user
-    assert "SECTION 5 of 5 — OUTPUT ECONOMY. Write EXACTLY 5 questions." in user
-    assert "Return STRICT JSON only, exactly 50 questions" in user
-
-
-def test_question_prompt_prioritizes_observed_failure_modes():
-    system, user = (m["content"] for m in build_question_messages(task="Fix bug", n=50))
-
-    assert "THE GOAL/TOOL TRAP" in system
-    assert "NO STAGE-SPLITTING" in system
-    assert "AT MOST 14 WORDS" in system
-    assert "NEVER ADDRESS A TURN BY NUMBER" in system
-    assert "NO UNIVERSAL QUANTIFIERS" in system
-    assert "ONLY THE CANDIDATE'S OWN OUTPUT COUNTS" in system
-    assert "NEAR-MISS of at least one full sentence" in system
-    assert "Do not reward mere activity" in system
-    assert "FAMILY W2 — SEEING THE FAILURE BEFORE THE FIX" in user
-    assert "FAMILY W4 — VERIFICATION AFTER THE LAST EDIT" in user
-    assert "FAMILY W6 — EDIT INTEGRITY AND PROGRESS" in user
-    assert "FAMILY B — IS THE EDIT ITSELF RIGHT" in user
-
-
-def test_question_prompt_limits_easy_hygiene_checks():
-    system, user = (m["content"] for m in build_question_messages(task="Fix bug", n=50))
-
-    assert "ECONOMY VOCABULARY" in system
-    assert '5 requires:"read" and 6 negative-form questions across all 50' in system
-    assert "This is the ONLY section where economy vocabulary is allowed" in user
-    assert "Write exactly 2 word-count bounds" in user
-    assert "the first at TEN TIMES and the second at TWENTY TIMES" in user
-    assert "add NO further rungs" in user
-    assert "do NOT ask about tone" in user
 
 
 def test_judge_prompt_scores_only_candidate_outputs():

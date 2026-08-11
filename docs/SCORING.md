@@ -32,8 +32,10 @@ Per sample the pipeline is:
    reference (leak-filtered, see below).
 4. **Aggregation** — weighted yes-rate per judge → mean across judges → mean across samples.
 
-If the reference cannot be produced (and a re-roll also fails), the sample falls back to a
-**task-only** checklist, recorded as `question_source.question_mode = "task_only"` in the artifacts.
+If the reference cannot be produced (and a re-roll also fails), or the sample carries no prior
+context to anchor a reference to, `QuestionService.prepare` raises `QuestionScoringUnavailable` —
+there is no task-only fallback checklist. `question_source.question_mode` is always
+`"sota_anchored"`.
 
 ---
 

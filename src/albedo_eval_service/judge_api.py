@@ -15,6 +15,34 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from .judge_config import JudgeSettings, get_judge_settings
+from .judge_core import (
+    JUDGE_MODELS,
+    RUBRIC_TAG_REQUIRES,
+    aggregate_scores,
+    answer_schema,
+    apply_measurement_gate,
+    build_behavior_messages,
+    build_content_question_messages,
+    build_judge_messages,
+    candidate_turn_texts_from_merged,
+    content_question_schema,
+    duplicate_economy_bounds,
+    enforce_question_labels,
+    filter_behavior_questions,
+    filter_reference_leaks,
+    format_reference_trajectory,
+    judge_yes_rate,
+    parse_answers,
+    parse_questions,
+    question_schema,
+    response_score,
+    sample_phase,
+    tests_visible,
+    trajectory_made_edit,
+)
+from .judge_openrouter import OpenRouterJudgeClient
+from .judge_prompts import BEHAVIOR_K, RUBRIC_MAX_QUESTIONS
+from .notifications import EvalErrorNotification, notify_eval_error
 from .observation_format import (
     CommandContract,
     command_contract,
@@ -32,39 +60,7 @@ from .observation_format import (
     valid_output,
     wrap,
 )
-from .judge_core import (
-    JUDGE_MODELS,
-    aggregate_scores,
-    answer_schema,
-    build_judge_messages,
-    build_question_messages,
-    apply_measurement_gate,
-    candidate_turn_texts_from_merged,
-    enforce_question_labels,
-    filter_reference_leaks,
-    format_reference_trajectory,
-    trajectory_made_edit,
-    judge_yes_rate,
-    duplicate_economy_bounds,
-    parse_answers,
-    parse_questions,
-    question_floor,
-    question_schema,
-    response_score,
-    sample_phase,
-    tests_visible,
-    build_content_question_messages,
-    content_question_schema,
-    build_behavior_messages,
-    filter_behavior_questions,
-    BEHAVIOR_K,
-    RUBRIC_MIN_QUESTIONS,
-    RUBRIC_MAX_QUESTIONS,
-    RUBRIC_TAG_REQUIRES,
-)
-from .judge_openrouter import OpenRouterJudgeClient
 from .remote_generation import format_scored_trajectory
-from .notifications import EvalErrorNotification, notify_eval_error
 
 
 class QuestionPrepSample(BaseModel):
@@ -353,7 +349,7 @@ class QuestionService:
         self,
         settings: JudgeSettings,
         client: OpenRouterJudgeClient,
-        reference_service: ReferenceTrajectoryService | None = None,
+        reference_service: ReferenceTrajectoryService,
     ):
         self.settings = settings
         self.client = client
@@ -362,66 +358,58 @@ class QuestionService:
     async def prepare(
         self, sample: QuestionPrepSample | JudgeSample, *, eval_run_id: str = ""
     ) -> QuestionPrepResult:
-        reference: str | None = None
-        reference_model: str | None = None
-        reference_made_edit = False
-        anchoring_intended = (
-            self.reference_service is not None and bool(getattr(sample, "messages", None))
-        )
-        if anchoring_intended:
-            try:
-                reference, reference_model, reference_made_edit = (
-                    await self.reference_service.generate(sample, eval_run_id=eval_run_id)
-                )
-            except Exception as exc:
-                logger.warning(
-                    "reference_trajectory_failed sample_id={} error={} retrying=reference_reroll",
-                    sample.sample_id, f"{type(exc).__name__}: {exc}",
-                )
-                rerolled = await self.reference_service.reroll_for_material(
-                    sample, eval_run_id=eval_run_id, exclude_model=""
-                )
-                if rerolled is None:
-                    raise QuestionScoringUnavailable(
-                        f"reference unavailable: {type(exc).__name__}: {exc}"
-                    ) from exc
-                reference, reference_model, reference_made_edit = rerolled
-        if reference is not None:
-            try:
-                return await self._prepare_once(
-                    sample, reference, reference_model, reference_made_edit
-                )
-            except QuestionScoringUnavailable as exc:
-                if self.reference_service is None:
-                    raise
-                logger.warning(
-                    "anchored_questions_failed sample_id={} error={} retrying=reference_reroll",
-                    sample.sample_id, exc,
-                )
-                rerolled = await self.reference_service.reroll_for_material(
-                    sample, eval_run_id=eval_run_id, exclude_model=reference_model or ""
-                )
-                if rerolled is None:
-                    raise
-                return await self._prepare_once(sample, *rerolled)
-        return await self._prepare_once(sample, None, None, False)
+        if not getattr(sample, "messages", None):
+            raise QuestionScoringUnavailable(
+                "sample carries no prior context to anchor a reference trajectory"
+            )
+        try:
+            reference, reference_model, reference_made_edit = (
+                await self.reference_service.generate(sample, eval_run_id=eval_run_id)
+            )
+        except Exception as exc:
+            logger.warning(
+                "reference_trajectory_failed sample_id={} error={} retrying=reference_reroll",
+                sample.sample_id, f"{type(exc).__name__}: {exc}",
+            )
+            rerolled = await self.reference_service.reroll_for_material(
+                sample, eval_run_id=eval_run_id, exclude_model=""
+            )
+            if rerolled is None:
+                raise QuestionScoringUnavailable(
+                    f"reference unavailable: {type(exc).__name__}: {exc}"
+                ) from exc
+            reference, reference_model, reference_made_edit = rerolled
+        try:
+            return await self._prepare_once(
+                sample, reference, reference_model, reference_made_edit
+            )
+        except QuestionScoringUnavailable as exc:
+            logger.warning(
+                "anchored_questions_failed sample_id={} error={} retrying=reference_reroll",
+                sample.sample_id, exc,
+            )
+            rerolled = await self.reference_service.reroll_for_material(
+                sample, eval_run_id=eval_run_id, exclude_model=reference_model or ""
+            )
+            if rerolled is None:
+                raise
+            return await self._prepare_once(sample, *rerolled)
 
     async def _prepare_once(
         self,
         sample: QuestionPrepSample | JudgeSample,
-        reference: str | None,
+        reference: str,
         reference_model: str | None,
         reference_made_edit: bool,
     ) -> QuestionPrepResult:
         n = self.settings.num_questions
         prefix = getattr(sample, "messages", None)
         phase = sample_phase(prefix)
-        # content questions are pruned against the reference below; behaviour questions
-        # are calibrated by the measured model deltas instead and skip pruning
-        use_rubric = reference is not None and n >= RUBRIC_MIN_QUESTIONS
+        # behaviour questions are calibrated by the measured model deltas rather than pruned
+        # against the reference the way content questions are below
         do_behavior = n >= 3 * BEHAVIOR_K
-        n_generic = RUBRIC_MAX_QUESTIONS if use_rubric else n
-        generic_floor = 6 if use_rubric else question_floor(n_generic)
+        n_generic = RUBRIC_MAX_QUESTIONS
+        generic_floor = 6
         prefix_tail = "\n".join(
             f"[{m.get('role')}] {(m.get('content') or '')[:800]}" for m in (prefix or [])[-3:]
         )
@@ -473,14 +461,11 @@ class QuestionService:
 
             def _accept(raw: str) -> bool:
                 attempt_discards: list[dict[str, str]] = []
-                questions, ok = parse_questions(
+                questions, _ok = parse_questions(
                     raw, n_generic, discards=attempt_discards, origin="content"
                 )
-                if reference is not None:
-                    questions = filter_reference_leaks(questions, discards=attempt_discards)
-                accepted = (len(questions) >= generic_floor) if use_rubric else (
-                    ok and len(questions) >= generic_floor
-                )
+                questions = filter_reference_leaks(questions, discards=attempt_discards)
+                accepted = len(questions) >= generic_floor
                 if not accepted and _rejected(
                     f"{len(questions)} well-formed questions parsed, needed "
                     f">= {generic_floor}"
@@ -488,24 +473,18 @@ class QuestionService:
                     _record_rejected_attempt(attempt_discards, questions, "content")
                 return accepted
 
-            if use_rubric:
-                messages = build_content_question_messages(
-                    task=sample.prompt, reference=reference,
-                    fmt=detect_format(sample.sample_id, prefix),
-                    prefix_turns=sum(1 for m in prefix or [] if m.get("role") == "assistant"),
-                    candidate_turns=self.settings.sota_trajectory_turns,
-                )
-            else:
-                messages = build_question_messages(
-                    task=sample.prompt, n=n_generic, reference=reference,
-                    reference_made_edit=reference_made_edit if reference is not None else None,
-                )
+            messages = build_content_question_messages(
+                task=sample.prompt, reference=reference,
+                fmt=detect_format(sample.sample_id, prefix),
+                prefix_turns=sum(1 for m in prefix or [] if m.get("role") == "assistant"),
+                candidate_turns=self.settings.sota_trajectory_turns,
+            )
             return self.client.complete(
                 purpose="questions", model=self.settings.evaluator_model, messages=messages,
                 temperature=self.settings.temperature,
                 max_tokens=self.settings.question_max_tokens,
                 provider=_evaluator_provider(self.settings),
-                response_schema=content_question_schema() if use_rubric else question_schema(n_generic),
+                response_schema=content_question_schema(),
                 accept=_accept,
             )
 
@@ -544,45 +523,40 @@ class QuestionService:
         for r in responses:
             if r.error:
                 raise QuestionScoringUnavailable(r.error)
-        content_qs, ok = parse_questions(
+        content_qs, _ok = parse_questions(
             responses[0].raw, n_generic, discards=discarded, origin="content"
         )
-        if use_rubric:
-            ok = len(content_qs) >= generic_floor
-            for q in content_qs:
-                q["requires"] = RUBRIC_TAG_REQUIRES.get(q.get("tag"), q.get("requires") or "neutral")
-        drops: dict[str, int] = {}
-        if reference is not None:
-            content_qs = filter_reference_leaks(content_qs, discards=discarded)
-            content_qs, drops = enforce_question_labels(
-                content_qs, phase=phase, reference_made_edit=reference_made_edit,
-                discards=discarded,
-            )
-        if not ok or len(content_qs) < generic_floor:
+        for q in content_qs:
+            q["requires"] = RUBRIC_TAG_REQUIRES.get(q.get("tag"), q.get("requires") or "neutral")
+        content_qs = filter_reference_leaks(content_qs, discards=discarded)
+        content_qs, drops = enforce_question_labels(
+            content_qs, phase=phase, reference_made_edit=reference_made_edit,
+            discards=discarded,
+        )
+        if len(content_qs) < generic_floor:
             raise QuestionScoringUnavailable(
                 f"evaluator returned {len(content_qs)}/{generic_floor}+ well-formed questions"
             )
         pruned_info: dict[str, object] = {}
-        if reference is not None:
-            try:
-                kept_qs, dropped_qs, self_rate = await self._prune_against_reference(
-                    sample, reference, content_qs
+        try:
+            kept_qs, dropped_qs, self_rate = await self._prune_against_reference(
+                sample, reference, content_qs
+            )
+        except Exception as exc:
+            logger.warning(
+                "reference_prune_failed sample_id={} error={} keeping_unpruned",
+                sample.sample_id, f"{type(exc).__name__}: {exc}",
+            )
+        else:
+            prune_floor = min(PRUNE_MIN_SURVIVORS, max(4, len(content_qs) // 2))
+            if len(kept_qs) < prune_floor:
+                raise QuestionScoringUnavailable(
+                    f"reference pruning left {len(kept_qs)}/{len(content_qs)} questions"
                 )
-            except Exception as exc:
-                logger.warning(
-                    "reference_prune_failed sample_id={} error={} keeping_unpruned",
-                    sample.sample_id, f"{type(exc).__name__}: {exc}",
-                )
-            else:
-                prune_floor = min(PRUNE_MIN_SURVIVORS, max(4, len(content_qs) // 2))
-                if len(kept_qs) < prune_floor:
-                    raise QuestionScoringUnavailable(
-                        f"reference pruning left {len(kept_qs)}/{len(content_qs)} questions"
-                    )
-                pruned_info = {"reference_self_score": self_rate,
-                               "pruned_out": len(content_qs) - len(kept_qs)}
-                content_qs = kept_qs
-                discarded.extend(dropped_qs)
+            pruned_info = {"reference_self_score": self_rate,
+                           "pruned_out": len(content_qs) - len(kept_qs)}
+            content_qs = kept_qs
+            discarded.extend(dropped_qs)
         behavior_qs: list[dict[str, str]] = []
         for r in responses[1:]:
             qs, _ = parse_questions(r.raw, BEHAVIOR_K, discards=discarded, origin="behavior")
@@ -592,31 +566,29 @@ class QuestionService:
             q["requires"] = "action"
         questions = behavior_qs + content_qs
         economy_duplicates: list[dict[str, str]] = []
-        if use_rubric and reference is not None:
-            try:
-                economy_duplicates = duplicate_economy_bounds(questions, reference)
-                questions = questions + economy_duplicates
-            except Exception:
-                economy_duplicates = []
+        try:
+            economy_duplicates = duplicate_economy_bounds(questions, reference)
+            questions = questions + economy_duplicates
+        except Exception:
+            economy_duplicates = []
         for position, question in enumerate(questions, start=1):
             question["id"] = f"q_{position:02d}"
         source: dict[str, object] = {
             "provider": response.provider,
             "model": self.settings.evaluator_model,
             "n_questions": len(questions),
-            "question_mode": "sota_anchored" if reference is not None else "task_only",
+            "question_mode": "sota_anchored",
             "sample_phase": phase,
             "behavior_questions_kept": len(behavior_qs),
-            "reference_made_edit": reference_made_edit if reference is not None else None,
+            "reference_made_edit": reference_made_edit,
             "enforcement_drops": drops,
+            "reference_trajectory": reference,
             "economy_duplicate_bounds_added": len(economy_duplicates),
             "discarded_questions": discarded,
         }
         if reference_model:
             source["reference_model"] = reference_model
         source.update(pruned_info)
-        if reference is not None:
-            source["reference_trajectory"] = reference
         return QuestionPrepResult(questions=questions, source=source)
 
 
