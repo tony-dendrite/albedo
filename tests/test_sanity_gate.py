@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from loguru import logger
 
-from albedo_eval_service.judge_openrouter import JudgeRawResponse
+from albedo_eval_service.judge_llm_client import JudgeRawResponse
 from sanity_remote.models import SanityRunRequest
 from sanity_remote.state import SanityRunStore
 from sanity_remote.worker import _model_ref_parts

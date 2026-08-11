@@ -40,7 +40,7 @@ from .judge_core import (
     tests_visible,
     trajectory_made_edit,
 )
-from .judge_openrouter import OpenRouterJudgeClient
+from .judge_llm_client import JudgeLLMClient
 from .judge_prompts import BEHAVIOR_K, RUBRIC_MAX_QUESTIONS
 from .notifications import EvalErrorNotification, notify_eval_error
 from .observation_format import (
@@ -204,7 +204,7 @@ class ReferenceTrajectoryService:
     def __init__(
         self,
         settings: JudgeSettings,
-        client: OpenRouterJudgeClient,
+        client: JudgeLLMClient,
         simulator: "ObservationSimulationService",
     ):
         self.settings = settings
@@ -348,7 +348,7 @@ class QuestionService:
     def __init__(
         self,
         settings: JudgeSettings,
-        client: OpenRouterJudgeClient,
+        client: JudgeLLMClient,
         reference_service: ReferenceTrajectoryService,
     ):
         self.settings = settings
@@ -660,7 +660,7 @@ class ObservationSimulationService:
     def __init__(
         self,
         settings: JudgeSettings,
-        client: OpenRouterJudgeClient,
+        client: JudgeLLMClient,
         repo_context: RepoContextClient | None = None,
     ):
         self.settings = settings
@@ -718,6 +718,7 @@ class ObservationSimulationService:
                     model=model,
                     messages=messages,
                     temperature=0.0,
+                    eval_run_id=request.eval_run_id,
                     max_tokens=self.settings.simulation_max_tokens,
                     provider=(_evaluator_provider(self.settings)
                               if model == fallback_model
@@ -840,7 +841,7 @@ def create_app(settings: JudgeSettings | None = None) -> FastAPI:
 
     @app.on_event("startup")
     async def startup() -> None:
-        client = OpenRouterJudgeClient(settings)
+        client = JudgeLLMClient(settings)
         app.state.eval_client = client
         repo_context = RepoContextClient(settings) if settings.repo_context_url else None
         app.state.repo_context_client = repo_context
@@ -869,7 +870,7 @@ def create_app(settings: JudgeSettings | None = None) -> FastAPI:
     def prep_store() -> QuestionPrepStore:
         store = getattr(app.state, "question_prep_store", None)
         if store is None:
-            client = OpenRouterJudgeClient(settings)
+            client = JudgeLLMClient(settings)
             app.state.eval_client = client
             repo_context = RepoContextClient(settings) if settings.repo_context_url else None
             app.state.repo_context_client = repo_context
@@ -926,7 +927,7 @@ def create_app(settings: JudgeSettings | None = None) -> FastAPI:
         unknown = [model for model in request.judge_models if model not in JUDGE_MODELS]
         if unknown:
             raise HTTPException(status_code=400, detail=f"unsupported judge model(s): {', '.join(unknown)}")
-        client: OpenRouterJudgeClient = app.state.eval_client
+        client: JudgeLLMClient = app.state.eval_client
         try:
             records = await _score_samples(
                 client=client, request=request, settings=settings, prep_store=prep_store()
@@ -1175,7 +1176,7 @@ def _corrupted_side(
 
 async def _judge_side(
     *,
-    client: OpenRouterJudgeClient,
+    client: JudgeLLMClient,
     settings: JudgeSettings,
     side: str,
     response_text: str,
@@ -1232,7 +1233,7 @@ async def _judge_side(
 
 async def _score_samples(
     *,
-    client: OpenRouterJudgeClient,
+    client: JudgeLLMClient,
     request: ScoreBatchRequest,
     settings: JudgeSettings,
     prep_store: QuestionPrepStore,

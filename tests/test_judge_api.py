@@ -36,7 +36,7 @@ from albedo_eval_service.observation_format import (
     valid_output,
 )
 from albedo_eval_service.judge_core import JUDGE_MODELS
-from albedo_eval_service.judge_openrouter import JudgeRawResponse, OpenRouterJudgeClient
+from albedo_eval_service.judge_llm_client import JudgeRawResponse, JudgeLLMClient
 
 
 _RC_OBSERVATION = "<returncode>0</returncode>\n<output>\nok\n</output>"
@@ -225,7 +225,7 @@ def test_scoring_scores_both_sides_independently():
 
 def test_call_retries_until_accept_passes():
     settings = JudgeSettings(openrouter_api_key="x", parse_retries=3)
-    client = OpenRouterJudgeClient(settings)
+    client = JudgeLLMClient(settings)
     calls = {"n": 0}
 
     async def fake_swr(**kwargs):
@@ -246,7 +246,7 @@ def test_call_retries_until_accept_passes():
 
 def test_call_gives_up_after_parse_retries():
     settings = JudgeSettings(openrouter_api_key="x", parse_retries=3)
-    client = OpenRouterJudgeClient(settings)
+    client = JudgeLLMClient(settings)
     calls = {"n": 0}
 
     async def fake_swr(**kwargs):

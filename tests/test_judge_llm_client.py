@@ -6,7 +6,7 @@ import json
 import httpx
 
 from albedo_eval_service.judge_config import JudgeSettings
-from albedo_eval_service.judge_openrouter import OpenRouterJudgeClient
+from albedo_eval_service.judge_llm_client import JudgeLLMClient
 
 
 def test_openrouter_payload_respects_provider_structured_output_support():
@@ -38,7 +38,7 @@ async def _capture_payloads():
         return httpx.Response(200, json={"choices": [{"message": {"content": raw}}]})
 
     settings = JudgeSettings(openrouter_api_key="test-key")
-    client = OpenRouterJudgeClient(settings)
+    client = JudgeLLMClient(settings)
     await client._client.aclose()
     client._client = httpx.AsyncClient(
         base_url=settings.openrouter_base_url.rstrip("/"),
@@ -73,7 +73,7 @@ async def _capture_orders_under_failures():
         return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
 
     settings = JudgeSettings(openrouter_api_key="test-key", retry_count=2, retry_backoff_seconds=0)
-    client = OpenRouterJudgeClient(settings)
+    client = JudgeLLMClient(settings)
     await client._client.aclose()
     client._client = httpx.AsyncClient(
         base_url=settings.openrouter_base_url.rstrip("/"),
@@ -99,7 +99,7 @@ def _engy_client(handler, **overrides):
         openrouter_api_key="test-key", engy_api_key="engy-key",
         retry_count=0, retry_backoff_seconds=0, parse_retries=1, **overrides,
     )
-    client = OpenRouterJudgeClient(settings)
+    client = JudgeLLMClient(settings)
     return settings, client
 
 
@@ -130,10 +130,39 @@ def test_reference_goes_to_engy_with_bare_model_name():
     assert hits == [("engy", "glm-5.2")]
 
 
-def test_non_reference_purposes_stay_on_openrouter():
+def test_decode_bound_purposes_stay_on_openrouter():
     assert asyncio.run(_route("judge")) == [("openrouter", "z-ai/glm-5.2")]
     assert asyncio.run(_route("questions")) == [("openrouter", "z-ai/glm-5.2")]
+
+
+def test_simulate_routes_only_the_primary_simulation_model_to_engy():
+    assert asyncio.run(_route("simulate", model="deepseek/deepseek-v4-flash-0731")) == [
+        ("engy", "deepseek-v4-flash-0731")
+    ]
     assert asyncio.run(_route("simulate")) == [("openrouter", "z-ai/glm-5.2")]
+
+
+def test_engy_transport_error_rescues_the_same_call_on_openrouter():
+    hits, result = asyncio.run(_rescued_call())
+    assert hits == [("engy", "deepseek-v4-flash-0731"),
+                    ("openrouter", "deepseek/deepseek-v4-flash-0731")]
+    assert result.error is None
+    assert result.raw == "ok"
+
+
+async def _rescued_call():
+    hits: list[tuple[str, str]] = []
+    settings, client = _engy_client(None)
+    await _swap_transports(client, settings, hits)
+    client._engy_should_fail = True
+    try:
+        result = await client.complete(
+            model="deepseek/deepseek-v4-flash-0731", messages=[{"role": "user", "content": "x"}],
+            purpose="simulate", eval_run_id="eval-1",
+        )
+    finally:
+        await client.aclose()
+    return hits, result
 
 
 def test_model_outside_engy_models_stays_on_openrouter():
@@ -157,10 +186,14 @@ async def _route(purpose, model="z-ai/glm-5.2"):
 
 def test_engy_falls_back_to_openrouter_after_max_errors_within_one_eval():
     hits = asyncio.run(_exhaust_engy_budget())
-    engy_attempts = [h for h in hits if h[0] == "engy"]
-    # budget is 2, so engy is tried twice then abandoned for the rest of the eval
-    assert len(engy_attempts) == 2
-    assert hits[-1][0] == "openrouter"
+    # each failing engy attempt is rescued on OpenRouter in the same call; after
+    # the budget (2) is spent, engy is not tried again for the rest of the eval
+    assert [h[0] for h in hits] == [
+        "engy", "openrouter",   # call 1: engy fails, rescued
+        "engy", "openrouter",   # call 2: engy fails, budget spent
+        "openrouter",           # call 3: engy skipped
+        "openrouter",           # call 4
+    ]
 
 
 async def _exhaust_engy_budget():
@@ -182,14 +215,13 @@ async def _exhaust_engy_budget():
 def test_budget_is_per_eval_so_overlapping_evaluations_still_abandon_engy():
     """Two evaluations in flight must not reset each other's budget."""
     hits = asyncio.run(_interleaved_evals())
-    # retry_count=0 here, so a failed engy call returns an error and the divert
-    # shows on that eval's NEXT call. Each eval spends its own budget of 1.
-    # With a single shared counter this was ["engy"] * 4 -- engy never abandoned.
+    # each failing engy call is rescued on OpenRouter in-call; each eval spends its
+    # OWN budget of 1. With a single shared counter engy was never abandoned.
     assert [h[0] for h in hits] == [
-        "engy",         # eval-X spends its budget
-        "engy",         # eval-Y spends its own, without resetting X's
-        "openrouter",   # eval-X abandoned engy
-        "openrouter",   # eval-Y likewise
+        "engy", "openrouter",   # eval-X spends its budget (rescued in-call)
+        "engy", "openrouter",   # eval-Y spends its own, without resetting X's
+        "openrouter",           # eval-X abandoned engy
+        "openrouter",           # eval-Y likewise
     ]
 
 
@@ -211,7 +243,12 @@ async def _interleaved_evals():
 
 def test_error_budget_resets_on_next_evaluation():
     hits = asyncio.run(_budget_across_evals())
-    assert [h[0] for h in hits] == ["engy", "openrouter", "engy", "openrouter"]
+    assert [h[0] for h in hits] == [
+        "engy", "openrouter",   # eval-1 call 1: engy fails, rescued in-call, budget (1) spent
+        "openrouter",           # eval-1 call 2: engy skipped
+        "engy", "openrouter",   # eval-2 call 1: fresh budget, tries engy again
+        "openrouter",           # eval-2 call 2
+    ]
 
 
 async def _budget_across_evals():

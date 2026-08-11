@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from albedo_eval_service.judge_config import JudgeSettings
 from albedo_eval_service.judge_core import JUDGE_MODELS, aggregate_scores
-from albedo_eval_service.judge_openrouter import OpenRouterJudgeClient
+from albedo_eval_service.judge_llm_client import JudgeLLMClient
 from albedo_eval_service.remote_generation import format_scored_trajectory
 
 COMPLETE_MARKER = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
@@ -107,7 +107,7 @@ def completion_observation(sample_id: str) -> str:
 
 
 async def generate_one(
-    client: OpenRouterJudgeClient,
+    client: JudgeLLMClient,
     *,
     model: str,
     sample_id: str,
@@ -130,7 +130,7 @@ async def generate_one(
 
 
 async def generate_batch(
-    client: OpenRouterJudgeClient,
+    client: JudgeLLMClient,
     *,
     model: str,
     active: list[dict],
@@ -314,7 +314,7 @@ async def main_async() -> None:
         request_timeout_seconds=args.timeout,
     )
     async with (
-        OpenRouterJudgeClient(settings) as or_client,
+        JudgeLLMClient(settings) as or_client,
         httpx.AsyncClient(
             base_url=args.base_url.rstrip("/"),
             headers=headers,

@@ -23,8 +23,8 @@ class JudgeSettings(BaseSettings):
         "", validation_alias=AliasChoices("ALBEDO_JUDGE_ENGY_API_KEY")
     )
     engy_base_url: str = "https://api.engy.ai"
-    engy_models: str = "z-ai/glm-5.2"
-    engy_max_errors: int = 2
+    engy_models: str = "z-ai/glm-5.2,deepseek/deepseek-v4-flash-0731"
+    engy_max_errors: int = 3
     request_timeout_seconds: float = 90.0
     retry_count: int = 5
     retry_backoff_seconds: float = 1.5

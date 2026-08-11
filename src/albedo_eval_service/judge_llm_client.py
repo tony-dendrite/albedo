@@ -23,10 +23,10 @@ class JudgeRawResponse:
     error: str | None = None
 
 
-ENGY_PURPOSE = "reference"
+ENGY_PURPOSES = frozenset({"reference", "simulate"})
 
 
-class OpenRouterJudgeClient:
+class JudgeLLMClient:
     def __init__(self, settings: JudgeSettings):
         if not settings.openrouter_api_key:
             raise ValueError("ALBEDO_JUDGE_OPENROUTER_API_KEY is required")
@@ -52,7 +52,7 @@ class OpenRouterJudgeClient:
         self._engy_models = {m.strip() for m in settings.engy_models.split(",") if m.strip()}
         self._engy_errors: collections.Counter[str] = collections.Counter()
         logger.info(
-            f"[judge-openrouter] engy routing for purpose={ENGY_PURPOSE}: "
+            f"[judge-llm] engy routing for purposes={sorted(ENGY_PURPOSES)}: "
             + (f"ON models={sorted(self._engy_models)} url={settings.engy_base_url} "
                f"max_errors={settings.engy_max_errors}"
                if self._engy is not None else "OFF (no engy api key)")
@@ -64,11 +64,13 @@ class OpenRouterJudgeClient:
             await self._engy.aclose()
 
     def _use_engy(self, purpose: str, model: str, eval_run_id: str) -> bool:
-        if self._engy is None or purpose != ENGY_PURPOSE or model not in self._engy_models:
+        if self._engy is None or purpose not in ENGY_PURPOSES or model not in self._engy_models:
+            return False
+        if purpose == "simulate" and model != self.settings.simulation_model:
             return False
         return self._engy_errors[eval_run_id] < self.settings.engy_max_errors
 
-    async def __aenter__(self) -> "OpenRouterJudgeClient":
+    async def __aenter__(self) -> "JudgeLLMClient":
         return self
 
     async def __aexit__(self, *_: object) -> None:
@@ -190,7 +192,7 @@ class OpenRouterJudgeClient:
                     _retry_sleep_seconds(exc, attempt, self.settings.retry_backoff_seconds)
                 )
         logger.warning(
-            f"[judge-openrouter] retries exhausted model={model} "
+            f"[judge-llm] retries exhausted model={model} "
             f"attempts={transport_budget + 1}, returning error: {last_error}"
         )
         return JudgeRawResponse(
@@ -236,20 +238,25 @@ class OpenRouterJudgeClient:
             response = await client.post("/v1/chat/completions", json=payload)
             response.raise_for_status()
         except Exception as exc:
-            if on_engy:
-                self._engy_errors[eval_run_id] += 1
-                logger.warning(
-                    f"[judge-openrouter] engy error {self._engy_errors[eval_run_id]}/"
-                    f"{self.settings.engy_max_errors} eval_run_id={eval_run_id} "
-                    f"model={model}: {type(exc).__name__}: {exc}"
-                )
-            raise
+            if not on_engy:
+                raise
+            self._engy_errors[eval_run_id] += 1
+            logger.warning(
+                f"[judge-llm] engy error {self._engy_errors[eval_run_id]}/"
+                f"{self.settings.engy_max_errors} eval_run_id={eval_run_id} "
+                f"model={model}, retrying this call on openrouter: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            on_engy = False
+            payload["model"] = model
+            response = await self._client.post("/v1/chat/completions", json=payload)
+            response.raise_for_status()
         body = response.json()
         usage = body.get("usage") or {}
         cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
         reasoning = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens", 0)
         logger.debug(
-            f"[judge-openrouter] usage purpose={purpose} model={model} "
+            f"[judge-llm] usage purpose={purpose} model={model} "
             f"prompt_tokens={usage.get('prompt_tokens')} cached_tokens={cached} "
             f"completion_tokens={usage.get('completion_tokens')} "
             f"reasoning_tokens={reasoning} "

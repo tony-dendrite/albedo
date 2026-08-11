@@ -6,17 +6,17 @@ import asyncio
 from loguru import logger
 
 from albedo_eval_service.judge_config import JudgeSettings, get_judge_settings
-from albedo_eval_service.judge_openrouter import JudgeRawResponse, OpenRouterJudgeClient
+from albedo_eval_service.judge_llm_client import JudgeRawResponse, JudgeLLMClient
 
 SANITY_DEFAULT_JUDGE_MODELS: tuple[str, ...] = ("z-ai/glm-5.2",)
 
 
-def make_client(settings: JudgeSettings | None = None) -> OpenRouterJudgeClient:
-    return OpenRouterJudgeClient(settings or get_judge_settings())
+def make_client(settings: JudgeSettings | None = None) -> JudgeLLMClient:
+    return JudgeLLMClient(settings or get_judge_settings())
 
 
 async def query_panel(
-    client: OpenRouterJudgeClient,
+    client: JudgeLLMClient,
     system: str,
     user: str,
     models: tuple[str, ...] = SANITY_DEFAULT_JUDGE_MODELS,
