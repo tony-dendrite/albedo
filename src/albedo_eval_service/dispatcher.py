@@ -16,7 +16,7 @@ from .faults import broken_stream_fault, classify_failure_verdict
 from .models import Challenger, DatasetConfig, EvalRequest, PreviousKing, ScoringConfig
 from .notifications import EvalErrorNotification, notify_eval_error
 from .remote_client import RemoteEvalClient
-from .repository import ActiveEval, ClaimedEval, EvalRepository
+from .repository import ClaimedEval, EvalRepository
 from .sampling import multi_source_manifest_sample_ids
 
 

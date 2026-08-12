@@ -21,11 +21,11 @@ from .judge_core import (
     aggregate_scores,
     answer_schema,
     apply_measurement_gate,
+    behavior_question_schema,
     build_behavior_messages,
-    build_content_question_messages,
     build_judge_messages,
+    build_reference_question_messages,
     candidate_turn_texts_from_merged,
-    content_question_schema,
     duplicate_economy_bounds,
     enforce_question_labels,
     filter_behavior_questions,
@@ -34,14 +34,14 @@ from .judge_core import (
     judge_yes_rate,
     parse_answers,
     parse_questions,
-    question_schema,
+    reference_question_schema,
     response_score,
     sample_phase,
     tests_visible,
     trajectory_made_edit,
 )
 from .judge_llm_client import JudgeLLMClient
-from .judge_prompts import BEHAVIOR_K, RUBRIC_MAX_QUESTIONS
+from .judge_prompts import BEHAVIOR_K, BEHAVIOR_PHASES, RUBRIC_MAX_QUESTIONS
 from .notifications import EvalErrorNotification, notify_eval_error
 from .observation_format import (
     CommandContract,
@@ -406,7 +406,7 @@ class QuestionService:
         prefix = getattr(sample, "messages", None)
         phase = sample_phase(prefix)
         # behaviour questions are calibrated by the measured model deltas rather than pruned
-        # against the reference the way content questions are below
+        # against the reference the way reference questions are below
         do_behavior = n >= 3 * BEHAVIOR_K
         n_generic = RUBRIC_MAX_QUESTIONS
         generic_floor = 6
@@ -456,10 +456,10 @@ class QuestionService:
                 for question in survivors
             )
 
-        def _content_call():
+        def _reference_call():
             _rejected = _reject_logger("content_batch_rejected", "content")
 
-            def _accept(raw: str) -> bool:
+            def _reference_accept(raw: str) -> bool:
                 attempt_discards: list[dict[str, str]] = []
                 questions, _ok = parse_questions(
                     raw, n_generic, discards=attempt_discards, origin="content"
@@ -473,19 +473,22 @@ class QuestionService:
                     _record_rejected_attempt(attempt_discards, questions, "content")
                 return accepted
 
-            messages = build_content_question_messages(
+            messages = build_reference_question_messages(
                 task=sample.prompt, reference=reference,
                 fmt=detect_format(sample.sample_id, prefix),
                 prefix_turns=sum(1 for m in prefix or [] if m.get("role") == "assistant"),
                 candidate_turns=self.settings.sota_trajectory_turns,
             )
+
             return self.client.complete(
-                purpose="questions", model=self.settings.evaluator_model, messages=messages,
+                purpose="questions",
+                model=self.settings.evaluator_model,
+                messages=messages,
                 temperature=self.settings.temperature,
                 max_tokens=self.settings.question_max_tokens,
                 provider=_evaluator_provider(self.settings),
-                response_schema=content_question_schema(),
-                accept=_accept,
+                response_schema=reference_question_schema(),
+                accept=_reference_accept,
             )
 
         def _behavior_call(index: int):
@@ -513,34 +516,40 @@ class QuestionService:
                 temperature=self.settings.temperature,
                 max_tokens=self.settings.question_max_tokens,
                 provider=_evaluator_provider(self.settings),
-                response_schema=question_schema(BEHAVIOR_K),
+                response_schema=behavior_question_schema(BEHAVIOR_K),
                 accept=_behavior_accept,
             )
 
-        calls = [_content_call()] + ([_behavior_call(i) for i in range(3)] if do_behavior else [])
+        calls = [_reference_call()] + ([_behavior_call(i) for i in range(3)] if do_behavior else [])
         responses = await asyncio.gather(*calls)
         response = responses[0]
         for r in responses:
             if r.error:
                 raise QuestionScoringUnavailable(r.error)
-        content_qs, _ok = parse_questions(
+
+        reference_qs, _ok = parse_questions(
             responses[0].raw, n_generic, discards=discarded, origin="content"
         )
-        for q in content_qs:
+
+        for q in reference_qs:
             q["requires"] = RUBRIC_TAG_REQUIRES.get(q.get("tag"), q.get("requires") or "neutral")
-        content_qs = filter_reference_leaks(content_qs, discards=discarded)
-        content_qs, drops = enforce_question_labels(
-            content_qs, phase=phase, reference_made_edit=reference_made_edit,
+            q["tag"] = "reference:" + (q.get("tag") or "")
+
+        reference_qs = filter_reference_leaks(reference_qs, discards=discarded)
+        reference_qs, drops = enforce_question_labels(
+            reference_qs, phase=phase, reference_made_edit=reference_made_edit,
             discards=discarded,
         )
-        if len(content_qs) < generic_floor:
+
+        if len(reference_qs) < generic_floor:
             raise QuestionScoringUnavailable(
-                f"evaluator returned {len(content_qs)}/{generic_floor}+ well-formed questions"
+                f"evaluator returned {len(reference_qs)}/{generic_floor}+ well-formed questions"
             )
         pruned_info: dict[str, object] = {}
+
         try:
             kept_qs, dropped_qs, self_rate = await self._prune_against_reference(
-                sample, reference, content_qs
+                sample, reference, reference_qs
             )
         except Exception as exc:
             logger.warning(
@@ -548,23 +557,26 @@ class QuestionService:
                 sample.sample_id, f"{type(exc).__name__}: {exc}",
             )
         else:
-            prune_floor = min(PRUNE_MIN_SURVIVORS, max(4, len(content_qs) // 2))
+            prune_floor = min(PRUNE_MIN_SURVIVORS, max(4, len(reference_qs) // 2))
             if len(kept_qs) < prune_floor:
                 raise QuestionScoringUnavailable(
-                    f"reference pruning left {len(kept_qs)}/{len(content_qs)} questions"
+                    f"reference pruning left {len(kept_qs)}/{len(reference_qs)} questions"
                 )
             pruned_info = {"reference_self_score": self_rate,
-                           "pruned_out": len(content_qs) - len(kept_qs)}
-            content_qs = kept_qs
+                           "pruned_out": len(reference_qs) - len(kept_qs)}
+            reference_qs = kept_qs
             discarded.extend(dropped_qs)
         behavior_qs: list[dict[str, str]] = []
-        for r in responses[1:]:
+        for index, r in enumerate(responses[1:]):
             qs, _ = parse_questions(r.raw, BEHAVIOR_K, discards=discarded, origin="behavior")
+            part_name = BEHAVIOR_PHASES[phase].parts[index].name
+            for q in qs:
+                q["tag"] = f"behavior:{part_name}"
             behavior_qs.extend(qs)
         behavior_qs = filter_behavior_questions(behavior_qs, context_text, discards=discarded)
         for q in behavior_qs:
             q["requires"] = "action"
-        questions = behavior_qs + content_qs
+        questions = behavior_qs + reference_qs
         economy_duplicates: list[dict[str, str]] = []
         try:
             economy_duplicates = duplicate_economy_bounds(questions, reference)

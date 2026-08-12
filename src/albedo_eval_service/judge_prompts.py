@@ -26,9 +26,15 @@ reproduction at all."""
 
 
 @dataclass(frozen=True)
+class BehaviorPart:
+    name: str
+    text: str
+
+
+@dataclass(frozen=True)
 class BehaviorPhase:
     head: str
-    parts: tuple[str, ...]
+    parts: tuple[BehaviorPart, ...]
     gold: tuple[str, ...]
 
 
@@ -38,14 +44,23 @@ BEHAVIOR_PHASES: dict[str, BehaviorPhase] = {
         "exploration that CONVERGES. A completed or verified fix must NOT be required by any "
         "question.",
         parts=(
-            """PRECISION READS: code is read with explicit line ranges, positioned by lines or \
+            BehaviorPart(
+                "precision_reads",
+                """PRECISION READS: code is read with explicit line ranges, positioned by lines or \
 symbols earlier output showed; later reads zoom into regions earlier searches located; no \
 whole-file dumps of large files.""",
-            """ISSUE-ANCHORED NARROWING: searches use identifiers from the issue text; each \
+            ),
+            BehaviorPart(
+                "issue_anchored_narrowing",
+                """ISSUE-ANCHORED NARROWING: searches use identifiers from the issue text; each \
 successive search narrows using what prior output showed; the faulty region is displayed \
 before any conclusion about it.""",
-            """CONVERGENCE AND ORIENTATION: repository state is checked with a git command; the \
-final output commits to one specific file or symbol as the target, with a stated reason.""",
+            ),
+            BehaviorPart(
+                "convergence_and_orientation",
+                """CONVERGENCE AND ORIENTATION: repository state is checked with a git command; \
+the final output commits to one specific file or symbol as the target, with a stated reason.""",
+            ),
         ),
         gold=(
             "Does the candidate read code with explicit line ranges instead of whole-file dumps?",
@@ -58,14 +73,23 @@ final output commits to one specific file or symbol as the target, with a stated
         head="At-the-fix trim: the conversation was cut just before the first edit; competent "
         "work makes a grounded, well-aimed edit.",
         parts=(
-            """GROUNDED TARGETS: every modified file was displayed beforehand; every path and \
+            BehaviorPart(
+                "grounded_targets",
+                """GROUNDED TARGETS: every modified file was displayed beforehand; every path and \
 symbol used appeared in prior context or observations; line numbers in edits are consistent \
 with displayed line numbers. Phrase each so a single invented target fails the question.""",
-            """ANCHORED EDIT: the exact region being changed is displayed shortly before the \
+            ),
+            BehaviorPart(
+                "anchored_edit",
+                """ANCHORED EDIT: the exact region being changed is displayed shortly before the \
 modifying command; the edit targets the symbol the displayed code showed as faulty; claims \
 about earlier output are backed by visibly displayed content.""",
-            """NO WASTE: no command is re-issued after its output was already received; after a \
-failed command the next differs in tool, target, or arguments.""" + _WASTE_NOTE,
+            ),
+            BehaviorPart(
+                "no_waste",
+                """NO WASTE: no command is re-issued after its output was already received; \
+after a failed command the next differs in tool, target, or arguments.""" + _WASTE_NOTE,
+            ),
         ),
         gold=(
             "Is every file the candidate modifies previously displayed in an observation?",
@@ -77,14 +101,23 @@ failed command the next differs in tool, target, or arguments.""" + _WASTE_NOTE,
         head="Verification trim: the conversation already contains the first edit; competent "
         "work verifies it precisely and closes out.",
         parts=(
-            """SCOPED TESTS AND DIFF: the repository's existing test suite is run scoped to the \
-changed area; the accumulated change is reviewed with git diff before finishing; the diff is \
-confined to files the issue implicates.""",
-            """TARGETED VERIFICATION: a ranged read verifies the changed region's exact content \
-after modification; each verification command is aimed at the changed symbol; closing claims \
-match what the last observations visibly show.""",
-            """NO WASTE: no command whose output was already received is repeated; most turns are \
-not one repeated action type.""" + _WASTE_NOTE,
+            BehaviorPart(
+                "scoped_tests_and_diff",
+                """SCOPED TESTS AND DIFF: the repository's existing test suite is run scoped to \
+the changed area; the accumulated change is reviewed with git diff before finishing; the diff \
+is confined to files the issue implicates.""",
+            ),
+            BehaviorPart(
+                "targeted_verification",
+                """TARGETED VERIFICATION: a ranged read verifies the changed region's exact \
+content after modification; each verification command is aimed at the changed symbol; closing \
+claims match what the last observations visibly show.""",
+            ),
+            BehaviorPart(
+                "no_waste",
+                """NO WASTE: no command whose output was already received is repeated; most \
+turns are not one repeated action type.""" + _WASTE_NOTE,
+            ),
         ),
         gold=(
             "Does the candidate run the existing test suite scoped to the changed area?",
@@ -105,7 +138,7 @@ NO_TESTS_NOTE = ("\nNo test suite is visible in this sample's context — replac
 
 
 # ============================================================================
-# JUDGE_* — scores a finished trajectory against a prepared question list (content + behavior
+# JUDGE_* — scores a finished trajectory against a prepared question list (reference + behavior
 # questions merged). Assembled by build_judge_messages() in judge_core.py. Called from
 # _judge_side() in judge_api.py once per (trajectory side, judge model) pair.
 # ============================================================================
@@ -113,10 +146,8 @@ NO_TESTS_NOTE = ("\nNo test suite is visible in this sample's context — replac
 JUDGE_SYSTEM = """You judge a candidate assistant TRAJECTORY by answering yes/no questions about \
 it. The trajectory includes original context, CANDIDATE OUTPUT blocks, and ENVIRONMENT OBSERVATION \
 blocks between them. Score ONLY the CANDIDATE OUTPUT blocks. The original context and ENVIRONMENT \
-OBSERVATION blocks are evidence for judging those outputs, but they are NOT score targets. The \
-questions span several evaluation categories (each is tagged with its "category", and most carry a \
-one-word "tag" naming the kind of evidence that satisfies them); answer EVERY one from the \
-TRAJECTORY alone. Each question is self-contained.
+OBSERVATION blocks are evidence for judging those outputs, but they are NOT score targets. Answer \
+EVERY one from the TRAJECTORY alone. Each question is self-contained.
 
 Answer each question with 1 or 0:
 - 1 — the response demonstrably satisfies the check; it is GOOD on that point (the "yes" case).
@@ -128,17 +159,24 @@ ONE example of a response that should get 0. It is illustrative, NOT the only wa
 assume a response is good merely because it differs from example_bad; judge the actual check.
 
 TAG VALIDATION — a question's "tag" names the ONLY kind of evidence that can earn a 1:
-- "explore": the candidate itself runs the locating or reading command in a CANDIDATE OUTPUT block \
+- "reference:explore": the candidate itself runs the locating or reading command in a CANDIDATE OUTPUT block \
 and the observation shows the named content. Knowing the answer without visibly obtaining it earns \
 0.
-- "verification": a checking command RUNS AFTER the work it verifies, inside the CANDIDATE OUTPUT \
+- "reference:verification": a checking command RUNS AFTER the work it verifies, inside the CANDIDATE OUTPUT \
 blocks, and an observation shows its result. What counts as the check is the method the question \
 names — a script or test re-run, or a displayed re-read of the edited region where the task \
 verifies by reading. The task appearing to succeed, confident prose, or an edit that looks correct \
 NEVER satisfies a verification question — only the visible check does.
-- "action": the edit or command itself is visible in a CANDIDATE OUTPUT block. A THOUGHT \
+- "reference:action": the edit or command itself is visible in a CANDIDATE OUTPUT block. A THOUGHT \
 describing a change without the command performing it earns 0.
-- "economy": judge by the OUTPUT ECONOMY rules below.
+- "reference:continuity": both milestones the question names must each be visible in a CANDIDATE OUTPUT \
+block, in the stated order (e.g. the site diagnosed is the site later edited; a check runs after \
+the edit it verifies). A milestone that is only planned, implied, or asserted in prose — without \
+the matching visible command and observation — earns 0.
+- "reference:economy": judge by the OUTPUT ECONOMY rules below.
+- "behavior:<name>": the named working habit is visible in the candidate's own CANDIDATE \
+OUTPUT blocks; judge strictly by the question text — the tag only names which habit family the \
+question belongs to.
 
 EVIDENCE WINDOW — answer each question from the part of the trajectory it names, not from the \
 whole document:
@@ -235,7 +273,7 @@ JUDGE_USER = """CANDIDATE TRAJECTORY:
 {response}
 ------
 
-{measurements}QUESTIONS (across several categories — each tagged with "category"; answer every one from the \
+{measurements}QUESTIONS (answer every one from the \
 trajectory above; "example_bad" shows one trajectory that should get 0):
 {questions_json}
 
@@ -245,11 +283,11 @@ trajectory alone, answer 0. Return the strict JSON now."""
 
 
 # ============================================================================
-# CONTENT_QUESTION_* — the reference-anchored rubric: mines a generated reference trajectory for
+# REFERENCE_QUESTION_* — the reference-anchored rubric: mines a generated reference trajectory for
 # milestones (site/mechanism, repro, change, verification) and writes a checklist the reference
 # itself must pass, later pruned against independent reruns. Origin: new_rubric_prompt_v3.py;
 # tuned: aim 36-40, >=5 fix-property action questions when an edit is demonstrated, explore cap
-# 25%. Assembled by build_content_question_messages() in judge_core.py. Called from
+# 25%. Assembled by build_reference_question_messages() in judge_core.py. Called from
 # QuestionService._prepare_once() in judge_api.py — this is the live path whenever a reference
 # trajectory exists (i.e. always, in production; see QuestionService.prepare()).
 # ============================================================================
@@ -260,7 +298,7 @@ RUBRIC_ECONOMY_CAP = 8
 RUBRIC_LENGTH_BOUNDS = 7
 RUBRIC_REFERENCE_TARGET = 0.9
 
-CONTENT_QUESTION_SYSTEM = """You write an evaluation checklist that decides which of two coding agents worked \
+REFERENCE_QUESTION_SYSTEM = """You write an evaluation checklist that decides which of two coding agents worked \
 better on ONE task. A judge answers your yes/no questions about a candidate TRAJECTORY: the original \
 conversation, then CANDIDATE OUTPUT blocks, then ENVIRONMENT OBSERVATION blocks between them. The \
 judge scores ONLY the CANDIDATE OUTPUT blocks.
@@ -442,7 +480,7 @@ Output ONLY strict JSON, no prose, no code fences:
 "questions":[{{"step":3,"evidence":"CLASS: verbatim quote from a reference block","text":"...",\
 "example_bad":"...","tag":"explore|action|continuity|verification|economy"}}]}}"""
 
-CONTENT_SCORED_WINDOW_BLOCK = """SCORED WINDOW — the hard boundaries. These are facts; the ledger is yours to \
+REFERENCE_SCORED_WINDOW_BLOCK = """SCORED WINDOW — the hard boundaries. These are facts; the ledger is yours to \
 derive.
 
 DECLARED WORKFLOW of this task, quoted verbatim:
@@ -459,7 +497,7 @@ OBSERVATION FORMAT of this trajectory: {observation_format}
 Success and failure appear in observations as: {success_marker}
 Never write a question that depends on a signal this format does not carry."""
 
-CONTENT_QUESTION_USER = """TASK — the system prompt the agent operates under, and the conversation so far. \
+REFERENCE_QUESTION_USER = """TASK — the system prompt the agent operates under, and the conversation so far. \
 Read for comprehension only; do not mine it for questions:
 ------
 {task}

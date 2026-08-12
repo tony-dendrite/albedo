@@ -11,13 +11,12 @@ from albedo_eval_service.judge_core import (
     aggregate_scores,
     build_judge_messages,
     challenger_beats_king,
-    classify_question_category,
-    is_terminal_gate_question,
+    is_measurement_bound_question,
     is_unbounded_submit_question,
     judge_yes_rate,
     parse_answers,
     parse_questions,
-    question_schema,
+    behavior_question_schema,
     response_score,
     strip_reply_injection,
 )
@@ -69,20 +68,18 @@ def test_judge_prompt_is_strict_on_workflow_and_grounding_failures():
 def test_build_judge_messages_shows_tag():
     messages = build_judge_messages(
         response="FULL CANDIDATE TRAJECTORY\nCANDIDATE OUTPUT 1:\nls",
-        questions=[{"id": "q_01", "text": "Does it inspect?", "example_bad": "no",
-                    "category": "grounding", "tag": "explore"}],
+        questions=[{"id": "q_01", "text": "Does it inspect?", "example_bad": "no", "tag": "explore"}],
     )
 
     assert '"tag": "explore"' in messages[1]["content"]
     assert "TAG VALIDATION" in messages[0]["content"]
 
 
-def test_parse_questions_assigns_ids_and_category():
+def test_parse_questions_assigns_ids():
     raw = json.dumps({"questions": [{"text": f"q{i}?", "example_bad": "bad"} for i in range(3)]})
     questions, ok = parse_questions(raw, 3)
     assert ok is True
     assert [q["id"] for q in questions] == ["q_01", "q_02", "q_03"]
-    assert all(q["category"] == "other" for q in questions)
     _, ok2 = parse_questions(json.dumps({"questions": []}), 3)
     assert ok2 is False
 
@@ -109,56 +106,6 @@ def test_judge_yes_rate_and_response_score():
     assert judge_yes_rate({"a": "1", "b": "0", "c": "1"}) == round(2 / 3, 6)
     per_judge = {"j1": {"q_01": "1", "q_02": "1"}, "j2": {"q_01": "1", "q_02": "0"}}
     assert response_score(per_judge) == 0.75
-
-
-def test_terminal_gate_questions_are_scored_like_regular_questions():
-    questions = [
-        {"id": "q_01", "category": "overall", "text": "Does it end with no unresolved failed command?"},
-        {"id": "q_02", "category": "overall", "text": "Does it inspect the relevant file?"},
-        {"id": "q_03", "category": "overall", "text": "Does it use a grounded path?"},
-    ]
-    answers = {"q_01": "0", "q_02": "1", "q_03": "1"}
-
-    assert judge_yes_rate(answers, questions) == round(2 / 3, 6)
-    assert response_score({"j1": answers}, questions) == round(2 / 3, 6)
-
-
-def test_terminal_gate_yes_counts_like_regular_yes():
-    questions = [
-        {"id": "q_01", "category": "terminal_gate", "text": "Does it submit after success?"},
-        {"id": "q_02", "category": "work_correctness", "text": "Does it make the correct edit?"},
-        {"id": "q_03", "category": "grounding", "text": "Does it use grounded file paths?"},
-        {"id": "q_04", "category": "progress", "text": "Does it react to observations?"},
-    ]
-    finish_only = {"q_01": "1", "q_02": "0", "q_03": "0", "q_04": "0"}
-
-    assert judge_yes_rate(finish_only, questions) == 0.25
-
-
-def test_classify_question_category():
-    assert classify_question_category("Does the final state leave no unresolved failure?") == "terminal_gate"
-    assert classify_question_category("Does it use the previous observation to advance?") == "progress"
-    assert classify_question_category("Does every path come from observed repository files?") == "grounding"
-    assert classify_question_category("Does it verify the edit with git diff?") == "verification"
-
-
-def test_terminal_gate_detection_avoids_broad_topic_matches():
-    true_gates = [
-        "Does the final state leave no unresolved failed command as the last observation?",
-        "Does the trajectory submit after success instead of continuing redundant exploration?",
-        "Does the candidate avoid hand-writing go.sum checksum hashes directly?",
-        "Does the trajectory avoid invoking forbidden interpreters or test runners per the system prompt?",
-    ]
-    false_gates = [
-        "Does the next command target a grounded file path such as validator.go?",
-        "Does the candidate operate on package-lock.json rather than editing package.json?",
-        "Does the new handler avoid invented path builders when constructing the expression?",
-        "Does the trajectory avoid prefixing the bash command with comment lines per the CONTEXT SYSTEM?",
-        "Does the trajectory check the lockfile for ESLint entries that need updating?",
-    ]
-
-    assert all(is_terminal_gate_question(text) for text in true_gates)
-    assert not any(is_terminal_gate_question(text) for text in false_gates)
 
 
 def test_unbounded_submit_questions_are_diagnostic_only():
@@ -401,17 +348,8 @@ def test_parse_questions_keeps_validated_tag_and_blanks_invalid():
 
 
 def test_question_schema_floor_does_not_force_padding():
-    schema = question_schema(50)["properties"]["questions"]
+    schema = behavior_question_schema(50)["properties"]["questions"]
     assert schema["minItems"] == 11 and schema["maxItems"] == 50
-
-
-def test_question_schema_includes_tag_enum():
-    items = question_schema(50)["properties"]["questions"]["items"]
-    assert items["properties"]["tag"] == {
-        "type": "string",
-        "enum": ["explore", "verification", "action", "economy"],
-    }
-    assert "tag" in items["required"]
 
 
 def test_parse_questions_accepts_slightly_short_and_truncates_extra():
@@ -466,7 +404,6 @@ def test_parse_questions_accepts_sparse_terminal_gates_when_list_is_large_enough
     out, ok = parse_questions(json.dumps({"questions": items}), 50)
 
     assert len(out) == 25
-    assert sum(q["category"] == "terminal_gate" for q in out) == 1
     assert ok is True
 
 
@@ -497,7 +434,7 @@ def test_parse_keeps_size_ladder_rungs():
     ]
     extras = [{"text": f"q{i} gate{i}?", "example_bad": "bad"} for i in range(20)]
     parsed, ok = parse_questions(json.dumps({"questions": rungs + extras}), 50)
-    ladder = [q for q in parsed if q["category"] == "size"]
+    ladder = [q for q in parsed if is_measurement_bound_question(q["text"])]
     assert len(ladder) == 6
     assert ok
 

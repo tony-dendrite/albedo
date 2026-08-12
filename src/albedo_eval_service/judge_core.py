@@ -13,12 +13,12 @@ from typing import Any
 from .judge_prompts import (
     BEHAVIOR_COMMON,
     BEHAVIOR_PHASES,
-    CONTENT_QUESTION_SYSTEM,
-    CONTENT_QUESTION_USER,
-    CONTENT_SCORED_WINDOW_BLOCK,
     JUDGE_SYSTEM,
     JUDGE_USER,
     NO_TESTS_NOTE,
+    REFERENCE_QUESTION_SYSTEM,
+    REFERENCE_QUESTION_USER,
+    REFERENCE_SCORED_WINDOW_BLOCK,
     RUBRIC_ECONOMY_CAP,
     RUBRIC_LENGTH_BOUNDS,
     RUBRIC_MAX_QUESTIONS,
@@ -58,19 +58,17 @@ JUDGE_PROVIDER_PINS: dict[str, dict[str, object]] = {
 VALID_TAGS = ("explore", "verification", "action", "continuity", "economy")
 
 
-
-
 def build_behavior_messages(
     *, phase: str, index: int, task: str, prefix_tail: str, k: int, tests_seen: bool,
 ) -> list[dict[str, str]]:
     behavior = BEHAVIOR_PHASES[phase]
-    part = behavior.parts[index]
+    part_text = behavior.parts[index].text
     if phase == "at_edit" and index == 0 and not tests_seen:
-        part += NO_TESTS_NOTE
+        part_text += NO_TESTS_NOTE
     gold = "\n".join(f"  GOOD: {t}" for t in behavior.gold)
     system = (
         f"You write EXACTLY {k} yes/no checklist questions testing ONE behaviour of a "
-        f"coding-agent trajectory.\n\n{behavior.head}\n\nTHE BEHAVIOUR:\n{part}\n\n"
+        f"coding-agent trajectory.\n\n{behavior.head}\n\nTHE BEHAVIOUR:\n{part_text}\n\n"
         f"CANONICAL FORM — match this style:\n{gold}\n\nRULES:\n"
         f"- INSTANTIATE: at least 3 of the questions must name a concrete file, symbol, or code "
         f"fragment copied verbatim from the sample context below (never invented, never guessed "
@@ -300,9 +298,9 @@ def duplicate_economy_bounds(
     raw = _reference_raw_measurements(reference)
     duplicates: list[dict[str, str]] = []
     for question in questions:
-        if question.get("category") != "size":
-            continue
         text = (question.get("text") or "").strip()
+        if not is_measurement_bound_question(text):
+            continue
         for metric, pattern in _ECONOMY_TEMPLATE_METRICS:
             match = pattern.match(text)
             if not match:
@@ -316,11 +314,12 @@ def duplicate_economy_bounds(
     return duplicates
 
 
-def content_question_schema() -> dict[str, Any]:
+def reference_question_schema() -> dict[str, Any]:
     step = {
         "type": "object",
         "properties": {
-            "step": {"type": "integer"}, "text": {"type": "string"},
+            "step": {"type": "integer"},
+            "text": {"type": "string"},
             "already_done_in_conversation": {"type": "boolean"},
             "demonstrated_by_reference": {"type": "boolean"},
             "verdict": {"type": "string", "enum": ["demonstrated", "not_demonstrated"]},
@@ -332,8 +331,10 @@ def content_question_schema() -> dict[str, Any]:
     question = {
         "type": "object",
         "properties": {
-            "step": {"type": "integer"}, "evidence": {"type": "string"},
-            "text": {"type": "string"}, "example_bad": {"type": "string"},
+            "step": {"type": "integer"},
+            "evidence": {"type": "string"},
+            "text": {"type": "string"},
+            "example_bad": {"type": "string"},
             "tag": {"type": "string", "enum": list(VALID_TAGS)},
         },
         "required": ["step", "evidence", "text", "example_bad", "tag"],
@@ -364,20 +365,20 @@ def content_question_schema() -> dict[str, Any]:
     }
 
 
-def build_content_question_messages(
+def build_reference_question_messages(
     *, task: str, reference: str, fmt: str, prefix_turns: int, candidate_turns: int,
 ) -> list[dict[str, str]]:
-    system = CONTENT_QUESTION_SYSTEM.format(
+    system = REFERENCE_QUESTION_SYSTEM.format(
         target=RUBRIC_REFERENCE_TARGET, min_n=RUBRIC_MIN_QUESTIONS, max_n=RUBRIC_MAX_QUESTIONS,
         negative_cap=RUBRIC_NEGATIVE_CAP, economy_cap=RUBRIC_ECONOMY_CAP,
         bound_n=RUBRIC_LENGTH_BOUNDS,
     )
-    window = CONTENT_SCORED_WINDOW_BLOCK.format(
+    window = REFERENCE_SCORED_WINDOW_BLOCK.format(
         workflow_text=_workflow_text(task), prefix_turns=prefix_turns,
         candidate_turns=candidate_turns, observation_format=fmt,
         success_marker=_OBSERVATION_SUCCESS_MARKERS.get(fmt, _OBSERVATION_SUCCESS_MARKERS["returncode"]),
     )
-    user = CONTENT_QUESTION_USER.format(
+    user = REFERENCE_QUESTION_USER.format(
         task=task.rstrip(), reference=reference.rstrip(), min_n=RUBRIC_MIN_QUESTIONS,
         max_n=RUBRIC_MAX_QUESTIONS, reference_measurements=_reference_measurements(reference),
         scored_window=window, bound_n=RUBRIC_LENGTH_BOUNDS,
@@ -548,7 +549,7 @@ def apply_measurement_gate(
         if (
             reference_made_edit
             and final_is_read
-            and (question.get("requires") == "action" or question.get("category") == "progress")
+            and (question.get("requires") == "action")
         ):
             gated[qid] = "0"
     return gated
@@ -604,9 +605,12 @@ def strip_candidate_reasoning(trajectory: str) -> str:
 
 def build_judge_messages(*, response: str, questions: list[dict[str, str]]) -> list[dict[str, str]]:
     shown = [
-        {"id": q["id"], "category": q.get("category", "overall"), "tag": q.get("tag", ""),
-         "text": q["text"], "example_bad": q.get("example_bad", "")}
-        for q in questions
+        {
+            "id": q["id"],
+            "tag": q.get("tag", ""),
+            "text": q["text"],
+            "example_bad": q.get("example_bad", ""),
+        } for q in questions
     ]
     cleaned = strip_candidate_reasoning(strip_reply_injection(response)).rstrip()
     return [
@@ -622,7 +626,7 @@ def build_judge_messages(*, response: str, questions: list[dict[str, str]]) -> l
     ]
 
 
-def question_schema(n: int) -> dict[str, Any]:
+def behavior_question_schema(n: int) -> dict[str, Any]:
     return {
         "type": "object",
         "properties": {
@@ -635,13 +639,12 @@ def question_schema(n: int) -> dict[str, Any]:
                     "properties": {
                         "text": {"type": "string"},
                         "example_bad": {"type": "string"},
-                        "requires": {"type": "string", "enum": ["action", "read", "neutral"]},
-                        "tag": {
+                        "requires": {
                             "type": "string",
-                            "enum": ["explore", "verification", "action", "economy"],
+                            "enum": ["action", "read", "neutral"],
                         },
                     },
-                    "required": ["text", "example_bad", "requires", "tag"],
+                    "required": ["text", "example_bad", "requires"],
                     "additionalProperties": False,
                 },
             }
@@ -750,68 +753,6 @@ _GENERIC_HYGIENE_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
-_TERMINAL_GATE_RE = re.compile(
-    r"("
-    r"\b(?:terminal[- ]gate|final[- ]state|sane final state|broken final state)\b|"
-    r"\b(?:final|end|ends|ending|last observed|last action|repository state|before submitting|"
-    r"before submission|after success|submit after success|stop after success)\b"
-    r".*\b(?:unresolved|failed|failure|traceback|test|sed|patch|heredoc|command-not-found|"
-    r"no-such-file|broken|syntax|debug|temporary|artifact|unverified|missing submit)\b|"
-    r"\b(?:unresolved failed|failed command|failed test|failed sed|failed patch|failed heredoc|"
-    r"traceback|command-not-found|no-such-file)\b.*\b(?:final|end|ending|last|submit)\b|"
-    r"\b(?:hand[- ](?:write|writing|edit|editing)|manual(?:ly)?(?:[- ](?:write|writing|edit|editing))?)\b"
-    r".*\b(?:lockfile|checksum|go\.sum|package-lock|yarn\.lock|integrity|hash|generated metadata|"
-    r"package metadata)\b|"
-    r"\b(?:debug print|temporary artifact|scratch script|backup file)\b.*\b(?:final|end|left|leaving)\b|"
-    r"\b(?:fabricated|invented)\b.*\b(?:checksum|hash|integrity|version string|dependency version)\b|"
-    r"\bforbidden (?:interpreter|interpreters|tool|tools|build tool|build tools|test runner|test runners)\b|"
-    r"\b(?:submit|submits|submitting|stop|stops|stopping) after success\b|"
-    r"\brequired submit\b"
-    r")",
-    re.IGNORECASE,
-)
-_QUESTION_CATEGORY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    (
-        "system_prompt",
-        re.compile(
-            r"\b(?:context system|system prompt|forbidden|interpreter|build tool|test runner|"
-            r"exactly one|bash block|response shape|protocol)\b",
-            re.IGNORECASE,
-        ),
-    ),
-    (
-        "progress",
-        re.compile(
-            r"\b(?:progress|advance|turn-to-turn|adjacent|later output|previous observation|"
-            r"immediately prior|react|reaction|respond|loop|repeat|redundan)\b",
-            re.IGNORECASE,
-        ),
-    ),
-    (
-        "grounding",
-        re.compile(
-            r"\b(?:ground|invent|fabricat|real file|real path|observed|shown|existing|"
-            r"path|symbol|parameter|id|flag)\b",
-            re.IGNORECASE,
-        ),
-    ),
-    (
-        "verification",
-        re.compile(
-            r"\b(?:verify|verification|confirm|test|build|diff|re-read|read back|inspect"
-            r"|cat|grep|sed -n)\b",
-            re.IGNORECASE,
-        ),
-    ),
-    (
-        "work_correctness",
-        re.compile(
-            r"\b(?:correct|right|edit|command|fix|target|syntax|workflow|lifecycle|"
-            r"do-no-harm|damage|corrupt|lockfile|checksum|go\.sum|package-lock)\b",
-            re.IGNORECASE,
-        ),
-    ),
-)
 
 
 def _question_signature(text: str) -> frozenset[str]:
@@ -874,25 +815,12 @@ def _is_negative_question(text: str) -> bool:
     return bool(_NEGATIVE_QUESTION_RE.search(text))
 
 
-def is_terminal_gate_question(text: str) -> bool:
-    return bool(_TERMINAL_GATE_RE.search(text))
-
-
 def is_unbounded_submit_question(text: str) -> bool:
     return (
         bool(_UNCONDITIONAL_SUBMIT_RE.search(text))
         and not _is_negative_question(text)
         and not bool(_BOUNDED_SUBMIT_RE.search(text))
     )
-
-
-def classify_question_category(text: str) -> str:
-    if is_terminal_gate_question(text):
-        return "terminal_gate"
-    for category, pattern in _QUESTION_CATEGORY_PATTERNS:
-        if pattern.search(text):
-            return category
-    return "other"
 
 
 def parse_questions(
@@ -940,7 +868,6 @@ def parse_questions(
                 out.append({
                     "text": text,
                     "example_bad": str(item.get("example_bad", "")).strip(),
-                    "category": "size",
                     "requires": str(item.get("requires", "neutral")),
                     "tag": t if (t := str(item.get("tag", "")).strip().lower()) in VALID_TAGS
                     else "",
@@ -982,7 +909,6 @@ def parse_questions(
             out.append({
                 "text": text,
                 "example_bad": str(item.get("example_bad", "")).strip(),
-                "category": classify_question_category(text),
                 "requires": str(item.get("requires", "neutral")),
                 "tag": t if (t := str(item.get("tag", "")).strip().lower()) in VALID_TAGS else "",
                 **({"evidence": e} if (e := str(item.get("evidence", "")).strip()) else {}),

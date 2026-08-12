@@ -461,6 +461,14 @@ def test_prepare_anchors_on_reference_and_filters_leaks():
     assert "REFERENCE STEP" in result.source["reference_trajectory"]
     assert all("the reference" not in q["text"].casefold() for q in result.questions)
 
+    behavior_tags = {q["tag"] for q in result.questions if q["requires"] == "action"
+                      and q["tag"].startswith("behavior:")}
+    assert behavior_tags == {
+        "behavior:precision_reads",
+        "behavior:issue_anchored_narrowing",
+        "behavior:convergence_and_orientation",
+    }
+
 
 def test_prepare_raises_when_reference_generation_and_reroll_both_fail():
     from albedo_eval_service.judge_api import QuestionPrepSample, QuestionScoringUnavailable
