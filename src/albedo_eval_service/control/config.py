@@ -9,7 +9,6 @@ from ..shared.sampling import SAMPLING_ALGO
 
 
 class Settings(BaseSettings):
-
     model_config = SettingsConfigDict(
         env_file=".env",
         env_prefix="ALBEDO_EVAL_",

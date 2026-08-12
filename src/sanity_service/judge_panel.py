@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import asyncio
@@ -6,7 +5,7 @@ import asyncio
 from loguru import logger
 
 from albedo_eval_service.judge_config import JudgeSettings, get_judge_settings
-from albedo_eval_service.judge_llm_client import JudgeRawResponse, JudgeLLMClient
+from albedo_eval_service.judge_llm_client import JudgeLLMClient, JudgeRawResponse
 
 SANITY_DEFAULT_JUDGE_MODELS: tuple[str, ...] = ("z-ai/glm-5.2",)
 
@@ -32,7 +31,9 @@ async def query_panel(
             return result
         except Exception as exc:
             logger.warning("[sanity/panel] {} failed: {}: {}", model, type(exc).__name__, exc)
-            return JudgeRawResponse(model=model, provider=None, raw="", error=f"{type(exc).__name__}: {exc}")
+            return JudgeRawResponse(
+                model=model, provider=None, raw="", error=f"{type(exc).__name__}: {exc}"
+            )
 
     results = list(await asyncio.gather(*[_one(m) for m in models]))
     resolved = sum(1 for r in results if not r.error)

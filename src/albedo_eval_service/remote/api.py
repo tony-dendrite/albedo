@@ -8,13 +8,12 @@ from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, We
 from loguru import logger
 from pydantic import BaseModel
 
+from ..modelstore.resolver import ModelArtifactResolver
+from ..scoring.score_bridge import score_bridge_hub
 from ..shared.models import EvalRequest
 from .config import RemoteSettings, get_remote_settings
-from ..modelstore.resolver import ModelArtifactResolver
 from .state import RemoteRun, RemoteRunStore
 from .worker import RemoteEvalWorker
-from ..scoring.score_bridge import score_bridge_hub
-
 
 app = FastAPI(title="Albedo Remote Eval API", version="0.1.0")
 store = RemoteRunStore()
@@ -37,7 +36,9 @@ def health() -> dict[str, str]:
 
 
 @app.get("/ready")
-def ready(settings: RemoteSettings = Depends(get_remote_settings), _: None = Depends(require_auth)) -> dict[str, object]:
+def ready(
+    settings: RemoteSettings = Depends(get_remote_settings), _: None = Depends(require_auth)
+) -> dict[str, object]:
     warnings = []
     if not settings.dataset_root and not settings.mock_auto_verdict:
         warnings.append("ALBEDO_REMOTE_DATASET_ROOT is not set")
@@ -55,7 +56,9 @@ def ready(settings: RemoteSettings = Depends(get_remote_settings), _: None = Dep
 
 
 @app.get("/capacity")
-def capacity(settings: RemoteSettings = Depends(get_remote_settings), _: None = Depends(require_auth)) -> dict[str, object]:
+def capacity(
+    settings: RemoteSettings = Depends(get_remote_settings), _: None = Depends(require_auth)
+) -> dict[str, object]:
     return {
         "host_id": settings.host_id,
         "role": settings.host_role,
@@ -69,7 +72,9 @@ def capacity(settings: RemoteSettings = Depends(get_remote_settings), _: None = 
 
 
 @app.websocket("/score-bridge")
-async def score_bridge(websocket: WebSocket, settings: RemoteSettings = Depends(get_remote_settings)) -> None:
+async def score_bridge(
+    websocket: WebSocket, settings: RemoteSettings = Depends(get_remote_settings)
+) -> None:
     if settings.auth_token:
         expected = f"Bearer {settings.auth_token}"
         if websocket.headers.get("authorization") != expected:
@@ -154,7 +159,9 @@ def get_eval_run(remote_run_id: str, _: None = Depends(require_auth)) -> dict[st
 
 
 @app.get("/eval-runs/{remote_run_id}/events")
-def get_eval_run_events(remote_run_id: str, _: None = Depends(require_auth)) -> dict[str, list[dict[str, object]]]:
+def get_eval_run_events(
+    remote_run_id: str, _: None = Depends(require_auth)
+) -> dict[str, list[dict[str, object]]]:
     run = store.get(remote_run_id)
     if not run:
         raise HTTPException(status_code=404, detail="remote run not found")

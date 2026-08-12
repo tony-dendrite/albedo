@@ -37,7 +37,9 @@ def _db_url() -> str:
 DB_URL: str = _db_url()
 NETUID: int = int(os.environ.get("CHAIN_NETUID", "97"))
 
-MODEL_CACHE_DIR: str = os.environ.get("ALBEDO_MODEL_CACHE_DIR") or str(Path.home() / ".cache" / "albedo_models")
+MODEL_CACHE_DIR: str = os.environ.get("ALBEDO_MODEL_CACHE_DIR") or str(
+    Path.home() / ".cache" / "albedo_models"
+)
 os.environ["CV_MODEL_CACHE_DIR"] = MODEL_CACHE_DIR
 
 OPENSEARCH_URL: str = os.environ.get("ALBEDO_OPENSEARCH_URL", "http://127.0.0.1:9200")
@@ -53,20 +55,28 @@ S3_SECRET_KEY: str = os.environ.get("ALBEDO_S3_SECRET_KEY", "")
 FP_FILE: str = os.environ.get("ALBEDO_FP_FILE", "fingerprint.json")
 TENSORS_FILE: str = os.environ.get("ALBEDO_TENSORS_FILE", "tensors.json")
 
-ARCH_SPEC_PATH: str = os.environ.get("ALBEDO_ARCH_SPEC", str(_PKG / "validate" / "architecture_spec.json"))
+ARCH_SPEC_PATH: str = os.environ.get(
+    "ALBEDO_ARCH_SPEC", str(_PKG / "validate" / "architecture_spec.json")
+)
 
 SIM_THRESHOLD: float = float(os.environ.get("ALBEDO_SIM_THRESHOLD", "0.95"))
 KNN_CANDIDATES: int = int(os.environ.get("ALBEDO_KNN_CANDIDATES", "20"))
 
 REQUIRED_FILES: tuple[str, ...] = (
-    "config.json", "generation_config.json",
-    "tokenizer_config.json", "tokenizer.json", "chat_template.jinja",
-    "preprocessor_config.json", "video_preprocessor_config.json",
+    "config.json",
+    "generation_config.json",
+    "tokenizer_config.json",
+    "tokenizer.json",
+    "chat_template.jinja",
+    "preprocessor_config.json",
+    "video_preprocessor_config.json",
 )
 REQUIRE_SAFETENSORS: bool = True
 ALLOWED_FILES: tuple[str, ...] = (
     "model.safetensors.index.json",
-    ".gitattributes", "LICENSE", "README.md",
+    ".gitattributes",
+    "LICENSE",
+    "README.md",
 )
 ALLOWED_GLOBS: tuple[str, ...] = ("model-*-of-*.safetensors", "model.safetensors")
 FORBIDDEN_GLOBS: tuple[str, ...] = ("*.py",)

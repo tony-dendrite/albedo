@@ -67,5 +67,7 @@ def ensure_index(dim: int) -> str:
         c.indices.create(index=name, body=_mapping(dim))
         log.info("created opensearch index {} (knn dim={})", name, dim)
     else:
-        c.indices.put_mapping(index=name, body={"properties": {"weights_hash": {"type": "keyword"}}})
+        c.indices.put_mapping(
+            index=name, body={"properties": {"weights_hash": {"type": "keyword"}}}
+        )
     return name

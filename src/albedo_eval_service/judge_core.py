@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import json
@@ -44,6 +43,7 @@ NEGATIVE_QUESTION_LIMIT = 8
 def question_floor(n: int) -> int:
     return max(1, round(n * QUESTION_FLOOR_FRACTION))
 
+
 JUDGE_MODELS: tuple[str, ...] = (
     "z-ai/glm-5.2",
     "qwen/qwen3.5-397b-a17b",
@@ -51,15 +51,20 @@ JUDGE_MODELS: tuple[str, ...] = (
 )
 
 JUDGE_PROVIDER_PINS: dict[str, dict[str, object]] = {
-    model: {"allow_fallbacks": True, "quantizations": ["fp8"]}
-    for model in JUDGE_MODELS
+    model: {"allow_fallbacks": True, "quantizations": ["fp8"]} for model in JUDGE_MODELS
 }
 
 VALID_TAGS = ("explore", "verification", "action", "continuity", "economy")
 
 
 def build_behavior_messages(
-    *, phase: str, index: int, task: str, prefix_tail: str, k: int, tests_seen: bool,
+    *,
+    phase: str,
+    index: int,
+    task: str,
+    prefix_tail: str,
+    k: int,
+    tests_seen: bool,
 ) -> list[dict[str, str]]:
     behavior = BEHAVIOR_PHASES[phase]
     part_text = behavior.parts[index].text
@@ -78,14 +83,18 @@ def build_behavior_messages(
         f"- Questions address the trajectory only; never reference these instructions.\n\n"
         + BEHAVIOR_COMMON
     )
-    user = (f"SAMPLE CONTEXT:\n{(task or '')[:4000]}\n\nLAST CONTEXT TURNS:\n{prefix_tail}"
-            f"\n\nWrite the {k} questions.")
+    user = (
+        f"SAMPLE CONTEXT:\n{(task or '')[:4000]}\n\nLAST CONTEXT TURNS:\n{prefix_tail}"
+        f"\n\nWrite the {k} questions."
+    )
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
 _BEHAVIOR_BANNED_RE = re.compile(
     r"reproduc|\brepro\b|failure[^?]{0,40}before[^?]{0,20}(edit|fix|chang)"
-    r"|(run|execut)[^?]{0,25}after (each|every) edit", re.IGNORECASE)
+    r"|(run|execut)[^?]{0,25}after (each|every) edit",
+    re.IGNORECASE,
+)
 _BEHAVIOR_REPEAT_FORM_RE = re.compile(r"avoid|re-?issu|retr|repeat|already received", re.IGNORECASE)
 _BEHAVIOR_FILE_RE = re.compile(r"[\w/-]+\.(?:py|rs|go|js|ts|c|h|java|php|rb)\b")
 
@@ -100,18 +109,25 @@ def filter_behavior_questions(
         text = question.get("text", "")
         if _BEHAVIOR_BANNED_RE.search(text) and not _BEHAVIOR_REPEAT_FORM_RE.search(text):
             if discards is not None:
-                discards.append({
-                    "stage": "filter_behavior_questions", "reason": "behavior_banned_theme",
-                    "text": text, "origin": "behavior",
-                })
+                discards.append(
+                    {
+                        "stage": "filter_behavior_questions",
+                        "reason": "behavior_banned_theme",
+                        "text": text,
+                        "origin": "behavior",
+                    }
+                )
             continue
         if any(f not in context for f in _BEHAVIOR_FILE_RE.findall(text)):
             if discards is not None:
-                discards.append({
-                    "stage": "filter_behavior_questions",
-                    "reason": "behavior_file_not_in_context",
-                    "text": text, "origin": "behavior",
-                })
+                discards.append(
+                    {
+                        "stage": "filter_behavior_questions",
+                        "reason": "behavior_file_not_in_context",
+                        "text": text,
+                        "origin": "behavior",
+                    }
+                )
             continue
         kept.append(question)
     return kept
@@ -134,9 +150,7 @@ def measure(text: str) -> dict[str, int]:
     }
 
 
-_CANDIDATE_BLOCK_RE = re.compile(
-    r"CANDIDATE OUTPUT(?: \d+)?:\n------\n(.*?)\n------", re.DOTALL
-)
+_CANDIDATE_BLOCK_RE = re.compile(r"CANDIDATE OUTPUT(?: \d+)?:\n------\n(.*?)\n------", re.DOTALL)
 
 
 def candidate_output_measure(text: str) -> dict[str, int]:
@@ -172,7 +186,7 @@ def measurements_block(text: str) -> str:
         f"- longest single CANDIDATE OUTPUT: {c['max_chars']} characters\n"
         f"- CANDIDATE OUTPUT prose words, all scored blocks combined, excluding fenced code: "
         f"{c['total_prose_words']}\n"
-        f"- average CANDIDATE OUTPUT words per turn: {c['avg_words']} ({c['blocks']} scored blocks)\n"
+        f"- average CANDIDATE OUTPUT words per turn: {c['avg_words']} ({c['blocks']} scored blocks)\n"  # noqa: E501
         f"- average CANDIDATE OUTPUT characters per turn: {c['avg_chars']}\n"
         f"- total words of the whole document incl. context/observations: {m['total_words']}\n"
         f"- total characters: {m['total_chars']}\n"
@@ -202,7 +216,9 @@ def sample_phase(messages: list[dict[str, str]] | None) -> str:
 
 _WORKFLOW_HEAD_RE = re.compile(
     r"(## Recommended Workflow|<PROBLEM_SOLVING_WORKFLOW>|Follow these steps to resolve the issue:"
-    r"|Phase 1\. READING)", re.IGNORECASE)
+    r"|Phase 1\. READING)",
+    re.IGNORECASE,
+)
 
 _OBSERVATION_SUCCESS_MARKERS = {
     "returncode": "<returncode>N</returncode> around <output>; failure = non-zero returncode or "
@@ -213,15 +229,20 @@ _OBSERVATION_SUCCESS_MARKERS = {
 }
 
 # rubric tags carry no requires label; map them so the gate and label caps keep working
-RUBRIC_TAG_REQUIRES = {"action": "action", "continuity": "action", "verification": "action",
-                   "explore": "read", "economy": "neutral"}
+RUBRIC_TAG_REQUIRES = {
+    "action": "action",
+    "continuity": "action",
+    "verification": "action",
+    "explore": "read",
+    "economy": "neutral",
+}
 
 
 def _workflow_text(task: str) -> str:
     m = _WORKFLOW_HEAD_RE.search(task or "")
     if not m:
         return "The task declares no numbered workflow."
-    tail = task[m.start():]
+    tail = task[m.start() :]
     stop = re.search(r"\n## (?!Recommended)|</PROBLEM_SOLVING_WORKFLOW>|\n<(?!/)[A-Z_]+>", tail)
     return tail[: stop.end() if stop else 1500][:1500]
 
@@ -269,23 +290,44 @@ def _reference_raw_measurements(reference: str) -> dict[str, int]:
 
 
 _ECONOMY_TEMPLATE_METRICS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("total_words", re.compile(r"^Is total CANDIDATE OUTPUT at most (\d[\d,]*) words\?$", re.IGNORECASE)),
-    ("max_words", re.compile(r"^Is the longest single output at most (\d[\d,]*) words\?$", re.IGNORECASE)),
-    ("total_chars", re.compile(
-        r"^Is total CANDIDATE OUTPUT at most (\d[\d,]*) characters\?$", re.IGNORECASE
-    )),
-    ("max_chars", re.compile(
-        r"^Is the longest single output at most (\d[\d,]*) characters\?$", re.IGNORECASE
-    )),
-    ("total_prose_words", re.compile(
-        r"^Is CANDIDATE OUTPUT prose, apart from code blocks, at most (\d[\d,]*) words\?$", re.IGNORECASE
-    )),
-    ("avg_words", re.compile(
-        r"^Is the average CANDIDATE OUTPUT per turn at most (\d[\d,]*) words\?$", re.IGNORECASE
-    )),
-    ("avg_chars", re.compile(
-        r"^Is the average CANDIDATE OUTPUT per turn at most (\d[\d,]*) characters\?$", re.IGNORECASE
-    )),
+    (
+        "total_words",
+        re.compile(r"^Is total CANDIDATE OUTPUT at most (\d[\d,]*) words\?$", re.IGNORECASE),
+    ),
+    (
+        "max_words",
+        re.compile(r"^Is the longest single output at most (\d[\d,]*) words\?$", re.IGNORECASE),
+    ),
+    (
+        "total_chars",
+        re.compile(r"^Is total CANDIDATE OUTPUT at most (\d[\d,]*) characters\?$", re.IGNORECASE),
+    ),
+    (
+        "max_chars",
+        re.compile(
+            r"^Is the longest single output at most (\d[\d,]*) characters\?$", re.IGNORECASE
+        ),
+    ),
+    (
+        "total_prose_words",
+        re.compile(
+            r"^Is CANDIDATE OUTPUT prose, apart from code blocks, at most (\d[\d,]*) words\?$",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "avg_words",
+        re.compile(
+            r"^Is the average CANDIDATE OUTPUT per turn at most (\d[\d,]*) words\?$", re.IGNORECASE
+        ),
+    ),
+    (
+        "avg_chars",
+        re.compile(
+            r"^Is the average CANDIDATE OUTPUT per turn at most (\d[\d,]*) characters\?$",
+            re.IGNORECASE,
+        ),
+    ),
 )
 
 
@@ -324,8 +366,13 @@ def reference_question_schema() -> dict[str, Any]:
             "demonstrated_by_reference": {"type": "boolean"},
             "verdict": {"type": "string", "enum": ["demonstrated", "not_demonstrated"]},
         },
-        "required": ["step", "text", "already_done_in_conversation",
-                     "demonstrated_by_reference", "verdict"],
+        "required": [
+            "step",
+            "text",
+            "already_done_in_conversation",
+            "demonstrated_by_reference",
+            "verdict",
+        ],
         "additionalProperties": False,
     }
     question = {
@@ -356,7 +403,9 @@ def reference_question_schema() -> dict[str, Any]:
             },
             "questions": {
                 # the prompt itself allows 8-14 when the reference only diagnosed
-                "type": "array", "minItems": 8, "maxItems": RUBRIC_MAX_QUESTIONS,
+                "type": "array",
+                "minItems": 8,
+                "maxItems": RUBRIC_MAX_QUESTIONS,
                 "items": question,
             },
         },
@@ -366,22 +415,38 @@ def reference_question_schema() -> dict[str, Any]:
 
 
 def build_reference_question_messages(
-    *, task: str, reference: str, fmt: str, prefix_turns: int, candidate_turns: int,
+    *,
+    task: str,
+    reference: str,
+    fmt: str,
+    prefix_turns: int,
+    candidate_turns: int,
 ) -> list[dict[str, str]]:
     system = REFERENCE_QUESTION_SYSTEM.format(
-        target=RUBRIC_REFERENCE_TARGET, min_n=RUBRIC_MIN_QUESTIONS, max_n=RUBRIC_MAX_QUESTIONS,
-        negative_cap=RUBRIC_NEGATIVE_CAP, economy_cap=RUBRIC_ECONOMY_CAP,
+        target=RUBRIC_REFERENCE_TARGET,
+        min_n=RUBRIC_MIN_QUESTIONS,
+        max_n=RUBRIC_MAX_QUESTIONS,
+        negative_cap=RUBRIC_NEGATIVE_CAP,
+        economy_cap=RUBRIC_ECONOMY_CAP,
         bound_n=RUBRIC_LENGTH_BOUNDS,
     )
     window = REFERENCE_SCORED_WINDOW_BLOCK.format(
-        workflow_text=_workflow_text(task), prefix_turns=prefix_turns,
-        candidate_turns=candidate_turns, observation_format=fmt,
-        success_marker=_OBSERVATION_SUCCESS_MARKERS.get(fmt, _OBSERVATION_SUCCESS_MARKERS["returncode"]),
+        workflow_text=_workflow_text(task),
+        prefix_turns=prefix_turns,
+        candidate_turns=candidate_turns,
+        observation_format=fmt,
+        success_marker=_OBSERVATION_SUCCESS_MARKERS.get(
+            fmt, _OBSERVATION_SUCCESS_MARKERS["returncode"]
+        ),
     )
     user = REFERENCE_QUESTION_USER.format(
-        task=task.rstrip(), reference=reference.rstrip(), min_n=RUBRIC_MIN_QUESTIONS,
-        max_n=RUBRIC_MAX_QUESTIONS, reference_measurements=_reference_measurements(reference),
-        scored_window=window, bound_n=RUBRIC_LENGTH_BOUNDS,
+        task=task.rstrip(),
+        reference=reference.rstrip(),
+        min_n=RUBRIC_MIN_QUESTIONS,
+        max_n=RUBRIC_MAX_QUESTIONS,
+        reference_measurements=_reference_measurements(reference),
+        scored_window=window,
+        bound_n=RUBRIC_LENGTH_BOUNDS,
     )
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
@@ -406,10 +471,14 @@ def filter_reference_leaks(
     kept = []
     for q in questions:
         if "the reference" in q["text"].casefold():
-            discards.append({
-                "stage": "filter_reference_leaks", "reason": "reference_leak",
-                "text": q["text"], "origin": "content",
-            })
+            discards.append(
+                {
+                    "stage": "filter_reference_leaks",
+                    "reason": "reference_leak",
+                    "text": q["text"],
+                    "origin": "content",
+                }
+            )
         else:
             kept.append(q)
     return kept
@@ -436,20 +505,21 @@ def _edited_in_turn(text: str) -> bool:
     apply_measurement_gate permanently inert.
     """
     return any(_EDIT_COMMAND_RE.search(cmd) for cmd in _EDIT_BLOCK_RE.findall(text or ""))
+
+
 _SUBMIT_RE = re.compile(re.escape(COMPLETE_MARKER))
 _UNFOLDED_AVOID_RE = re.compile(
     r"^\s*(?:does[^?]{0,60}\bavoid|is[^?]{0,60}\bfree of|does[^?]{0,60}\brefrain)", re.IGNORECASE
 )
-_ACTION_VERB_RE = re.compile(r"\b(edit|modif|submit|propagat|verif|appl|patch|chang|fix)\w*\b", re.IGNORECASE)
+_ACTION_VERB_RE = re.compile(
+    r"\b(edit|modif|submit|propagat|verif|appl|patch|chang|fix)\w*\b", re.IGNORECASE
+)
 _COMPLETED_WORK_RE = re.compile(
-    r"\b(submit|final output|after the edit|the edit .{0,30}(applied|made|verified))\b", re.IGNORECASE
+    r"\b(submit|final output|after the edit|the edit .{0,30}(applied|made|verified))\b",
+    re.IGNORECASE,
 )
 
-READ_CAPS_BY_PHASE = {
-    "cold": 10,
-    "pre_edit": 7,
-    "at_edit": 5
-}
+READ_CAPS_BY_PHASE = {"cold": 10, "pre_edit": 7, "at_edit": 5}
 READ_ONLY_QUESTION_CAP = 5
 
 
@@ -546,11 +616,7 @@ def apply_measurement_gate(
         ):
             gated.pop(qid)
             continue
-        if (
-            reference_made_edit
-            and final_is_read
-            and (question.get("requires") == "action")
-        ):
+        if reference_made_edit and final_is_read and (question.get("requires") == "action"):
             gated[qid] = "0"
     return gated
 
@@ -563,7 +629,7 @@ def _drop_unclosed_reasoning(text: str, fences: list[str]) -> str:
     match = THINK_OPEN_RE.search(text)
     if not match:
         return text
-    tail = text[match.end():]
+    tail = text[match.end() :]
     if _COMMAND_FENCE_RE.search(unmask_fenced_spans(tail, fences)):
         return text[: match.start()] + tail
     return text[: match.start()]
@@ -603,6 +669,7 @@ def strip_candidate_reasoning(trajectory: str) -> str:
 
     return _CANDIDATE_BLOCK_RE.sub(_rewrite, trajectory or "")
 
+
 def build_judge_messages(*, response: str, questions: list[dict[str, str]]) -> list[dict[str, str]]:
     shown = [
         {
@@ -610,7 +677,8 @@ def build_judge_messages(*, response: str, questions: list[dict[str, str]]) -> l
             "tag": q.get("tag", ""),
             "text": q["text"],
             "example_bad": q.get("example_bad", ""),
-        } for q in questions
+        }
+        for q in questions
     ]
     cleaned = strip_candidate_reasoning(strip_reply_injection(response)).rstrip()
     return [
@@ -865,23 +933,23 @@ def parse_questions(
                     continue
                 measurement_count += 1
                 kept_signatures.append(_question_signature(text))
-                out.append({
-                    "text": text,
-                    "example_bad": str(item.get("example_bad", "")).strip(),
-                    "requires": str(item.get("requires", "neutral")),
-                    "tag": t if (t := str(item.get("tag", "")).strip().lower()) in VALID_TAGS
-                    else "",
-                })
+                out.append(
+                    {
+                        "text": text,
+                        "example_bad": str(item.get("example_bad", "")).strip(),
+                        "requires": str(item.get("requires", "neutral")),
+                        "tag": t
+                        if (t := str(item.get("tag", "")).strip().lower()) in VALID_TAGS
+                        else "",
+                    }
+                )
                 continue
             is_negative = _is_negative_question(text)
             if is_negative and negative_count >= NEGATIVE_QUESTION_LIMIT:
                 _drop("negative_cap", text)
                 continue
             is_generic_hygiene = _is_generic_hygiene_question(text)
-            if (
-                is_generic_hygiene
-                and generic_hygiene_count >= GENERIC_HYGIENE_QUESTION_LIMIT
-            ):
+            if is_generic_hygiene and generic_hygiene_count >= GENERIC_HYGIENE_QUESTION_LIMIT:
                 _drop("generic_hygiene_cap", text)
                 continue
             template = _template_key(text)
@@ -898,7 +966,11 @@ def parse_questions(
                     near_dup_of = prev["text"]
                     break
             if near_dup_of is not None:
-                _drop("near_duplicate", text, detail=f"near-duplicate of kept question: {near_dup_of!r}")
+                _drop(
+                    "near_duplicate",
+                    text,
+                    detail=f"near-duplicate of kept question: {near_dup_of!r}",
+                )
                 continue
             template_counts[template] = template_counts.get(template, 0) + 1
             if is_negative:
@@ -906,19 +978,24 @@ def parse_questions(
             if is_generic_hygiene:
                 generic_hygiene_count += 1
             kept_signatures.append(signature)
-            out.append({
-                "text": text,
-                "example_bad": str(item.get("example_bad", "")).strip(),
-                "requires": str(item.get("requires", "neutral")),
-                "tag": t if (t := str(item.get("tag", "")).strip().lower()) in VALID_TAGS else "",
-                **({"evidence": e} if (e := str(item.get("evidence", "")).strip()) else {}),
-                **({"step": item["step"]} if isinstance(item.get("step"), int) else {}),
-            })
+            out.append(
+                {
+                    "text": text,
+                    "example_bad": str(item.get("example_bad", "")).strip(),
+                    "requires": str(item.get("requires", "neutral")),
+                    "tag": t
+                    if (t := str(item.get("tag", "")).strip().lower()) in VALID_TAGS
+                    else "",
+                    **({"evidence": e} if (e := str(item.get("evidence", "")).strip()) else {}),
+                    **({"step": item["step"]} if isinstance(item.get("step"), int) else {}),
+                }
+            )
     if len(out) > n:
         for extra in out[n:]:
             _drop(
-                "truncated_excess", extra["text"],
-                detail=f"{len(out)} well-formed candidates parsed, only the first {n} requested are kept",
+                "truncated_excess",
+                extra["text"],
+                detail=f"{len(out)} well-formed candidates parsed, only the first {n} requested are kept",  # noqa: E501
             )
         out = out[:n]
     for position, question in enumerate(out, start=1):
@@ -949,7 +1026,6 @@ def parse_answers(
     return answers, explanations, parse_ok
 
 
-
 def judge_yes_rate(
     answers: dict[str, str | None], questions: list[dict[str, str]] | None = None
 ) -> float | None:
@@ -962,7 +1038,8 @@ def response_score(
     questions: list[dict[str, str]] | None = None,
 ) -> float | None:
     rates = [
-        r for r in (judge_yes_rate(a, questions) for a in per_judge_answers.values())
+        r
+        for r in (judge_yes_rate(a, questions) for a in per_judge_answers.values())
         if r is not None
     ]
     return round(mean(rates), 6) if rates else None
@@ -997,7 +1074,7 @@ def aggregate_scores(
             "scored_sample_count": valid_count,
             "fault_class": "PROVIDER_FAULT",
             "fault_code": "scoring_invalid",
-            "fault_message": f"Only {valid_count}/{total} samples valid (< {min_valid_fraction:.0%})",
+            "fault_message": f"Only {valid_count}/{total} samples valid (< {min_valid_fraction:.0%})",  # noqa: E501
             "retryable": True,
         }
 

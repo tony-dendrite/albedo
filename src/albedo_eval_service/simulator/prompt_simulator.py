@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from ..shared.observation_format import OPENHANDS, RETURNCODE, SWE_AGENT, wrap

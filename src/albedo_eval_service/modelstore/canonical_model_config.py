@@ -6,7 +6,6 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-
 GENESIS_MODEL_CONFIG_REF = (
     "registry.hippius.com/teutonic/qwen3.6-35b-a3b-genesis@"
     "sha256:efd5b8d0a1c1f472be56ff919419cdd0561bdecd9013d5c2a96dd0e23e89c165"
@@ -227,7 +226,8 @@ def apply_canonical_model_config(model_dir: Path) -> bool:
         json.dumps(GENESIS_PREPROCESSOR_CONFIG, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     (model_dir / "video_preprocessor_config.json").write_text(
-        json.dumps(GENESIS_VIDEO_PREPROCESSOR_CONFIG, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        json.dumps(GENESIS_VIDEO_PREPROCESSOR_CONFIG, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
     )
     for name in _CANONICAL_TOKENIZER_FILES:
         source = _CANONICAL_TOKENIZER_DIR / name
@@ -238,7 +238,9 @@ def apply_canonical_model_config(model_dir: Path) -> bool:
     for name in _MINER_TOKENIZER_SIDECARS:
         (model_dir / name).unlink(missing_ok=True)
 
-    allowed = set(_CANONICAL_JSON_FILES) | set(_CANONICAL_TOKENIZER_FILES) | set(_CACHE_MARKER_FILES)
+    allowed = (
+        set(_CANONICAL_JSON_FILES) | set(_CANONICAL_TOKENIZER_FILES) | set(_CACHE_MARKER_FILES)
+    )
     allowed.add("model.safetensors.index.json")
     for path in sorted(model_dir.rglob("*"), reverse=True):
         if path.is_file() and path.name not in allowed and not path.name.endswith(".safetensors"):

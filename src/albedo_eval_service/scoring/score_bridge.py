@@ -43,7 +43,9 @@ class ScoreBridgeHub:
             try:
                 await old.close(code=1012)
             except Exception as exc:
-                logger.debug(f"[score-bridge] best-effort close of replaced websocket failed: {exc}")
+                logger.debug(
+                    f"[score-bridge] best-effort close of replaced websocket failed: {exc}"
+                )
         try:
             while True:
                 message = await websocket.receive_json()
@@ -57,7 +59,9 @@ class ScoreBridgeHub:
                     self._loop = None
                     for future in self._pending.values():
                         if not future.done():
-                            future.set_exception(ScoreBridgeUnavailable("score bridge disconnected"))
+                            future.set_exception(
+                                ScoreBridgeUnavailable("score bridge disconnected")
+                            )
                     self._pending.clear()
 
     def request(

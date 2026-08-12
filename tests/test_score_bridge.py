@@ -45,7 +45,9 @@ def test_score_bridge_client_reconnects_after_disconnect(monkeypatch):
     monkeypatch.setattr("albedo_eval_service.scoring.score_bridge_client._run_once", fake_run_once)
     monkeypatch.setattr("albedo_eval_service.scoring.score_bridge_client.asyncio.sleep", fake_sleep)
 
-    settings = ScoreBridgeClientSettings(remote_auth_token="remote-token", reconnect_min_seconds=0.01)
+    settings = ScoreBridgeClientSettings(
+        remote_auth_token="remote-token", reconnect_min_seconds=0.01
+    )
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(run_bridge(settings))
 
@@ -96,7 +98,9 @@ def test_websocket_scorer_starts_category_prep_over_bridge(monkeypatch):
             "sample_id": "data/train-00000.parquet:0:0",
             "prompt": "Prompt",
             "messages": None,
-            "assistant_turns": RemoteSettings(scoring_backend="websocket").trajectory_assistant_turns,
+            "assistant_turns": RemoteSettings(
+                scoring_backend="websocket"
+            ).trajectory_assistant_turns,
         }
     ]
 

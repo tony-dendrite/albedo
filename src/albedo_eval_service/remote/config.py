@@ -8,7 +8,6 @@ from ..modelstore.canonical_model_config import GENESIS_MODEL_CONFIG_REF
 
 
 class RemoteSettings(BaseSettings):
-
     model_config = SettingsConfigDict(
         env_file=".env",
         env_prefix="ALBEDO_REMOTE_",

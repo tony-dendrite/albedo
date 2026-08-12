@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import json
@@ -22,7 +21,14 @@ class SanitySample:
     sample_id: str = ""
 
 
-def sample_prompts(*, seed: str, n: int = 3, manifest_path: str = "", manifest_hash: str = "", dataset_root: str = "", ) -> list[SanitySample]:
+def sample_prompts(
+    *,
+    seed: str,
+    n: int = 3,
+    manifest_path: str = "",
+    manifest_hash: str = "",
+    dataset_root: str = "",
+) -> list[SanitySample]:
     if manifest_path and dataset_root:
         from albedo_eval_service.remote.dataset import load_manifest_samples
         from albedo_eval_service.shared.dataset_manifest import load_manifest_file

@@ -8,7 +8,6 @@ from albedo_eval_service.control.config import Settings
 from albedo_eval_service.control.dispatcher import build_eval_request
 from albedo_eval_service.shared.models import DatasetConfig
 
-
 _FAMILIES = ("pr", "lm", "combine", "mechanical")
 
 

@@ -11,9 +11,8 @@ from loguru import logger
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from .artifacts import artifact_records_from_verdict
 from ..shared.models import EvalRequest, RemoteHost, SubmissionStatus
-
+from .artifacts import artifact_records_from_verdict
 
 _SCORED_OR_BEYOND = (
     "EVAL_RUNNING",
@@ -59,7 +58,6 @@ class ActiveEval:
 
 
 class EvalRepository:
-
     def __init__(self, database_url: str):
         self.database_url = database_url
 

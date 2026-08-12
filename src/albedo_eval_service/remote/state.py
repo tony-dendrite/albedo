@@ -65,7 +65,9 @@ class RemoteRunStore:
         self._runs: dict[str, RemoteRun] = {}
         self._lock = RLock()
 
-    def start(self, request: EvalRequest, *, challenger_won: bool = False, auto_verdict: bool = False) -> RemoteRun:
+    def start(
+        self, request: EvalRequest, *, challenger_won: bool = False, auto_verdict: bool = False
+    ) -> RemoteRun:
         remote_run_id = str(request.eval_run_id)
         with self._lock:
             existing = self._runs.get(remote_run_id)
@@ -106,7 +108,9 @@ class RemoteRunStore:
             return [run for run in self._runs.values() if run.state not in {"succeeded", "failed"}]
 
 
-def _smoke_progress_and_verdict(request: EvalRequest, *, challenger_won: bool) -> list[dict[str, Any]]:
+def _smoke_progress_and_verdict(
+    request: EvalRequest, *, challenger_won: bool
+) -> list[dict[str, Any]]:
     score_challenger = 0.58 if challenger_won else 0.42
     score_king = 1 - score_challenger
     return [
@@ -138,7 +142,7 @@ def _smoke_progress_and_verdict(request: EvalRequest, *, challenger_won: bool) -
                 "accelerator": request.gpu_request.accelerator,
                 "previous_king": ["0", "1", "2", "3"],
                 "challenger": ["4", "5", "6", "7"],
-                "tensor_parallel_size_per_model": request.gpu_request.tensor_parallel_size_per_model,
+                "tensor_parallel_size_per_model": request.gpu_request.tensor_parallel_size_per_model,  # noqa: E501
             },
             "artifacts": {},
         },

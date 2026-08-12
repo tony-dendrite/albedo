@@ -43,7 +43,11 @@ def notify_eval_error(event: EvalErrorNotification, *, webhook_url: str | None =
             timeout=float(os.environ.get("ALBEDO_SLACK_ERROR_TIMEOUT_SECONDS", "10")),
         )
         if response.status_code != 200:
-            logger.warning("Slack error notification failed: status={} body={}", response.status_code, response.text[:500])
+            logger.warning(
+                "Slack error notification failed: status={} body={}",
+                response.status_code,
+                response.text[:500],
+            )
         else:
             logger.info("Slack error notification sent for eval_run_id={}", event.eval_run_id or "")
     except Exception as exc:

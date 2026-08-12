@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from uuid import UUID
 
-
 VERDICT_ARTIFACT_TYPES = {
     "generated_samples": "GENERATED_SAMPLES",
     "scoring_results": "SCORING_RESULTS",

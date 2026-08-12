@@ -14,7 +14,9 @@ from uvicorn.importer import import_from_string
 
 
 class ScoreBridgeClientSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_prefix="ALBEDO_SCORE_BRIDGE_", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_prefix="ALBEDO_SCORE_BRIDGE_", extra="ignore"
+    )
 
     remote_ws_url: str = "ws://127.0.0.1:18090/score-bridge"
     remote_auth_token: str = ""
@@ -74,7 +76,9 @@ async def _run_once(settings: ScoreBridgeClientSettings, *, headers: dict[str, s
                     continue
                 if message.get("type") != "score_request":
                     continue
-                asyncio.create_task(_handle_score_request(settings, websocket, judge_client, message))
+                asyncio.create_task(
+                    _handle_score_request(settings, websocket, judge_client, message)
+                )
 
 
 async def _handle_score_request(
@@ -100,13 +104,21 @@ async def _handle_score_request(
             retry_count=settings.retry_count,
             base_backoff_seconds=settings.retry_backoff_seconds,
         )
-        await websocket.send(json.dumps({"type": "score_response", "request_id": request_id, "body": body}))
+        await websocket.send(
+            json.dumps({"type": "score_response", "request_id": request_id, "body": body})
+        )
     except Exception as exc:
         logger.exception(
-            f"[score-bridge-client] score request failed request_id={request_id} endpoint={endpoint}: {exc}"
+            f"[score-bridge-client] score request failed request_id={request_id} endpoint={endpoint}: {exc}"  # noqa: E501
         )
         await websocket.send(
-            json.dumps({"type": "score_response", "request_id": request_id, "error": f"{type(exc).__name__}: {exc}"})
+            json.dumps(
+                {
+                    "type": "score_response",
+                    "request_id": request_id,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
         )
 
 

@@ -13,10 +13,10 @@ from uuid import UUID, uuid4
 
 import psycopg
 from loguru import logger as log
-from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 @dataclass(frozen=True)
@@ -158,7 +158,7 @@ class SetReignRepository:
                         submission_id=submission["id"],
                         attempt_id=attempt_id,
                         fault_code="missing_winning_eval_run",
-                        fault_message="No successful winning eval run is available for reign promotion",
+                        fault_message="No successful winning eval run is available for reign promotion",  # noqa: E501
                     )
                     return True
 
@@ -174,7 +174,7 @@ class SetReignRepository:
                         submission_id=submission["id"],
                         attempt_id=attempt_id,
                         fault_code="challenger_model_hash_mismatch",
-                        fault_message="Winning eval challenger model hash does not match submission model hash",
+                        fault_message="Winning eval challenger model hash does not match submission model hash",  # noqa: E501
                     )
                     return True
 
@@ -282,7 +282,7 @@ class SetReignRepository:
                         submission_id=submission["id"],
                         attempt_id=attempt_id,
                         fault_code="missing_challenger_model_artifact",
-                        fault_message="Winning submission has no MODEL_MANIFEST artifact for king version",
+                        fault_message="Winning submission has no MODEL_MANIFEST artifact for king version",  # noqa: E501
                     )
                     return True
 

@@ -28,8 +28,10 @@ def check(files: list[str]) -> CheckOutcome:
 
     allowed_exact = set(REQUIRED_FILES) | set(ALLOWED_FILES)
     extras = sorted(
-        f for f in present
-        if f not in allowed_exact and not _matches_any(f, ALLOWED_GLOBS)
+        f
+        for f in present
+        if f not in allowed_exact
+        and not _matches_any(f, ALLOWED_GLOBS)
         and not _matches_any(f, FORBIDDEN_GLOBS)
     )
 
@@ -46,6 +48,10 @@ def check(files: list[str]) -> CheckOutcome:
         name=NAME,
         ok=ok,
         reason="; ".join(reasons),
-        details={"missing": missing, "forbidden": forbidden, "extras": extras,
-                 "n_files": len(present)},
+        details={
+            "missing": missing,
+            "forbidden": forbidden,
+            "extras": extras,
+            "n_files": len(present),
+        },
     )

@@ -35,9 +35,19 @@ _DEFAULT_GENESIS_MARKERS = ("qwen3.6-35b-a3b-genesis", "35b-a3b-genesis")
 _DEFAULT_ASSUME_MIRRORED_THROUGH = 90
 
 _ROMAN_NUMERALS = (
-    (1000, "M"), (900, "CM"), (500, "D"), (400, "CD"),
-    (100, "C"), (90, "XC"), (50, "L"), (40, "XL"),
-    (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I"),
+    (1000, "M"),
+    (900, "CM"),
+    (500, "D"),
+    (400, "CD"),
+    (100, "C"),
+    (90, "XC"),
+    (50, "L"),
+    (40, "XL"),
+    (10, "X"),
+    (9, "IX"),
+    (5, "V"),
+    (4, "IV"),
+    (1, "I"),
 )
 
 
@@ -57,7 +67,6 @@ class RateLimited(Exception):
 
 @dataclass
 class UploaderState:
-
     completed: set[int] = dataclasses.field(default_factory=set)
     backoff_until: dict[int, float] = dataclasses.field(default_factory=dict)
     backoff_delay: dict[int, float] = dataclasses.field(default_factory=dict)
@@ -425,7 +434,11 @@ def _source_cache_path(base_dir: Path, king: KingUpload) -> Path | None:
     if parsed:
         registry, repository, digest = parsed
         return (
-            base_dir / "oci" / registry / repository.replace("/", "__") / digest.removeprefix("sha256:")
+            base_dir
+            / "oci"
+            / registry
+            / repository.replace("/", "__")
+            / digest.removeprefix("sha256:")
         )
     if _is_hf_source(king.source_ref):
         repo, _, revision = king.source_ref.removeprefix("hf://").partition("@")
@@ -489,7 +502,9 @@ def _delete_work_copy(path: Path, work_dir: Path, eval_dir: Path) -> None:
         shutil.rmtree(partial, ignore_errors=True)
 
 
-def _missing_layers(manifest: dict, present: set[str], ignore_patterns: list[str]) -> list[tuple[str, str]]:
+def _missing_layers(
+    manifest: dict, present: set[str], ignore_patterns: list[str]
+) -> list[tuple[str, str]]:
     from huggingface_hub.utils import filter_repo_objects
 
     from albedo_eval_service.modelstore.resolver import _DIGEST_RE, _layer_filename
@@ -557,7 +572,9 @@ def download_missing_from_source(
             if auth.startswith("Bearer "):
                 token = auth.removeprefix("Bearer ")
             wanted = _missing_layers(response.json(), present, _UPLOAD_IGNORE_PATTERNS)
-            logger.info("{} — fetching {} missing blob(s) from Hippius", king.king_name, len(wanted))
+            logger.info(
+                "{} — fetching {} missing blob(s) from Hippius", king.king_name, len(wanted)
+            )
             for name, blob_digest in wanted:
                 destination = out_dir / name
                 destination.parent.mkdir(parents=True, exist_ok=True)
@@ -720,9 +737,7 @@ def _upload_model(api, king: KingUpload, model_dir: Path, settings: Settings, re
     logger.info("creating public HF repo {} (exist_ok)", repo_id)
     api.create_repo(repo_id=repo_id, repo_type="model", private=False, exist_ok=True)
     files = _iter_model_files(model_dir, _UPLOAD_IGNORE_PATTERNS)
-    logger.info(
-        "uploading {} model files + albedo.md to {} in one commit", len(files), repo_id
-    )
+    logger.info("uploading {} model files + albedo.md to {} in one commit", len(files), repo_id)
     operations = [_add_op(rel, str(Path(model_dir) / rel)) for rel in files]
     operations.append(_add_op("albedo.md", render_albedo_md(king).encode("utf-8")))
     api.create_commit(
@@ -784,7 +799,9 @@ def _verify_and_repair(api, king: KingUpload, settings: Settings, repo_id: str) 
     problems = _repo_problems(repo_id, present, settings.hf_token)
     if not problems:
         logger.info(
-            "{} — repo {} complete (HF check, {} files); no download", king.king_name, repo_id,
+            "{} — repo {} complete (HF check, {} files); no download",
+            king.king_name,
+            repo_id,
             len(present),
         )
         return False
@@ -896,7 +913,7 @@ def process_once(
                     state.permanent_skip.add(version)
                     _clear_backoff(state, version)
                     logger.warning(
-                        "{} source is gone on Hippius (HTTP 404/410) — giving up, will not retry: {}",
+                        "{} source is gone on Hippius (HTTP 404/410) — giving up, will not retry: {}",  # noqa: E501
                         king.king_name,
                         exc,
                     )
@@ -1017,7 +1034,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = _build_parser().parse_args()
     settings = load_settings(args)
-    lock = acquire_pid_lock(settings.lock_path)
+    _lock = acquire_pid_lock(settings.lock_path)
 
     logger.info(
         "king HF uploader starting: namespace={} eval_dir={} work_dir={} poll={}s dry_run={} "

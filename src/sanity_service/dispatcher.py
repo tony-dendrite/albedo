@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import argparse
@@ -40,6 +39,7 @@ _CANONICAL_TOKENIZER_PATH = (
 )
 _BASH_BLOCK_RE = re.compile(r"```(?:bash|sh|shell)\s*\n.*?```", re.IGNORECASE | re.DOTALL)
 
+
 @dataclass
 class _TrajectoryState:
     sample_id: str
@@ -52,12 +52,13 @@ class _TrajectoryState:
 
 
 class SanityDispatcher:
-
     def __init__(self, *, settings: SanitySettings, repository: PreEvalRepository) -> None:
         self.settings = settings
         self.repository = repository
 
-    def _build_request(self, submission: dict[str, Any], host: Any, attempt_id: UUID) -> SanityRunRequest:
+    def _build_request(
+        self, submission: dict[str, Any], host: Any, attempt_id: UUID
+    ) -> SanityRunRequest:
         samples = sample_prompts(
             seed=str(submission["block_hash"]),
             n=self.settings.sample_count,
@@ -90,7 +91,12 @@ class SanityDispatcher:
         if not claimed:
             logger.debug("[sanity-dispatch] no claimable pre-eval")
             return False
-        logger.info("[sanity-dispatch] claimed submission={} digest={:.16} host={}", claimed.submission_id, claimed.request.digest, claimed.remote_host.id,)
+        logger.info(
+            "[sanity-dispatch] claimed submission={} digest={:.16} host={}",
+            claimed.submission_id,
+            claimed.request.digest,
+            claimed.remote_host.id,
+        )
         client = SanityRemoteClient(
             base_url=claimed.remote_host.base_url,
             auth_token=self.settings.remote_auth_token,
@@ -114,8 +120,10 @@ class SanityDispatcher:
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 409:
                 logger.warning(
-                    "[sanity-dispatch] worker busy, releasing claim submission={} digest={:.16}: {}",
-                    claimed.submission_id, claimed.request.digest, exc,
+                    "[sanity-dispatch] worker busy, releasing claim submission={} digest={:.16}: {}",  # noqa: E501
+                    claimed.submission_id,
+                    claimed.request.digest,
+                    exc,
                 )
                 self.repository.release_pre_eval_attempt(
                     submission_id=claimed.submission_id,
@@ -125,7 +133,9 @@ class SanityDispatcher:
                 return True
             logger.warning(
                 "[sanity-dispatch] worker HTTP error submission={} digest={:.16}: {}",
-                claimed.submission_id, claimed.request.digest, exc,
+                claimed.submission_id,
+                claimed.request.digest,
+                exc,
             )
             self.repository.mark_pre_eval_failed(
                 submission_id=claimed.submission_id,
@@ -139,7 +149,12 @@ class SanityDispatcher:
             )
             return True
         except (httpx.HTTPError, asyncio.TimeoutError) as exc:
-            logger.warning("[sanity-dispatch] worker unreachable submission={} digest={:.16}: {}", claimed.submission_id, claimed.request.digest, exc,)
+            logger.warning(
+                "[sanity-dispatch] worker unreachable submission={} digest={:.16}: {}",
+                claimed.submission_id,
+                claimed.request.digest,
+                exc,
+            )
             self.repository.mark_pre_eval_failed(
                 submission_id=claimed.submission_id,
                 attempt_id=claimed.attempt_id,
@@ -183,10 +198,9 @@ class SanityDispatcher:
         try:
             for turn_index in range(turn_count):
                 active = [
-                    state for state in states 
-                    if  not state.stopped and
-                        not state.error and 
-                        not state.heuristic_reason
+                    state
+                    for state in states
+                    if not state.stopped and not state.error and not state.heuristic_reason
                 ]
 
                 if not active:
@@ -225,29 +239,63 @@ class SanityDispatcher:
                 except Exception as exc:
                     logger.warning("[sanity-dispatch] remote teardown failed: {}", exc)
 
-    async def _follow_until_result(self, client: SanityRemoteClient, *, submission_id: UUID, attempt_id: UUID, run_id: str) -> dict[str, Any]:
+    async def _follow_until_result(
+        self, client: SanityRemoteClient, *, submission_id: UUID, attempt_id: UUID, run_id: str
+    ) -> dict[str, Any]:
         seen = 0
         while True:
             events = [event async for event in client.iter_events(run_id)]
             for event in events[seen:]:
                 ev_type = event.get("type", "?")
-                logger.info("[sanity-dispatch] worker event={} run={} submission={:.8}", ev_type, run_id, str(submission_id),)
-                self.repository.record_remote_event(submission_id=submission_id, attempt_id=attempt_id, event=event)
+                logger.info(
+                    "[sanity-dispatch] worker event={} run={} submission={:.8}",
+                    ev_type,
+                    run_id,
+                    str(submission_id),
+                )
+                self.repository.record_remote_event(
+                    submission_id=submission_id, attempt_id=attempt_id, event=event
+                )
                 if event.get("type") == "result":
-                    logger.info("[sanity-dispatch] result received run={} state={} submission={:.8}", run_id, event.get("state"), str(submission_id),)
-                    self.repository.heartbeat_attempt(attempt_id=attempt_id, lease_seconds=self.settings.lease_seconds)
+                    logger.info(
+                        "[sanity-dispatch] result received run={} state={} submission={:.8}",
+                        run_id,
+                        event.get("state"),
+                        str(submission_id),
+                    )
+                    self.repository.heartbeat_attempt(
+                        attempt_id=attempt_id, lease_seconds=self.settings.lease_seconds
+                    )
                     return event
             seen = max(seen, len(events))
-            self.repository.heartbeat_attempt(attempt_id=attempt_id, lease_seconds=self.settings.lease_seconds)
+            self.repository.heartbeat_attempt(
+                attempt_id=attempt_id, lease_seconds=self.settings.lease_seconds
+            )
             status = await client.get_run(run_id)
             if status.get("type") == "result" or status.get("state") in {"succeeded", "failed"}:
                 if status.get("type") == "result":
-                    self.repository.record_remote_event(submission_id=submission_id, attempt_id=attempt_id, event=status)
+                    self.repository.record_remote_event(
+                        submission_id=submission_id, attempt_id=attempt_id, event=status
+                    )
                 return status
             await asyncio.sleep(self.settings.remote_event_poll_seconds)
 
-    async def _complete(self, *, submission_id: UUID, attempt_id: UUID, repo: str, digest: str, prompts: list[str], result: dict[str, Any],) -> None:
-        logger.info("[sanity-dispatch] completing submission={:.8} digest={:.16} state={}", str(submission_id), digest, result.get("state"),)
+    async def _complete(
+        self,
+        *,
+        submission_id: UUID,
+        attempt_id: UUID,
+        repo: str,
+        digest: str,
+        prompts: list[str],
+        result: dict[str, Any],
+    ) -> None:
+        logger.info(
+            "[sanity-dispatch] completing submission={:.8} digest={:.16} state={}",
+            str(submission_id),
+            digest,
+            result.get("state"),
+        )
         if result.get("state") == "failed":
             self.repository.mark_pre_eval_failed(
                 submission_id=submission_id,
@@ -283,7 +331,9 @@ class SanityDispatcher:
                 skip_viability=self.settings.skip_viability,
             )
         except Exception as exc:
-            logger.exception(f"[sanity-dispatch] judge gate failed submission={submission_id}: {exc}")
+            logger.exception(
+                f"[sanity-dispatch] judge gate failed submission={submission_id}: {exc}"
+            )
             self.repository.mark_pre_eval_failed(
                 submission_id=submission_id,
                 attempt_id=attempt_id,
@@ -353,7 +403,11 @@ class SanityDispatcher:
             return 0
         reconciled = 0
         for active in in_flight:
-            client = SanityRemoteClient(base_url=active.remote_host.base_url, auth_token=self.settings.remote_auth_token, timeout_seconds=self.settings.remote_event_timeout_seconds,)
+            client = SanityRemoteClient(
+                base_url=active.remote_host.base_url,
+                auth_token=self.settings.remote_auth_token,
+                timeout_seconds=self.settings.remote_event_timeout_seconds,
+            )
             try:
                 result = await asyncio.wait_for(
                     self._follow_until_result(
@@ -365,7 +419,12 @@ class SanityDispatcher:
                     timeout=follow_timeout,
                 )
             except (httpx.HTTPError, asyncio.TimeoutError) as exc:
-                logger.warning("[sanity-dispatch] reconcile skipped submission={} run={}: {}", active.submission_id, active.run_id, exc,)
+                logger.warning(
+                    "[sanity-dispatch] reconcile skipped submission={} run={}: {}",
+                    active.submission_id,
+                    active.run_id,
+                    exc,
+                )
                 continue
             finally:
                 await client.aclose()
@@ -379,7 +438,11 @@ class SanityDispatcher:
                     result=result,
                 )
             except Exception as exc:
-                logger.exception("[sanity-dispatch] reconcile _complete failed submission={}: {}", active.submission_id, exc)
+                logger.exception(
+                    "[sanity-dispatch] reconcile _complete failed submission={}: {}",
+                    active.submission_id,
+                    exc,
+                )
                 continue
             reconciled += 1
         return reconciled
@@ -389,18 +452,34 @@ class SanityDispatcher:
             try:
                 did_work = await self.dispatch_once()
                 if not did_work:
-                    logger.debug("[sanity-dispatch] idle — sleeping {}s", self.settings.dispatch_poll_seconds)
+                    logger.debug(
+                        "[sanity-dispatch] idle — sleeping {}s", self.settings.dispatch_poll_seconds
+                    )
                     await asyncio.sleep(self.settings.dispatch_poll_seconds)
             except Exception as exc:
-                logger.exception("[sanity-dispatch] unhandled error in dispatch loop, retrying in {}s: {}", self.settings.dispatch_poll_seconds, exc)
+                logger.exception(
+                    "[sanity-dispatch] unhandled error in dispatch loop, retrying in {}s: {}",
+                    self.settings.dispatch_poll_seconds,
+                    exc,
+                )
                 await asyncio.sleep(self.settings.dispatch_poll_seconds)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the Albedo sanity pre-eval dispatcher.")
-    parser.add_argument("--once", action="store_true", help="Claim and dispatch at most one pre-eval.")
-    parser.add_argument("--sweep-abandoned", action="store_true", help="Reclaim expired pre-eval attempts.",)
-    parser.add_argument("--reconcile-running", action="store_true", help="Replay in-flight pre-eval runs.",)
+    parser.add_argument(
+        "--once", action="store_true", help="Claim and dispatch at most one pre-eval."
+    )
+    parser.add_argument(
+        "--sweep-abandoned",
+        action="store_true",
+        help="Reclaim expired pre-eval attempts.",
+    )
+    parser.add_argument(
+        "--reconcile-running",
+        action="store_true",
+        help="Replay in-flight pre-eval runs.",
+    )
     parser.add_argument("--limit", type=int, default=10, help="Max active runs to reconcile.")
     args = parser.parse_args()
 
@@ -414,10 +493,16 @@ def main() -> None:
         ),
     )
     if args.sweep_abandoned:
-        logger.info("[sanity-dispatch] abandoned={}", dispatcher.repository.sweep_abandoned_pre_eval(worker_id=settings.worker_id),)
+        logger.info(
+            "[sanity-dispatch] abandoned={}",
+            dispatcher.repository.sweep_abandoned_pre_eval(worker_id=settings.worker_id),
+        )
     elif args.reconcile_running:
         try:
-            logger.info("[sanity-dispatch] reconciled={}", asyncio.run(dispatcher.reconcile_once(limit=args.limit)),)
+            logger.info(
+                "[sanity-dispatch] reconciled={}",
+                asyncio.run(dispatcher.reconcile_once(limit=args.limit)),
+            )
         except KeyboardInterrupt:
             logger.info("[sanity-dispatch] reconciler interrupted by signal, exiting cleanly")
     elif args.once:
@@ -427,9 +512,7 @@ def main() -> None:
 
 
 def _trajectory_states(request: SanityRunRequest) -> list[_TrajectoryState]:
-    sample_ids = request.sample_ids or [
-        f"sanity-sample:{i}" for i in range(len(request.prompts))
-    ]
+    sample_ids = request.sample_ids or [f"sanity-sample:{i}" for i in range(len(request.prompts))]
     prompt_messages = request.prompt_messages or []
     states: list[_TrajectoryState] = []
     for i, prompt in enumerate(request.prompts):
@@ -599,9 +682,7 @@ async def _simulate_observation(
 def _trajectory_result(
     run_id: str, states: list[_TrajectoryState], turn_count: int
 ) -> dict[str, Any]:
-    responses = [
-        "" if state.error else _format_scored_trajectory(state.turns) for state in states
-    ]
+    responses = ["" if state.error else _format_scored_trajectory(state.turns) for state in states]
     heuristics = [
         {
             "passed": not state.error and not state.heuristic_reason,
@@ -631,8 +712,7 @@ def _format_scored_trajectory(turns: list[dict[str, Any]]) -> str:
     assistant_index = 0
     parts = [
         "FULL CANDIDATE TRAJECTORY",
-        f"Score ONLY {target_label}. "
-        "The ENVIRONMENT OBSERVATION is context only.",
+        f"Score ONLY {target_label}. The ENVIRONMENT OBSERVATION is context only.",
     ]
     for turn in turns:
         role = str(turn.get("role") or "")
@@ -643,7 +723,9 @@ def _format_scored_trajectory(turns: list[dict[str, Any]]) -> str:
         elif role == "user" and turn.get("environment_observation"):
             label = "ENVIRONMENT OBSERVATION (context only, do not score)"
         else:
-            label = f"CONTEXT {role.upper()} (do not score)" if role else "CONTEXT TURN (do not score)"
+            label = (
+                f"CONTEXT {role.upper()} (do not score)" if role else "CONTEXT TURN (do not score)"
+            )
         parts.append(f"\n{label}:\n------\n{content}\n------")
     return "\n".join(parts).strip()
 

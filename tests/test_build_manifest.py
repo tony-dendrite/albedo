@@ -27,7 +27,9 @@ def _conversation(asst: int, edit_at: int) -> list[dict]:
     turns = [{"role": "system", "content": "s"}]
     for i in range(1, asst + 1):
         turns.append({"role": "user", "content": "o"})
-        turns.append({"role": "assistant", "content": "sed -i s/a/b/ f.py" if i == edit_at else "c"})
+        turns.append(
+            {"role": "assistant", "content": "sed -i s/a/b/ f.py" if i == edit_at else "c"}
+        )
     return turns
 
 

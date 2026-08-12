@@ -9,7 +9,6 @@ from ..shared.models import EvalRequest
 
 
 class RemoteEvalClient:
-
     def __init__(self, *, base_url: str, auth_token: str = "", timeout_seconds: float = 30.0):
         headers = {}
         if auth_token:

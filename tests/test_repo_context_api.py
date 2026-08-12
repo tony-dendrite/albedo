@@ -35,9 +35,7 @@ def make_client(result, service: FakeService | None = None) -> TestClient:
 
 def test_repo_context_happy_path():
     client = make_client(GroundingContext(context="BLOCK", kind="repo"))
-    response = client.post(
-        "/repo-context", json={"sample_id": "swe-zero/data/train-0.parquet:0:0"}
-    )
+    response = client.post("/repo-context", json={"sample_id": "swe-zero/data/train-0.parquet:0:0"})
     assert response.status_code == 200
     assert response.json() == {
         "sample_id": "swe-zero/data/train-0.parquet:0:0",

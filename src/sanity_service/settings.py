@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from functools import lru_cache
@@ -9,7 +8,9 @@ from sanity_service.config import DB_URL as _DEFAULT_DB_URL
 
 
 class SanitySettings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_prefix="SANITY_DISPATCH_", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_prefix="SANITY_DISPATCH_", extra="ignore"
+    )
 
     database_url: str = _DEFAULT_DB_URL
     worker_id: str = "sanity-dispatcher"

@@ -27,10 +27,11 @@ def build_eval_request(
     eval_run_id: UUID,
 ) -> EvalRequest:
     artifact_prefix = (
-        f"{settings.artifact_prefix.rstrip('/')}/submissions/"
-        f"{submission['id']}/eval/{eval_run_id}"
+        f"{settings.artifact_prefix.rstrip('/')}/submissions/{submission['id']}/eval/{eval_run_id}"
     )
-    sample_ids = submission.get("dataset_sample_ids") or _build_sample_ids(settings, submission["block_hash"])
+    sample_ids = submission.get("dataset_sample_ids") or _build_sample_ids(
+        settings, submission["block_hash"]
+    )
     return EvalRequest(
         eval_run_id=eval_run_id,
         submission_id=submission["id"],
@@ -131,8 +132,12 @@ class EvalDispatcher:
             await client.ready()
             start_response = await client.start_eval(claimed.request)
             remote_run_id = str(start_response.get("remote_run_id") or claimed.eval_run_id)
-            self.repository.set_remote_run_id(eval_run_id=claimed.eval_run_id, remote_run_id=remote_run_id)
-            self.repository.heartbeat_attempt(attempt_id=claimed.attempt_id, lease_seconds=self.settings.lease_seconds)
+            self.repository.set_remote_run_id(
+                eval_run_id=claimed.eval_run_id, remote_run_id=remote_run_id
+            )
+            self.repository.heartbeat_attempt(
+                attempt_id=claimed.attempt_id, lease_seconds=self.settings.lease_seconds
+            )
             verdict = await self._follow_until_verdict(
                 client,
                 submission_id=claimed.submission_id,
@@ -169,7 +174,6 @@ class EvalDispatcher:
             return True
         finally:
             await client.aclose()
-
 
     async def reconcile_once(self, *, limit: int = 10) -> int:
         reconciled = 0
@@ -265,7 +269,9 @@ class EvalDispatcher:
                 consecutive_errors += 1
                 if consecutive_errors >= max_consecutive_errors:
                     raise
-                logger.warning(f"[eval-dispatch] transient poll error ({consecutive_errors}/{max_consecutive_errors}), retrying: {exc}")
+                logger.warning(
+                    f"[eval-dispatch] transient poll error ({consecutive_errors}/{max_consecutive_errors}), retrying: {exc}"  # noqa: E501
+                )
                 await asyncio.sleep(min(10 * consecutive_errors, 60))
                 continue
 
@@ -275,7 +281,9 @@ class EvalDispatcher:
                     attempt_id=attempt_id,
                     event=event,
                 )
-                self.repository.heartbeat_attempt(attempt_id=attempt_id, lease_seconds=self.settings.lease_seconds)
+                self.repository.heartbeat_attempt(
+                    attempt_id=attempt_id, lease_seconds=self.settings.lease_seconds
+                )
                 if event.get("type") == "verdict":
                     return event
             seen_event_count = max(seen_event_count, len(events))
@@ -287,11 +295,16 @@ class EvalDispatcher:
                 consecutive_errors += 1
                 if consecutive_errors >= max_consecutive_errors:
                     raise
-                logger.warning(f"[eval-dispatch] transient state error ({consecutive_errors}/{max_consecutive_errors}), retrying: {exc}")
+                logger.warning(
+                    f"[eval-dispatch] transient state error ({consecutive_errors}/{max_consecutive_errors}), retrying: {exc}"  # noqa: E501
+                )
                 await asyncio.sleep(min(10 * consecutive_errors, 60))
                 continue
 
-            if remote_state.get("type") == "verdict" or remote_state.get("state") in {"succeeded", "failed"}:
+            if remote_state.get("type") == "verdict" or remote_state.get("state") in {
+                "succeeded",
+                "failed",
+            }:
                 if len(events) == seen_event_count and remote_state.get("type") == "verdict":
                     self.repository.record_remote_event(
                         submission_id=submission_id,
@@ -299,7 +312,9 @@ class EvalDispatcher:
                         event=remote_state,
                     )
                 return remote_state
-            self.repository.heartbeat_attempt(attempt_id=attempt_id, lease_seconds=self.settings.lease_seconds)
+            self.repository.heartbeat_attempt(
+                attempt_id=attempt_id, lease_seconds=self.settings.lease_seconds
+            )
             if polls_until_prefetch_check <= 0:
                 polls_until_prefetch_check = 12
                 last_prefetched_model_uri = await self._maybe_prefetch_next_challenger(
@@ -317,7 +332,9 @@ class EvalDispatcher:
             model_uri = self.repository.peek_next_challenger_model_uri()
             if model_uri and model_uri != last_prefetched:
                 await client.prefetch_model(model_uri)
-                logger.info(f"[eval-dispatch] requested prefetch of next challenger model {model_uri}")
+                logger.info(
+                    f"[eval-dispatch] requested prefetch of next challenger model {model_uri}"
+                )
                 return model_uri
         except Exception as exc:
             logger.debug(f"[eval-dispatch] challenger prefetch skipped: {exc}")
@@ -330,16 +347,28 @@ class EvalDispatcher:
                 if not did_work:
                     await asyncio.sleep(self.settings.dispatch_poll_seconds)
             except Exception as exc:
-                logger.exception(f"[eval-dispatch] unhandled error, retrying in {self.settings.dispatch_poll_seconds}s: {exc}")
+                logger.exception(
+                    f"[eval-dispatch] unhandled error, retrying in {self.settings.dispatch_poll_seconds}s: {exc}"  # noqa: E501
+                )
                 await asyncio.sleep(self.settings.dispatch_poll_seconds)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the Albedo eval dispatcher.")
     parser.add_argument("--once", action="store_true", help="Claim and dispatch at most one eval.")
-    parser.add_argument("--sweep-abandoned", action="store_true", help="Mark expired EVAL attempts abandoned and retryable.")
-    parser.add_argument("--reconcile-running", action="store_true", help="Replay remote state for active eval runs with remote_run_id.")
-    parser.add_argument("--limit", type=int, default=10, help="Maximum active eval runs to reconcile.")
+    parser.add_argument(
+        "--sweep-abandoned",
+        action="store_true",
+        help="Mark expired EVAL attempts abandoned and retryable.",
+    )
+    parser.add_argument(
+        "--reconcile-running",
+        action="store_true",
+        help="Replay remote state for active eval runs with remote_run_id.",
+    )
+    parser.add_argument(
+        "--limit", type=int, default=10, help="Maximum active eval runs to reconcile."
+    )
     args = parser.parse_args()
 
     settings = get_settings()
@@ -348,7 +377,9 @@ def main() -> None:
         repository=EvalRepository(settings.database_url),
     )
     if args.sweep_abandoned:
-        abandoned = dispatcher.repository.sweep_abandoned_eval_attempts(worker_id=settings.worker_id)
+        abandoned = dispatcher.repository.sweep_abandoned_eval_attempts(
+            worker_id=settings.worker_id
+        )
         print(f"abandoned_eval_attempts={abandoned}")
     elif args.reconcile_running:
         reconciled = asyncio.run(dispatcher.reconcile_once(limit=args.limit))

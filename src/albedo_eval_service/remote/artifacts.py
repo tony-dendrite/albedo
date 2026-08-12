@@ -36,19 +36,24 @@ class ArtifactUpload:
 
 
 class ArtifactUploader(Protocol):
-    def upload_run_artifacts(self, *, eval_run_id: UUID, artifact_prefix: str, files: dict[str, Path]) -> dict[str, ArtifactUpload]:
-        ...
+    def upload_run_artifacts(
+        self, *, eval_run_id: UUID, artifact_prefix: str, files: dict[str, Path]
+    ) -> dict[str, ArtifactUpload]: ...
 
 
 class LocalOnlyArtifactUploader:
-    def upload_run_artifacts(self, *, eval_run_id: UUID, artifact_prefix: str, files: dict[str, Path]) -> dict[str, ArtifactUpload]:
+    def upload_run_artifacts(
+        self, *, eval_run_id: UUID, artifact_prefix: str, files: dict[str, Path]
+    ) -> dict[str, ArtifactUpload]:
         uploads: dict[str, ArtifactUpload] = {}
         bucket, prefix = split_s3_prefix(artifact_prefix)
         for name, path in files.items():
             object_key = f"{prefix}/{path.name}" if prefix else path.name
             uploads[name] = ArtifactUpload(
                 name=name,
-                uri=f"local-cache://{path}" if not bucket else f"local-cache://{bucket}/{object_key}",
+                uri=f"local-cache://{path}"
+                if not bucket
+                else f"local-cache://{bucket}/{object_key}",
                 bucket=bucket or "",
                 object_key=object_key,
                 sha256=sha256_file(path),
@@ -63,7 +68,9 @@ class S3ArtifactUploader:
     def __init__(self, settings: RemoteSettings):
         self.settings = settings
 
-    def upload_run_artifacts(self, *, eval_run_id: UUID, artifact_prefix: str, files: dict[str, Path]) -> dict[str, ArtifactUpload]:
+    def upload_run_artifacts(
+        self, *, eval_run_id: UUID, artifact_prefix: str, files: dict[str, Path]
+    ) -> dict[str, ArtifactUpload]:
         bucket, prefix = split_s3_prefix(artifact_prefix)
         if not bucket:
             raise ValueError(f"artifact_prefix must be an s3:// URI, got {artifact_prefix}")
@@ -97,7 +104,11 @@ class S3ArtifactUploader:
                     object_key,
                     ExtraArgs={
                         "ContentType": content_type,
-                        "Metadata": {"sha256": checksum, "eval_run_id": str(eval_run_id), "artifact_name": name},
+                        "Metadata": {
+                            "sha256": checksum,
+                            "eval_run_id": str(eval_run_id),
+                            "artifact_name": name,
+                        },
                     },
                 )
             except Exception as exc:

@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import re
@@ -10,6 +9,7 @@ OPENHANDS = "openhands"
 
 TRUNCATION_SENTINEL = "MODEL_RESPONSE_TOKEN_LIMIT_EXCEEDED"
 UNCLOSED_THINK_BLOCK_SENTINEL = "MODEL_UNCLOSED_THINK_BLOCK"
+
 
 def classify(observation: str) -> str:
     text = (observation or "").lstrip()
@@ -89,8 +89,10 @@ def truncation_notice(token_limit: int) -> str:
         "stopping conversation."
     )
 
+
 def is_truncated(text: str) -> bool:
     return TRUNCATION_SENTINEL in (text or "")
+
 
 def unclosed_think_block_notice() -> str:
     return (
@@ -98,8 +100,10 @@ def unclosed_think_block_notice() -> str:
         "stopping conversation."
     )
 
+
 def has_unclosed_think_block(text: str) -> bool:
     return UNCLOSED_THINK_BLOCK_SENTINEL in (text or "")
+
 
 THINK_PAIR_RE = re.compile(r"<\s*think\s*>.*?<\s*/\s*think\s*>", re.DOTALL | re.IGNORECASE)
 THINK_OPEN_RE = re.compile(r"<\s*think\s*>", re.IGNORECASE)
@@ -123,6 +127,7 @@ def unmask_fenced_spans(text: str, spans: list[str]) -> str:
     for index, span in enumerate(spans):
         text = text.replace(_FENCE_PLACEHOLDER.format(index), span)
     return text
+
 
 _TRAILER_RE = re.compile(
     r"^\s*\[(?:The command (?:completed|timed out)|Current working directory|"
@@ -220,7 +225,7 @@ def command_contract(command: str) -> CommandContract:
     masked = _unquoted((command or "").strip())
     if not masked:
         return CommandContract()
-    capped = _HEAD_TAIL_TAIL_RE.search(masked)          # a trailing pipe caps whatever precedes it
+    capped = _HEAD_TAIL_TAIL_RE.search(masked)  # a trailing pipe caps whatever precedes it
     if capped:
         return CommandContract(max_lines=int(capped.group(1)))
     if _CHAINED_RE.search(masked):

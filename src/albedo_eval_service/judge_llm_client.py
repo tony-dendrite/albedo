@@ -53,9 +53,12 @@ class JudgeLLMClient:
         self._engy_errors: collections.Counter[str] = collections.Counter()
         logger.info(
             f"[judge-llm] engy routing for purposes={sorted(ENGY_PURPOSES)}: "
-            + (f"ON models={sorted(self._engy_models)} url={settings.engy_base_url} "
-               f"max_errors={settings.engy_max_errors}"
-               if self._engy is not None else "OFF (no engy api key)")
+            + (
+                f"ON models={sorted(self._engy_models)} url={settings.engy_base_url} "
+                f"max_errors={settings.engy_max_errors}"
+                if self._engy is not None
+                else "OFF (no engy api key)"
+            )
         )
 
     async def aclose(self) -> None:
@@ -89,8 +92,13 @@ class JudgeLLMClient:
         purpose: str = "judge",
     ) -> JudgeRawResponse:
         return await self._call(
-            model=model, messages=messages, response_schema=response_schema,
-            schema_name=schema_name, max_tokens=max_tokens, provider=provider, accept=accept,
+            model=model,
+            messages=messages,
+            response_schema=response_schema,
+            schema_name=schema_name,
+            max_tokens=max_tokens,
+            provider=provider,
+            accept=accept,
             purpose=purpose,
         )
 
@@ -110,9 +118,16 @@ class JudgeLLMClient:
         eval_run_id: str = "",
     ) -> JudgeRawResponse:
         return await self._call(
-            model=model, messages=messages, response_schema=response_schema,
-            temperature=temperature, max_tokens=max_tokens, provider=provider, accept=accept,
-            purpose=purpose, parse_retries=parse_retries, retry_count=retry_count,
+            model=model,
+            messages=messages,
+            response_schema=response_schema,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            provider=provider,
+            accept=accept,
+            purpose=purpose,
+            parse_retries=parse_retries,
+            retry_count=retry_count,
             eval_run_id=eval_run_id,
         )
 
@@ -141,8 +156,12 @@ class JudgeLLMClient:
             last: JudgeRawResponse | None = None
             for parse_attempt in range(max(1, parse_budget)):
                 last = await self._score_with_retries(
-                    model=model, messages=messages, response_schema=response_schema,
-                    schema_name=schema_name, temperature=temperature, max_tokens=max_tokens,
+                    model=model,
+                    messages=messages,
+                    response_schema=response_schema,
+                    schema_name=schema_name,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
                     provider=provider,
                     base_shift=parse_attempt * (transport_budget + 1),
                     purpose=purpose,
@@ -160,12 +179,18 @@ class JudgeLLMClient:
                         f"retrying this call on openrouter"
                     )
                     last = await self._score_with_retries(
-                        model=model, messages=messages, response_schema=response_schema,
-                        schema_name=schema_name, temperature=temperature,
-                        max_tokens=max_tokens, provider=provider,
+                        model=model,
+                        messages=messages,
+                        response_schema=response_schema,
+                        schema_name=schema_name,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        provider=provider,
                         base_shift=parse_attempt * (transport_budget + 1),
-                        purpose=purpose, retry_count=transport_budget,
-                        eval_run_id=eval_run_id, force_openrouter=True,
+                        purpose=purpose,
+                        retry_count=transport_budget,
+                        eval_run_id=eval_run_id,
+                        force_openrouter=True,
                     )
                     if _usable(last, accept):
                         return last

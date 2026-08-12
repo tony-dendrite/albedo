@@ -19,9 +19,7 @@ class JudgeSettings(BaseSettings):
     api_port: int = 8091
     openrouter_api_key: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api"
-    engy_api_key: str = Field(
-        "", validation_alias=AliasChoices("ALBEDO_JUDGE_ENGY_API_KEY")
-    )
+    engy_api_key: str = Field("", validation_alias=AliasChoices("ALBEDO_JUDGE_ENGY_API_KEY"))
     engy_base_url: str = "https://api.engy.ai"
     engy_models: str = "z-ai/glm-5.2,deepseek/deepseek-v4-flash-0731"
     engy_max_errors: int = 25
@@ -49,6 +47,7 @@ class JudgeSettings(BaseSettings):
     repo_context_url: str = ""
     repo_context_timeout_seconds: float = 20.0
     slack_error_webhook_url: str = ""
+
 
 @lru_cache
 def get_judge_settings() -> JudgeSettings:

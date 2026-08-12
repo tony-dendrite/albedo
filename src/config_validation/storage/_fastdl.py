@@ -27,7 +27,7 @@ class ShardSpec:
 
 def available() -> bool:
     try:
-        import hf_transfer
+        pass
     except Exception:
         return False
     return True

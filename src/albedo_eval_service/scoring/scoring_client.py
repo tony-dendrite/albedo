@@ -28,13 +28,11 @@ class ScoringResult:
 class Scorer(Protocol):
     def start_category_prep(
         self, *, request: EvalRequest, samples: list[EvalSample]
-    ) -> str | None:
-        ...
+    ) -> str | None: ...
 
     def simulate_observation(
         self, *, request: EvalRequest, sample: EvalSample, assistant_output: str
-    ) -> str:
-        ...
+    ) -> str: ...
 
     def score(
         self,
@@ -44,21 +42,22 @@ class Scorer(Protocol):
         king_results: list[GenerationResult],
         challenger_results: list[GenerationResult],
         category_prep_id: str | None = None,
-    ) -> ScoringResult:
-        ...
+    ) -> ScoringResult: ...
 
 
 class HttpScoringClient:
     def __init__(self, settings: RemoteSettings):
         if not settings.scoring_base_url:
-            raise ValueError("ALBEDO_REMOTE_SCORING_BASE_URL is required when scoring backend is http")
+            raise ValueError(
+                "ALBEDO_REMOTE_SCORING_BASE_URL is required when scoring backend is http"
+            )
         if not settings.scoring_auth_token:
-            raise ValueError("ALBEDO_REMOTE_SCORING_AUTH_TOKEN is required when scoring backend is http")
+            raise ValueError(
+                "ALBEDO_REMOTE_SCORING_AUTH_TOKEN is required when scoring backend is http"
+            )
         self.settings = settings
 
-    def start_category_prep(
-        self, *, request: EvalRequest, samples: list[EvalSample]
-    ) -> str | None:
+    def start_category_prep(self, *, request: EvalRequest, samples: list[EvalSample]) -> str | None:
         with httpx.Client(
             base_url=self.settings.scoring_base_url.rstrip("/"),
             headers={"Authorization": f"Bearer {self.settings.scoring_auth_token}"},
@@ -67,9 +66,7 @@ class HttpScoringClient:
             body = _post_json_with_429_retry(
                 client,
                 "/category-prep",
-                _category_prep_payload(
-                    request, samples, self.settings.trajectory_assistant_turns
-                ),
+                _category_prep_payload(request, samples, self.settings.trajectory_assistant_turns),
                 retry_count=self.settings.scoring_retry_count,
                 base_backoff_seconds=self.settings.scoring_retry_backoff_seconds,
             )
@@ -128,7 +125,9 @@ class HttpScoringClient:
             )
         return ScoringResult(
             records=all_records,
-            summary=_merge_summaries(all_records, summaries, min_valid_fraction=self.settings.scoring_min_valid_fraction),
+            summary=_merge_summaries(
+                all_records, summaries, min_valid_fraction=self.settings.scoring_min_valid_fraction
+            ),
         )
 
 
@@ -136,13 +135,9 @@ class WebSocketScoringClient:
     def __init__(self, settings: RemoteSettings):
         self.settings = settings
 
-    def start_category_prep(
-        self, *, request: EvalRequest, samples: list[EvalSample]
-    ) -> str | None:
+    def start_category_prep(self, *, request: EvalRequest, samples: list[EvalSample]) -> str | None:
         body = score_bridge_hub.request(
-            _category_prep_payload(
-                    request, samples, self.settings.trajectory_assistant_turns
-                ),
+            _category_prep_payload(request, samples, self.settings.trajectory_assistant_turns),
             timeout_seconds=self.settings.scoring_timeout_seconds,
             endpoint="/category-prep",
         )
@@ -176,25 +171,26 @@ class WebSocketScoringClient:
         )
 
         def send(payload: dict[str, Any]) -> dict[str, Any]:
-            return score_bridge_hub.request(payload, timeout_seconds=self.settings.scoring_timeout_seconds)
+            return score_bridge_hub.request(
+                payload, timeout_seconds=self.settings.scoring_timeout_seconds
+            )
 
         all_records, summaries = _collect_score_batches(
             payloads, send, max_concurrency=self.settings.scoring_batch_concurrency
         )
         return ScoringResult(
             records=all_records,
-            summary=_merge_summaries(all_records, summaries, min_valid_fraction=self.settings.scoring_min_valid_fraction),
+            summary=_merge_summaries(
+                all_records, summaries, min_valid_fraction=self.settings.scoring_min_valid_fraction
+            ),
         )
 
 
 class MockScoringClient:
-
     def __init__(self, settings: RemoteSettings):
         self.settings = settings
 
-    def start_category_prep(
-        self, *, request: EvalRequest, samples: list[EvalSample]
-    ) -> str | None:
+    def start_category_prep(self, *, request: EvalRequest, samples: list[EvalSample]) -> str | None:
         return None
 
     def simulate_observation(
@@ -221,8 +217,10 @@ class MockScoringClient:
             if king.error or challenger.error:
                 continue
             chal_score = (
-                1.0 if len(challenger.text) > len(king.text)
-                else 0.5 if len(challenger.text) == len(king.text)
+                1.0
+                if len(challenger.text) > len(king.text)
+                else 0.5
+                if len(challenger.text) == len(king.text)
                 else 0.0
             )
             king_score = 1.0 - chal_score
@@ -253,7 +251,9 @@ class MockScoringClient:
             )
         return ScoringResult(
             records=records,
-            summary=aggregate_scores(records, min_valid_fraction=self.settings.scoring_min_valid_fraction),
+            summary=aggregate_scores(
+                records, min_valid_fraction=self.settings.scoring_min_valid_fraction
+            ),
         )
 
 
@@ -317,7 +317,9 @@ def _score_batch_payloads(
         and not challenger_by_id[sample.sample_id].error
     ]
     payloads = []
-    for batch_idx, batch in enumerate(_chunks(valid_samples, request.dataset.scoring_batch_size), start=1):
+    for batch_idx, batch in enumerate(
+        _chunks(valid_samples, request.dataset.scoring_batch_size), start=1
+    ):
         payloads.append(
             {
                 "eval_run_id": str(request.eval_run_id),

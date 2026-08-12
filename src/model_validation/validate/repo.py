@@ -20,7 +20,8 @@ def check(files: list[str]) -> tuple[bool, str]:
 
     allowed_exact = set(config.REQUIRED_FILES) | set(config.ALLOWED_FILES)
     extras = sorted(
-        f for f in present
+        f
+        for f in present
         if f not in allowed_exact
         and not _matches_any(f, config.ALLOWED_GLOBS)
         and not _matches_any(f, config.FORBIDDEN_GLOBS)

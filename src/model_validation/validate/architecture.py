@@ -33,8 +33,10 @@ def check(model_dir: str, spec_path: str | None = None) -> tuple[bool, str]:
             return False, f"config.json must not contain {key!r}"
 
     if spec["architectures"] is not None and cfg.get("architectures") != spec["architectures"]:
-        return False, (f"architectures mismatch: expected {spec['architectures']!r}, "
-                       f"got {cfg.get('architectures')!r}")
+        return False, (
+            f"architectures mismatch: expected {spec['architectures']!r}, "
+            f"got {cfg.get('architectures')!r}"
+        )
 
     text_cfg = cfg.get("text_config") or {}
     for key, want in spec["expected"].items():

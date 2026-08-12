@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-
 MINER_FAULT = "MINER_FAULT"
 INFRA_FAULT = "INFRA_FAULT"
 REMOTE_EVAL_FAULT = "REMOTE_EVAL_FAULT"

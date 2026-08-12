@@ -12,19 +12,22 @@ from typing import Callable, Protocol, TypeVar
 import httpx
 from loguru import logger
 
-from ..modelstore.canonical_model_config import canonical_generation_config, canonical_max_model_len
-from ..shared.dataset_manifest import load_manifest_file
 from ..judge_core import CHALLENGER_WIN_MARGIN, challenger_beats_king
+from ..modelstore.canonical_model_config import canonical_generation_config, canonical_max_model_len
+from ..modelstore.resolver import ModelArtifactResolver, ResolvedModel
+from ..scoring.scoring_client import Scorer, build_scorer
+from ..shared.dataset_manifest import load_manifest_file
 from ..shared.models import EvalRequest
-from .artifacts import ArtifactUploader, RunArtifactSpool, build_artifact_uploader
-from .config import RemoteSettings
 from ..shared.observation_format import (
     detect_format,
     first_bash_block,
     truncation_notice,
     wrap,
 )
+from ..shared.sampling import multi_source_manifest_sample_ids
 from ..simulator.prompt_simulator import COMPLETE_MARKER, missing_command_output
+from .artifacts import ArtifactUploader, RunArtifactSpool, build_artifact_uploader
+from .config import RemoteSettings
 from .dataset import EvalSample, format_messages, load_manifest_samples
 from .generation import (
     GenerationResult,
@@ -32,10 +35,7 @@ from .generation import (
     VllmProcessGenerator,
     format_scored_trajectory,
 )
-from ..modelstore.resolver import ModelArtifactResolver, ResolvedModel
-from ..scoring.scoring_client import Scorer, build_scorer
 from .state import RemoteRun
-from ..shared.sampling import multi_source_manifest_sample_ids
 
 GeneratorFactory = Callable[[str, list[str], str], Generator]
 T = TypeVar("T")
@@ -223,7 +223,7 @@ class RemoteEvalWorker:
         except Exception as exc:
             logger.warning(
                 f"[remote-worker] category prep failed eval_run={request.eval_run_id} "
-                f"submission={request.submission_id}, falling back to synchronous/fixed scoring: {exc}"
+                f"submission={request.submission_id}, falling back to synchronous/fixed scoring: {exc}"  # noqa: E501
             )
             run.append_event(
                 {
@@ -359,12 +359,18 @@ class RemoteEvalWorker:
 
             return (
                 _merge_trajectory_results(
-                    samples, all_results["previous_king"], all_observations["previous_king"],
-                    side="previous_king", token_limit=self.settings.max_new_tokens,
+                    samples,
+                    all_results["previous_king"],
+                    all_observations["previous_king"],
+                    side="previous_king",
+                    token_limit=self.settings.max_new_tokens,
                 ),
                 _merge_trajectory_results(
-                    samples, all_results["challenger"], all_observations["challenger"],
-                    side="challenger", token_limit=self.settings.max_new_tokens,
+                    samples,
+                    all_results["challenger"],
+                    all_observations["challenger"],
+                    side="challenger",
+                    token_limit=self.settings.max_new_tokens,
                 ),
             )
         finally:
@@ -534,7 +540,9 @@ class RemoteEvalWorker:
                     "allowed_scores": request.scoring.allowed_scores,
                     "scored_sample_count": scored_so_far,
                     "judge_errors": judge_errors,
-                    "scoring_modes": sorted({str(record.get("scoring_mode") or "") for record in batch}),
+                    "scoring_modes": sorted(
+                        {str(record.get("scoring_mode") or "") for record in batch}
+                    ),
                     "category_generation_errors": sum(
                         1 for record in batch if record.get("category_generation_error")
                     ),
@@ -556,10 +564,7 @@ class RemoteEvalWorker:
         valid_pair_count = _valid_generated_pair_count(samples, king_results, challenger_results)
         total_sample_count = len(samples)
         min_valid_fraction = self.settings.scoring_min_valid_fraction
-        if (
-            total_sample_count == 0
-            or valid_pair_count / total_sample_count < min_valid_fraction
-        ):
+        if total_sample_count == 0 or valid_pair_count / total_sample_count < min_valid_fraction:
             return {
                 "records": [],
                 "summary": {
@@ -843,7 +848,9 @@ def _merge_trajectory_results(
                 continue
             observation = turn_observations[index].get((side, sample.sample_id))
             if observation is None or observation.error:
-                error = observation.error if observation else f"missing_observation_turn_{index + 1}"
+                error = (
+                    observation.error if observation else f"missing_observation_turn_{index + 1}"
+                )
                 break
             turns.append(
                 {

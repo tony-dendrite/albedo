@@ -10,13 +10,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from albedo_eval_service.modelstore.canonical_model_config import canonical_max_model_len
-from albedo_eval_service.shared.models import (
-    Challenger,
-    DatasetConfig,
-    EvalRequest,
-    PreviousKing,
-    ScoringConfig,
-)
+from albedo_eval_service.modelstore.resolver import ResolvedModel
 from albedo_eval_service.remote.config import RemoteSettings
 from albedo_eval_service.remote.generation import (
     GenerationResult,
@@ -25,9 +19,6 @@ from albedo_eval_service.remote.generation import (
     _vllm_worker,
     format_scored_trajectory,
 )
-from albedo_eval_service.shared.observation_format import TRUNCATION_SENTINEL
-from albedo_eval_service.modelstore.resolver import ResolvedModel
-from albedo_eval_service.scoring.scoring_client import ScoringResult
 from albedo_eval_service.remote.state import RemoteRun
 from albedo_eval_service.remote.worker import (
     ObservationResult,
@@ -37,6 +28,15 @@ from albedo_eval_service.remote.worker import (
     _missing_command_observation,
     _next_turn_samples,
 )
+from albedo_eval_service.scoring.scoring_client import ScoringResult
+from albedo_eval_service.shared.models import (
+    Challenger,
+    DatasetConfig,
+    EvalRequest,
+    PreviousKing,
+    ScoringConfig,
+)
+from albedo_eval_service.shared.observation_format import TRUNCATION_SENTINEL
 
 
 class _Tokenizer:
@@ -311,17 +311,28 @@ def test_submit_echo_stops_future_trajectory_turns(monkeypatch):
         "sample-1", "Observation: COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
     )
 
-    assert _next_turn_samples(
-        [sample],
-        [GenerationResult("sample-1", "```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n```")],
-        {("challenger", "sample-1"): observation},
-        side="challenger",
-    ) == []
+    assert (
+        _next_turn_samples(
+            [sample],
+            [
+                GenerationResult(
+                    "sample-1", "```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n```"
+                )
+            ],
+            {("challenger", "sample-1"): observation},
+            side="challenger",
+        )
+        == []
+    )
 
     merged = _merge_trajectory_results(
         [sample],
         [
-            [GenerationResult("sample-1", "```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n```")],
+            [
+                GenerationResult(
+                    "sample-1", "```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n```"
+                )
+            ],
             [],
         ],
         [{("challenger", "sample-1"): observation}],
@@ -379,12 +390,15 @@ def test_truncated_response_ends_trajectory_and_stays_valid(monkeypatch):
     truncated = GenerationResult("sample-1", oversized, truncated=True)
     observation = ObservationResult("sample-1", "")
 
-    assert _next_turn_samples(
-        [sample],
-        [truncated],
-        {("challenger", "sample-1"): observation},
-        side="challenger",
-    ) == []
+    assert (
+        _next_turn_samples(
+            [sample],
+            [truncated],
+            {("challenger", "sample-1"): observation},
+            side="challenger",
+        )
+        == []
+    )
 
     merged = _merge_trajectory_results(
         [sample],
@@ -444,7 +458,9 @@ def test_score_pairs_counts_truncated_pairs_as_valid():
     scored = {}
 
     class Recording:
-        def score(self, *, request, samples, king_results, challenger_results, category_prep_id=None):
+        def score(
+            self, *, request, samples, king_results, challenger_results, category_prep_id=None
+        ):
             scored["samples"] = len(samples)
             return ScoringResult(records=[], summary={"state": "succeeded"})
 
@@ -618,9 +634,7 @@ def test_prefetch_repo_context_fires_only_when_configured(monkeypatch):
     assert recorded["json"] == {"sample_ids": ["data/train-00000.parquet:0:0"]}
 
     posted.clear()
-    disabled = RemoteEvalWorker(
-        RemoteSettings(upload_artifacts=False, scoring_backend="mock")
-    )
+    disabled = RemoteEvalWorker(RemoteSettings(upload_artifacts=False, scoring_backend="mock"))
     disabled._prefetch_repo_context(_request(), samples)
     assert not posted.wait(0.2)
 

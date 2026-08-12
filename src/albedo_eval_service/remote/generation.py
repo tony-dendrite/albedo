@@ -38,8 +38,7 @@ def format_scored_trajectory(turns: list[dict[str, Any]]) -> str:
     assistant_index = 0
     parts = [
         "FULL CANDIDATE TRAJECTORY",
-        f"Score ONLY {target_label}. "
-        "The ENVIRONMENT OBSERVATION is context only.",
+        f"Score ONLY {target_label}. The ENVIRONMENT OBSERVATION is context only.",
     ]
     for turn in turns:
         role = str(turn.get("role") or "")
@@ -50,7 +49,9 @@ def format_scored_trajectory(turns: list[dict[str, Any]]) -> str:
         elif role == "user" and turn.get("environment_observation"):
             label = "ENVIRONMENT OBSERVATION (context only, do not score)"
         else:
-            label = f"CONTEXT {role.upper()} (do not score)" if role else "CONTEXT TURN (do not score)"
+            label = (
+                f"CONTEXT {role.upper()} (do not score)" if role else "CONTEXT TURN (do not score)"
+            )
         parts.append(f"\n{label}:\n------\n{content}\n------")
     return "\n".join(parts).strip()
 
@@ -166,7 +167,9 @@ class VllmProcessGenerator:
                 break
             try:
                 candidate = self._result_queue.get(timeout=1)
-                if candidate.get("id") == request_id or ("id" not in candidate and candidate.get("error")):
+                if candidate.get("id") == request_id or (
+                    "id" not in candidate and candidate.get("error")
+                ):
                     payload = candidate
                     break
             except queue_module.Empty:
@@ -179,7 +182,9 @@ class VllmProcessGenerator:
                     "error": f"vLLM process exited {self._process.exitcode} without result payload"
                 }
         if self._process is not None and self._process.exitcode not in (None, 0):
-            payload["error"] = payload.get("error") or f"vLLM process exited {self._process.exitcode}"
+            payload["error"] = (
+                payload.get("error") or f"vLLM process exited {self._process.exitcode}"
+            )
         return payload
 
 
@@ -249,7 +254,9 @@ def _vllm_worker(
                     llm, params, request["prompts"], request["sample_ids"], max_new_tokens
                 )
             except Exception as exc:
-                logger.exception(f"[remote-gen] vLLM request failed model={model} gpu_ids={gpu_ids}: {exc}")
+                logger.exception(
+                    f"[remote-gen] vLLM request failed model={model} gpu_ids={gpu_ids}: {exc}"
+                )
                 payload = {"error": f"{type(exc).__name__}: {exc}"}
             payload["id"] = request["id"]
             queue.put(payload)

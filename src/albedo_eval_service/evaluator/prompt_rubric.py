@@ -88,7 +88,8 @@ about earlier output are backed by visibly displayed content.""",
             BehaviorPart(
                 "no_waste",
                 """NO WASTE: no command is re-issued after its output was already received; \
-after a failed command the next differs in tool, target, or arguments.""" + _WASTE_NOTE,
+after a failed command the next differs in tool, target, or arguments."""
+                + _WASTE_NOTE,
             ),
         ),
         gold=(
@@ -116,7 +117,8 @@ claims match what the last observations visibly show.""",
             BehaviorPart(
                 "no_waste",
                 """NO WASTE: no command whose output was already received is repeated; most \
-turns are not one repeated action type.""" + _WASTE_NOTE,
+turns are not one repeated action type."""
+                + _WASTE_NOTE,
             ),
         ),
         gold=(
@@ -133,8 +135,10 @@ writing or running a reproduction script, seeing a failure before editing, runni
 every edit, or generic diligence. Return STRICT JSON only: \
 {"questions":[{"text":"...","example_bad":"..."}]}"""
 
-NO_TESTS_NOTE = ("\nNo test suite is visible in this sample's context — replace test-suite "
-                 "questions with additional diff-review or targeted-verification variants.")
+NO_TESTS_NOTE = (
+    "\nNo test suite is visible in this sample's context — replace test-suite "
+    "questions with additional diff-review or targeted-verification variants."
+)
 
 
 # ============================================================================

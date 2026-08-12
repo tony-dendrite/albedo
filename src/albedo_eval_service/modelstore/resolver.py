@@ -19,9 +19,8 @@ from urllib.parse import parse_qsl, urlencode, urlparse
 
 import httpx
 
-from .canonical_model_config import apply_canonical_model_config
 from ..remote.config import RemoteSettings
-
+from .canonical_model_config import apply_canonical_model_config
 
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _HF_GIT_REVISION_RE = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")
@@ -47,6 +46,7 @@ def _manifest_is_chunked(manifest: dict[str, Any]) -> bool:
 def _is_model_payload_file(name: str) -> bool:
     return name.endswith(".safetensors") or name == "model.safetensors.index.json"
 
+
 _RESOLVE_LOCKS: dict[str, threading.Lock] = {}
 _RESOLVE_LOCKS_GUARD = threading.Lock()
 
@@ -54,7 +54,6 @@ _RESOLVE_LOCKS_GUARD = threading.Lock()
 def _resolve_lock(model_ref: str) -> threading.Lock:
     with _RESOLVE_LOCKS_GUARD:
         return _RESOLVE_LOCKS.setdefault(model_ref, threading.Lock())
-
 
 
 _DOWNLOAD_GATE = threading.Lock()
@@ -67,7 +66,7 @@ def _download_slot(label: str):
         wait_start = time.monotonic()
         _DOWNLOAD_GATE.acquire()
         print(
-            f"model_download_slot_acquired ref={label} waited_s={time.monotonic() - wait_start:.0f}",
+            f"model_download_slot_acquired ref={label} waited_s={time.monotonic() - wait_start:.0f}",  # noqa: E501
             flush=True,
         )
     try:
@@ -90,7 +89,7 @@ def _download_heartbeat(label: str, watch_dir: Path | None = None):
                 except OSError:
                     suffix = ""
             print(
-                f"model_download_progress ref={label} elapsed_s={time.monotonic() - start:.0f}{suffix}",
+                f"model_download_progress ref={label} elapsed_s={time.monotonic() - start:.0f}{suffix}",  # noqa: E501
                 flush=True,
             )
 
@@ -197,7 +196,10 @@ class ModelArtifactResolver:
                 return ResolvedModel(
                     model_ref, str(cache_dir), "s3", True, file_count, total_size_bytes
                 )
-            print(f"model_cache_invalid source=s3 path={cache_dir} reason=missing_model_files", flush=True)
+            print(
+                f"model_cache_invalid source=s3 path={cache_dir} reason=missing_model_files",
+                flush=True,
+            )
             shutil.rmtree(cache_dir, ignore_errors=True)
 
         import boto3
@@ -256,13 +258,18 @@ class ModelArtifactResolver:
                 return ResolvedModel(
                     model_ref, str(cache_dir), "hf", True, file_count, total_size_bytes
                 )
-            print(f"model_cache_invalid source=hf path={cache_dir} reason=missing_model_files", flush=True)
+            print(
+                f"model_cache_invalid source=hf path={cache_dir} reason=missing_model_files",
+                flush=True,
+            )
             shutil.rmtree(cache_dir, ignore_errors=True)
 
         temp_dir = cache_dir.with_suffix(".partial")
         temp_dir.mkdir(parents=True, exist_ok=True)
         with _download_slot(model_ref):
-            self._download_hf_snapshot(repo=repo, revision=revision, temp_dir=temp_dir, label=model_ref)
+            self._download_hf_snapshot(
+                repo=repo, revision=revision, temp_dir=temp_dir, label=model_ref
+            )
         _require_loadable_model_files(temp_dir, source="hf")
         (temp_dir / ".albedo-model-cache.json").write_text(
             json.dumps({"source": model_ref, "repo": repo, "revision": revision}, sort_keys=True)
@@ -362,7 +369,10 @@ class ModelArtifactResolver:
                 return ResolvedModel(
                     original_ref, str(cache_dir), "oci", True, file_count, total_size_bytes
                 )
-            print(f"model_cache_invalid source=oci path={cache_dir} reason=missing_model_files", flush=True)
+            print(
+                f"model_cache_invalid source=oci path={cache_dir} reason=missing_model_files",
+                flush=True,
+            )
             shutil.rmtree(cache_dir, ignore_errors=True)
 
         temp_dir = cache_dir.with_suffix(".partial")
@@ -377,7 +387,7 @@ class ModelArtifactResolver:
         with httpx.Client(timeout=oci_timeout, follow_redirects=True) as client:
             manifest_url = f"https://{registry}/v2/{repository}/manifests/{digest}"
             headers = {
-                "Accept": "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"
+                "Accept": "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"  # noqa: E501
             }
             response = client.get(manifest_url, headers=headers)
             if response.status_code == 401:
@@ -436,9 +446,10 @@ class ModelArtifactResolver:
 
             if pending:
                 max_workers = max(1, min(self.settings.model_download_concurrency, len(pending)))
-                with _download_slot(original_ref), concurrent.futures.ThreadPoolExecutor(
-                    max_workers=max_workers
-                ) as executor:
+                with (
+                    _download_slot(original_ref),
+                    concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor,
+                ):
                     futures = [
                         executor.submit(_download_layer, layer_digest, name)
                         for layer_digest, name in pending
@@ -499,7 +510,10 @@ def _stream_blob_to_file(
         if response.status_code == 401:
             return response
         response.raise_for_status()
-        with _download_heartbeat(label, watch_dir=destination.parent), temp_destination.open("wb") as handle:
+        with (
+            _download_heartbeat(label, watch_dir=destination.parent),
+            temp_destination.open("wb") as handle,
+        ):
             for chunk in response.iter_bytes(chunk_size=1024 * 1024):
                 if not chunk:
                     continue
@@ -792,9 +806,7 @@ def _require_loadable_model_files(path: Path, *, source: str) -> None:
         flush=True,
     )
     shutil.rmtree(path, ignore_errors=True)
-    raise FileNotFoundError(
-        f"downloaded {source} model at {path} is missing loadable model files"
-    )
+    raise FileNotFoundError(f"downloaded {source} model at {path} is missing loadable model files")
 
 
 def _verify_digest(payload: bytes, expected: str, *, label: str) -> None:

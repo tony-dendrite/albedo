@@ -24,7 +24,12 @@ def health() -> dict[str, str]:
 @app.get("/ready")
 def ready(settings: Settings = Depends(get_settings)) -> dict[str, object]:
     missing = []
-    for field_name in ("database_url", "dataset_version", "dataset_manifest_uri", "judge_config_hash"):
+    for field_name in (
+        "database_url",
+        "dataset_version",
+        "dataset_manifest_uri",
+        "judge_config_hash",
+    ):
         if not getattr(settings, field_name):
             missing.append(field_name)
     return {"ready": not missing, "missing": missing}

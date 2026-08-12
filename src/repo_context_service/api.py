@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import asyncio
@@ -66,7 +65,8 @@ def create_app(
         except Exception as exc:
             logger.warning(
                 "repo_context_endpoint_error sample_id={} error={}",
-                request.sample_id, f"{type(exc).__name__}: {exc}",
+                request.sample_id,
+                f"{type(exc).__name__}: {exc}",
             )
             return RepoContextResponse(sample_id=request.sample_id, context=None, kind="none")
         return RepoContextResponse(

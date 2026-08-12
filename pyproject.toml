@@ -100,3 +100,19 @@ select = ["E", "W", "F", "I"]
 "src/albedo_eval_service/remote/prompt_remote.py" = ["E501"]
 # Embedded SQL strings dominate the repository; line length is not meaningful there.
 "src/albedo_eval_service/control/repository.py" = ["E501"]
+"src/sanity_service/db.py" = ["E501"]
+"src/chain_reader/db.py" = ["E501"]
+"tests/integration/test_eval_repository_postgres.py" = ["E501"]
+# Imports deliberately follow sys.path / environment setup in these entry points.
+"scripts/dataset_creator/pipeline.py" = ["E402"]
+"scripts/manual_dedup_h2h.py" = ["E402"]
+"chat_to_king/supervisor.py" = ["E402"]
+"tests/test_sanity_gate.py" = ["E402"]
+# Availability probe: the import itself is the feature test, inside try/except ImportError.
+"src/albedo_eval_service/modelstore/resolver.py" = ["F401"]
+# Long lines sit inside multi-line SQL/HTML literals, where a noqa comment would
+# become part of the string.
+"scripts/create_genesis_king.py" = ["E501"]
+"scripts/dataset_creator/db.py" = ["E501"]
+"scripts/dataset_creator/viewer.py" = ["E501"]
+"src/model_validation/db.py" = ["E501"]

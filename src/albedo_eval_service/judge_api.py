@@ -168,7 +168,6 @@ _REROLL_WINDOW_TURNS = 5
 
 
 class ReferenceTrajectoryService:
-
     def __init__(
         self,
         settings: JudgeSettings,
@@ -198,29 +197,33 @@ class ReferenceTrajectoryService:
         self, sample: QuestionPrepSample, *, eval_run_id: str = "", exclude_model: str
     ) -> tuple[str, str, bool] | None:
         window = min(_REROLL_WINDOW_TURNS, self.settings.sota_trajectory_turns)
-        extra = window - max(
-            1, sample.assistant_turns or self.settings.sota_trajectory_turns
-        )
+        extra = window - max(1, sample.assistant_turns or self.settings.sota_trajectory_turns)
         try:
             reference, model, made_edit, steps = await self._generate_once(
                 sample, eval_run_id, extra_turns=extra, model_offset=1
             )
         except QuestionScoringUnavailable as exc:
-            logger.warning(
-                "reference_reroll_failed sample_id={} error={}", sample.sample_id, exc
-            )
+            logger.warning("reference_reroll_failed sample_id={} error={}", sample.sample_id, exc)
             return None
         pool = [m.strip() for m in self.settings.sota_models.split(",") if m.strip()]
         if steps < 2 or (model == exclude_model and len(pool) > 1):
             return None
         logger.info(
             "reference_reroll_used sample_id={} replaced={} with={}/{}steps window={}",
-            sample.sample_id, exclude_model, model, steps, window,
+            sample.sample_id,
+            exclude_model,
+            model,
+            steps,
+            window,
         )
         return reference, model, made_edit
 
     async def _generate_once(
-        self, sample: QuestionPrepSample, eval_run_id: str, *, extra_turns: int,
+        self,
+        sample: QuestionPrepSample,
+        eval_run_id: str,
+        *,
+        extra_turns: int,
         model_offset: int = 0,
     ) -> tuple[str, str, bool, int]:
         model = self._model_for(sample.sample_id, offset=model_offset)
@@ -274,9 +277,7 @@ class ReferenceTrajectoryService:
                     messages=convo,
                 )
             )
-            turns.append(
-                {"role": "user", "content": observation, "environment_observation": True}
-            )
+            turns.append({"role": "user", "content": observation, "environment_observation": True})
             convo = convo + [
                 {"role": "assistant", "content": text},
                 {"role": "user", "content": observation},
@@ -289,7 +290,6 @@ class ReferenceTrajectoryService:
         return reference, model, made_edit, len(generated)
 
 
-
 # Questions the reference itself fails are deleted; too few survivors means the
 # reference/checklist pair is unusable and the reference is rerolled.
 PRUNE_MIN_SURVIVORS = 8
@@ -300,19 +300,20 @@ def _reference_document(messages: list[dict[str, str]], reference: str) -> str:
     """Render the reference trajectory as a judgeable candidate document."""
     turns: list[dict[str, Any]] = [
         {"role": m.get("role", "user"), "content": m.get("content", "")}
-        for m in messages if m.get("content")
+        for m in messages
+        if m.get("content")
     ]
     for segment in _REF_STEP_SPLIT_RE.split(reference)[1:]:
         body, _, observation = segment.partition("\nENVIRONMENT OBSERVATION:\n")
         turns.append({"role": "assistant", "content": body.strip(), "score_target": True})
         if observation.strip():
-            turns.append({"role": "user", "content": observation.strip(),
-                          "environment_observation": True})
+            turns.append(
+                {"role": "user", "content": observation.strip(), "environment_observation": True}
+            )
     return format_scored_trajectory(turns)
 
 
 class QuestionService:
-
     def __init__(
         self,
         settings: JudgeSettings,
@@ -331,13 +332,14 @@ class QuestionService:
                 "sample carries no prior context to anchor a reference trajectory"
             )
         try:
-            reference, reference_model, reference_made_edit = (
-                await self.reference_service.generate(sample, eval_run_id=eval_run_id)
+            reference, reference_model, reference_made_edit = await self.reference_service.generate(
+                sample, eval_run_id=eval_run_id
             )
         except Exception as exc:
             logger.warning(
                 "reference_trajectory_failed sample_id={} error={} retrying=reference_reroll",
-                sample.sample_id, f"{type(exc).__name__}: {exc}",
+                sample.sample_id,
+                f"{type(exc).__name__}: {exc}",
             )
             rerolled = await self.reference_service.reroll_for_material(
                 sample, eval_run_id=eval_run_id, exclude_model=""
@@ -348,13 +350,12 @@ class QuestionService:
                 ) from exc
             reference, reference_model, reference_made_edit = rerolled
         try:
-            return await self._prepare_once(
-                sample, reference, reference_model, reference_made_edit
-            )
+            return await self._prepare_once(sample, reference, reference_model, reference_made_edit)
         except QuestionScoringUnavailable as exc:
             logger.warning(
                 "anchored_questions_failed sample_id={} error={} retrying=reference_reroll",
-                sample.sample_id, exc,
+                sample.sample_id,
+                exc,
             )
             rerolled = await self.reference_service.reroll_for_material(
                 sample, eval_run_id=eval_run_id, exclude_model=reference_model or ""
@@ -392,17 +393,20 @@ class QuestionService:
                 nonlocal attempts
                 attempts += 1
                 exhausted = attempts >= parse_budget
-                discarded.append({
-                    "stage": "generation_retry",
-                    "reason": reason,
-                    "text": "",
-                    "origin": origin,
-                    "detail": detail + (
-                        "; retries exhausted, this attempt was kept as-is"
-                        if exhausted
-                        else "; whole attempt discarded and regenerated"
-                    ),
-                })
+                discarded.append(
+                    {
+                        "stage": "generation_retry",
+                        "reason": reason,
+                        "text": "",
+                        "origin": origin,
+                        "detail": detail
+                        + (
+                            "; retries exhausted, this attempt was kept as-is"
+                            if exhausted
+                            else "; whole attempt discarded and regenerated"
+                        ),
+                    }
+                )
                 return not exhausted
 
             return record
@@ -435,14 +439,14 @@ class QuestionService:
                 questions = filter_reference_leaks(questions, discards=attempt_discards)
                 accepted = len(questions) >= generic_floor
                 if not accepted and _rejected(
-                    f"{len(questions)} well-formed questions parsed, needed "
-                    f">= {generic_floor}"
+                    f"{len(questions)} well-formed questions parsed, needed >= {generic_floor}"
                 ):
                     _record_rejected_attempt(attempt_discards, questions, "content")
                 return accepted
 
             messages = build_reference_question_messages(
-                task=sample.prompt, reference=reference,
+                task=sample.prompt,
+                reference=reference,
                 fmt=detect_format(sample.sample_id, prefix),
                 prefix_turns=sum(1 for m in prefix or [] if m.get("role") == "assistant"),
                 candidate_turns=self.settings.sota_trajectory_turns,
@@ -476,10 +480,15 @@ class QuestionService:
                 return accepted
 
             return self.client.complete(
-                purpose="questions", model=self.settings.evaluator_model,
+                purpose="questions",
+                model=self.settings.evaluator_model,
                 messages=build_behavior_messages(
-                    phase=phase, index=index, task=sample.prompt, prefix_tail=prefix_tail,
-                    k=BEHAVIOR_K, tests_seen=tests_visible(prefix),
+                    phase=phase,
+                    index=index,
+                    task=sample.prompt,
+                    prefix_tail=prefix_tail,
+                    k=BEHAVIOR_K,
+                    tests_seen=tests_visible(prefix),
                 ),
                 temperature=self.settings.temperature,
                 max_tokens=self.settings.question_max_tokens,
@@ -505,7 +514,9 @@ class QuestionService:
 
         reference_qs = filter_reference_leaks(reference_qs, discards=discarded)
         reference_qs, drops = enforce_question_labels(
-            reference_qs, phase=phase, reference_made_edit=reference_made_edit,
+            reference_qs,
+            phase=phase,
+            reference_made_edit=reference_made_edit,
             discards=discarded,
         )
 
@@ -522,7 +533,8 @@ class QuestionService:
         except Exception as exc:
             logger.warning(
                 "reference_prune_failed sample_id={} error={} keeping_unpruned",
-                sample.sample_id, f"{type(exc).__name__}: {exc}",
+                sample.sample_id,
+                f"{type(exc).__name__}: {exc}",
             )
         else:
             prune_floor = min(PRUNE_MIN_SURVIVORS, max(4, len(reference_qs) // 2))
@@ -530,8 +542,10 @@ class QuestionService:
                 raise QuestionScoringUnavailable(
                     f"reference pruning left {len(kept_qs)}/{len(reference_qs)} questions"
                 )
-            pruned_info = {"reference_self_score": self_rate,
-                           "pruned_out": len(reference_qs) - len(kept_qs)}
+            pruned_info = {
+                "reference_self_score": self_rate,
+                "pruned_out": len(reference_qs) - len(kept_qs),
+            }
             reference_qs = kept_qs
             discarded.extend(dropped_qs)
         behavior_qs: list[dict[str, str]] = []
@@ -571,16 +585,21 @@ class QuestionService:
         source.update(pruned_info)
         return QuestionPrepResult(questions=questions, source=source)
 
-
     async def _prune_against_reference(
-        self, sample: QuestionPrepSample | JudgeSample, reference: str,
+        self,
+        sample: QuestionPrepSample | JudgeSample,
+        reference: str,
         questions: list[dict[str, str]],
     ) -> tuple[list[dict[str, str]], list[dict[str, str]], float | None]:
         document = _reference_document(getattr(sample, "messages", None) or [], reference)
         _, recs = await _judge_side(
-            client=self.client, settings=self.settings, side="reference",
-            response_text=document, questions=questions,
-            judge_models=[self.settings.evaluator_model], reference_made_edit=None,
+            client=self.client,
+            settings=self.settings,
+            side="reference",
+            response_text=document,
+            questions=questions,
+            judge_models=[self.settings.evaluator_model],
+            reference_made_edit=None,
         )
         record = recs[0] if recs else {}
         if not record.get("parse_ok"):
@@ -594,8 +613,10 @@ class QuestionService:
                 kept.append(q)
             else:
                 entry = {
-                    "stage": "reference_prune", "reason": "reference_answered_no",
-                    "text": q["text"], "origin": "content",
+                    "stage": "reference_prune",
+                    "reason": "reference_answered_no",
+                    "text": q["text"],
+                    "origin": "content",
                 }
                 explanation = explanations.get(q["id"])
                 if explanation:
@@ -605,7 +626,6 @@ class QuestionService:
 
 
 class RepoContextClient:
-
     def __init__(self, settings: JudgeSettings):
         self._client = httpx.AsyncClient(
             base_url=settings.repo_context_url.rstrip("/"),
@@ -628,7 +648,8 @@ class RepoContextClient:
                 self._last_warning = now
                 logger.warning(
                     "repo_context_unavailable sample_id={} error={}",
-                    sample_id, f"{type(exc).__name__}: {exc}",
+                    sample_id,
+                    f"{type(exc).__name__}: {exc}",
                 )
             return None
 
@@ -674,9 +695,7 @@ class ObservationSimulationService:
         contract = command_contract(command)
         primary = self.settings.simulation_model or self.settings.evaluator_model
         fallback_model = self.settings.evaluator_model
-        attempts: list[tuple[str, int]] = [
-            (primary, self.settings.simulation_loop_reruns + 1)
-        ]
+        attempts: list[tuple[str, int]] = [(primary, self.settings.simulation_loop_reruns + 1)]
         if primary != fallback_model:
             attempts.append((fallback_model, 1))
 
@@ -700,12 +719,16 @@ class ObservationSimulationService:
                     temperature=0.0,
                     eval_run_id=request.eval_run_id,
                     max_tokens=self.settings.simulation_max_tokens,
-                    provider=(_evaluator_provider(self.settings)
-                              if model == fallback_model
-                              else _simulation_provider(self.settings)),
+                    provider=(
+                        _evaluator_provider(self.settings)
+                        if model == fallback_model
+                        else _simulation_provider(self.settings)
+                    ),
                     accept=lambda raw: _usable_simulation_output(
-                        repair_to_contract(repair_output(raw, fmt), fmt, contract), fmt,
-                        require_content=require_content, contract=contract,
+                        repair_to_contract(repair_output(raw, fmt), fmt, contract),
+                        fmt,
+                        require_content=require_content,
+                        contract=contract,
                     ),
                     **single_shot_kwargs,
                 )
@@ -713,9 +736,7 @@ class ObservationSimulationService:
                     if model != fallback_model:
                         break
                     raise ObservationSimulationUnavailable(response.error)
-                candidate = repair_to_contract(
-                    repair_output(response.raw, fmt), fmt, contract
-                )
+                candidate = repair_to_contract(repair_output(response.raw, fmt), fmt, contract)
                 rank = _candidate_rank(
                     candidate, fmt, require_content=require_content, contract=contract
                 )
@@ -726,13 +747,20 @@ class ObservationSimulationService:
                         logger.info(
                             "observation_simulation_fallback_used eval_run_id={} sample_id={} "
                             "primary={} fallback={}",
-                            request.eval_run_id, request.sample_id, primary, model,
+                            request.eval_run_id,
+                            request.sample_id,
+                            primary,
+                            model,
                         )
                     break
                 logger.warning(
                     "observation_simulation_unusable eval_run_id={} sample_id={} model={} "
                     "attempt={}/{} reason={} kept_rank={}",
-                    request.eval_run_id, request.sample_id, model, attempt + 1, tries,
+                    request.eval_run_id,
+                    request.sample_id,
+                    model,
+                    attempt + 1,
+                    tries,
                     _unusable_reason(
                         candidate, fmt, require_content=require_content, contract=contract
                     ),
@@ -765,7 +793,6 @@ class ObservationSimulationService:
 
 
 class QuestionPrepStore:
-
     def __init__(self, settings: JudgeSettings, service: QuestionService):
         self.settings = settings
         self.service = service
@@ -800,7 +827,10 @@ class QuestionPrepStore:
         except Exception as exc:
             logger.warning(
                 "question_prep_sample_failed eval_run_id={} prep_id={} sample_id={} error={}",
-                request.eval_run_id, prep_id, sample.sample_id, f"{type(exc).__name__}: {exc}",
+                request.eval_run_id,
+                prep_id,
+                sample.sample_id,
+                f"{type(exc).__name__}: {exc}",
             )
             raise
 
@@ -827,7 +857,8 @@ def create_app(settings: JudgeSettings | None = None) -> FastAPI:
         app.state.repo_context_client = repo_context
         app.state.observation_service = ObservationSimulationService(settings, client, repo_context)
         app.state.question_service = QuestionService(
-            settings, client,
+            settings,
+            client,
             ReferenceTrajectoryService(settings, client, app.state.observation_service),
         )
         app.state.question_prep_store = QuestionPrepStore(settings, app.state.question_service)
@@ -858,7 +889,8 @@ def create_app(settings: JudgeSettings | None = None) -> FastAPI:
                 settings, client, repo_context
             )
             app.state.question_service = QuestionService(
-                settings, client,
+                settings,
+                client,
                 ReferenceTrajectoryService(settings, client, app.state.observation_service),
             )
             app.state.question_prep_store = QuestionPrepStore(settings, app.state.question_service)
@@ -906,7 +938,9 @@ def create_app(settings: JudgeSettings | None = None) -> FastAPI:
     ) -> ScoreBatchResponse:
         unknown = [model for model in request.judge_models if model not in JUDGE_MODELS]
         if unknown:
-            raise HTTPException(status_code=400, detail=f"unsupported judge model(s): {', '.join(unknown)}")
+            raise HTTPException(
+                status_code=400, detail=f"unsupported judge model(s): {', '.join(unknown)}"
+            )
         client: JudgeLLMClient = app.state.eval_client
         try:
             records = await _score_samples(
@@ -914,18 +948,23 @@ def create_app(settings: JudgeSettings | None = None) -> FastAPI:
             )
         except Exception as exc:
             _notify(
-                settings, request, severity="ERROR",
-                message="Scoring failed", fault_code="scoring_failed",
+                settings,
+                request,
+                severity="ERROR",
+                message="Scoring failed",
+                fault_code="scoring_failed",
                 details={"error": f"{type(exc).__name__}: {exc}"},
             )
             logger.exception(
-                f"[judge-api] scoring failed eval_run={request.eval_run_id} batch={request.batch_id}: {exc}"
+                f"[judge-api] scoring failed eval_run={request.eval_run_id} batch={request.batch_id}: {exc}"  # noqa: E501
             )
             raise HTTPException(status_code=502, detail=f"scoring failed: {exc}")
         summary = aggregate_scores(records, min_valid_fraction=settings.min_valid_fraction)
         if summary.get("state") != "succeeded":
             _notify(
-                settings, request, severity="WARNING",
+                settings,
+                request,
+                severity="WARNING",
                 message="Scoring produced too few valid samples",
                 fault_code=str(summary.get("fault_code") or "scoring_invalid"),
                 retryable=bool(summary.get("retryable")),
@@ -956,7 +995,10 @@ async def _questions_for(
         reason = "missing_prep_id"
     logger.warning(
         "score_batch_question_sync_generation eval_run_id={} batch_id={} sample_id={} reason={}",
-        request.eval_run_id, request.batch_id, sample.sample_id, reason,
+        request.eval_run_id,
+        request.batch_id,
+        sample.sample_id,
+        reason,
     )
     return await prep_store.service.prepare(sample)
 
@@ -1076,9 +1118,7 @@ def _candidate_rank(
     """
     if not valid_output(raw, fmt):
         return _RANK_INVALID
-    if _usable_simulation_output(
-        raw, fmt, require_content=require_content, contract=contract
-    ):
+    if _usable_simulation_output(raw, fmt, require_content=require_content, contract=contract):
         return _RANK_USABLE
     if has_content(raw, fmt):
         return _RANK_HAS_CONTENT
@@ -1176,15 +1216,14 @@ async def _judge_side(
     per_judge_answers: dict[str, dict[str, str | None]] = {}
     records: list[dict[str, Any]] = []
     gate_turns = (
-        candidate_turn_texts_from_merged(response_text)
-        if reference_made_edit is not None
-        else None
+        candidate_turn_texts_from_merged(response_text) if reference_made_edit is not None else None
     )
     for raw, model in zip(raws, judge_models):
         answers, explanations, parse_ok = parse_answers(raw.raw, question_ids)
         if gate_turns is not None:
             answers = apply_measurement_gate(
-                answers, questions,
+                answers,
+                questions,
                 candidate_turn_texts=gate_turns,
                 reference_made_edit=bool(reference_made_edit),
             )
@@ -1216,8 +1255,11 @@ async def _score_samples(
     progress_lock = asyncio.Lock()
     logger.info(
         "score_batch_started eval_run_id={} batch_id={} samples={} judges={} prep_id={}",
-        request.eval_run_id, request.batch_id, len(request.samples),
-        len(request.judge_models), request.category_prep_id or "",
+        request.eval_run_id,
+        request.batch_id,
+        len(request.samples),
+        len(request.judge_models),
+        request.category_prep_id or "",
     )
 
     async def _score_one(sample: JudgeSample) -> dict[str, Any]:
@@ -1228,9 +1270,13 @@ async def _score_samples(
             async with progress_lock:
                 completed += 1
             logger.warning(
-                "score_batch_sample_failed eval_run_id={} batch_id={} completed={}/{} sample_id={} error={}",
-                request.eval_run_id, request.batch_id, completed, len(request.samples),
-                sample.sample_id, f"{type(exc).__name__}: {exc}",
+                "score_batch_sample_failed eval_run_id={} batch_id={} completed={}/{} sample_id={} error={}",  # noqa: E501
+                request.eval_run_id,
+                request.batch_id,
+                completed,
+                len(request.samples),
+                sample.sample_id,
+                f"{type(exc).__name__}: {exc}",
             )
             return {
                 "sample_id": sample.sample_id,
@@ -1253,15 +1299,20 @@ async def _score_samples(
         gate_flag = bool(gate_flag) if gate_flag is not None else None
         if prepared.source.get("pruned_out") is not None:
             gate_flag = None  # pruning already calibrated the checklist to the reference
+
         async def _side(side: str, response_text: str):
             if is_truncated(response_text):
                 return _corrupted_side(
                     side=side, questions=questions, judge_models=request.judge_models
                 )
             return await _judge_side(
-                client=client, settings=settings, side=side,
-                response_text=response_text, questions=questions,
-                judge_models=request.judge_models, reference_made_edit=gate_flag,
+                client=client,
+                settings=settings,
+                side=side,
+                response_text=response_text,
+                questions=questions,
+                judge_models=request.judge_models,
+                reference_made_edit=gate_flag,
             )
 
         (king_answers, king_recs), (chal_answers, chal_recs) = await asyncio.gather(
@@ -1278,8 +1329,15 @@ async def _score_samples(
             logger.info(
                 "score_batch_sample_done eval_run_id={} batch_id={} completed={}/{} sample_id={} "
                 "scored={} king={} chal={} elapsed_s={:.1f}",
-                request.eval_run_id, request.batch_id, completed, len(request.samples),
-                sample.sample_id, scored, king_score, chal_score, time.monotonic() - started_at,
+                request.eval_run_id,
+                request.batch_id,
+                completed,
+                len(request.samples),
+                sample.sample_id,
+                scored,
+                king_score,
+                chal_score,
+                time.monotonic() - started_at,
             )
         return {
             "sample_id": sample.sample_id,
@@ -1295,8 +1353,11 @@ async def _score_samples(
     records = await asyncio.gather(*[_score_one(sample) for sample in request.samples])
     logger.info(
         "score_batch_done eval_run_id={} batch_id={} scored={}/{} elapsed_s={:.1f}",
-        request.eval_run_id, request.batch_id,
-        sum(1 for r in records if r.get("scored")), len(records), time.monotonic() - started_at,
+        request.eval_run_id,
+        request.batch_id,
+        sum(1 for r in records if r.get("scored")),
+        len(records),
+        time.monotonic() - started_at,
     )
     return list(records)
 
