@@ -9,10 +9,10 @@ from pathlib import Path
 import httpx
 import pytest
 
-from albedo_eval_service import remote_models
-from albedo_eval_service.canonical_model_config import canonical_max_model_len
-from albedo_eval_service.remote_config import RemoteSettings
-from albedo_eval_service.remote_models import ModelArtifactResolver, parse_oci_ref
+from albedo_eval_service.modelstore import resolver as remote_models
+from albedo_eval_service.modelstore.canonical_model_config import canonical_max_model_len
+from albedo_eval_service.modelstore.resolver import ModelArtifactResolver, parse_oci_ref
+from albedo_eval_service.remote.config import RemoteSettings
 
 
 def _sha256(payload: bytes) -> str:
@@ -104,7 +104,9 @@ def test_model_resolver_downloads_oci_layers_with_digest_verification(tmp_path, 
                 return httpx.Response(200, content=weights_payload, request=request)
             raise AssertionError(url)
 
-    monkeypatch.setattr("albedo_eval_service.remote_models.httpx.Client", lambda **_: FakeClient())
+    monkeypatch.setattr(
+        "albedo_eval_service.modelstore.resolver.httpx.Client", lambda **_: FakeClient()
+    )
     ref = f"registry.hippius.com/sota1028/albedo-qwen3.6-35b-miner_5@{manifest_digest}"
 
     resolved = ModelArtifactResolver(RemoteSettings(model_cache_dir=str(tmp_path / "cache"))).resolve(ref)
@@ -189,7 +191,9 @@ def test_model_resolver_redownloads_marker_only_oci_cache(tmp_path, monkeypatch)
                 return httpx.Response(200, content=weights_payload, request=request)
             raise AssertionError(url)
 
-    monkeypatch.setattr("albedo_eval_service.remote_models.httpx.Client", lambda **_: FakeClient())
+    monkeypatch.setattr(
+        "albedo_eval_service.modelstore.resolver.httpx.Client", lambda **_: FakeClient()
+    )
     ref = f"registry.hippius.com/sota1028/albedo-qwen3.6-35b-miner_5@{manifest_digest}"
 
     resolved = ModelArtifactResolver(RemoteSettings(model_cache_dir=str(cache_root))).resolve(ref)
@@ -218,7 +222,9 @@ def test_model_resolver_rejects_oci_download_without_model_files(tmp_path, monke
                 return httpx.Response(200, content=manifest_payload, request=request)
             raise AssertionError(url)
 
-    monkeypatch.setattr("albedo_eval_service.remote_models.httpx.Client", lambda **_: FakeClient())
+    monkeypatch.setattr(
+        "albedo_eval_service.modelstore.resolver.httpx.Client", lambda **_: FakeClient()
+    )
     ref = f"registry.hippius.com/sota1028/albedo-qwen3.6-35b-miner_5@{manifest_digest}"
     resolver = ModelArtifactResolver(
         RemoteSettings(model_cache_dir=str(cache_root), use_canonical_model_config=False)
@@ -238,7 +244,7 @@ def test_model_resolver_rejects_oci_download_without_model_files(tmp_path, monke
 
 
 def test_resolve_lock_is_shared_per_ref():
-    from albedo_eval_service.remote_models import _resolve_lock
+    from albedo_eval_service.modelstore.resolver import _resolve_lock
 
     assert _resolve_lock("oci://registry/a@sha256:aa") is _resolve_lock("oci://registry/a@sha256:aa")
     assert _resolve_lock("oci://registry/a@sha256:aa") is not _resolve_lock("oci://registry/b@sha256:bb")

@@ -8,12 +8,12 @@ from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, We
 from loguru import logger
 from pydantic import BaseModel
 
-from .models import EvalRequest
-from .remote_config import RemoteSettings, get_remote_settings
-from .remote_models import ModelArtifactResolver
-from .remote_state import RemoteRun, RemoteRunStore
-from .remote_worker import RemoteEvalWorker
-from .score_bridge import score_bridge_hub
+from ..shared.models import EvalRequest
+from .config import RemoteSettings, get_remote_settings
+from ..modelstore.resolver import ModelArtifactResolver
+from .state import RemoteRun, RemoteRunStore
+from .worker import RemoteEvalWorker
+from ..scoring.score_bridge import score_bridge_hub
 
 
 app = FastAPI(title="Albedo Remote Eval API", version="0.1.0")
@@ -177,4 +177,4 @@ def _execute_remote_run(run: RemoteRun, settings: RemoteSettings) -> None:
 def main() -> None:
     import uvicorn
 
-    uvicorn.run("albedo_eval_service.remote_api:app", host="0.0.0.0", port=8090)
+    uvicorn.run("albedo_eval_service.remote.api:app", host="0.0.0.0", port=8090)

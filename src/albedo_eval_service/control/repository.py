@@ -12,7 +12,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from .artifacts import artifact_records_from_verdict
-from .models import EvalRequest, RemoteHost, SubmissionStatus
+from ..shared.models import EvalRequest, RemoteHost, SubmissionStatus
 
 
 _SCORED_OR_BEYOND = (

@@ -16,7 +16,7 @@ import pyarrow.parquet as pq
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from prepare_datasets import SOURCES
 
-COMPLETE_MARKER = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+from albedo_eval_service.simulator.prompt_simulator import COMPLETE_MARKER
 
 _EDIT_SUBCOMMANDS = {"create", "str_replace", "insert", "undo_edit", "write"}
 _BASH_TOOLS = {"bash", "execute_bash", "run_bash_cmd", "shell"}

@@ -9,9 +9,8 @@ from typing import Any, Protocol
 
 from loguru import logger
 
-from .remote_dataset import EvalSample
-
-_QWEN3_IM_END_TOKEN_ID = 248046
+from .dataset import EvalSample
+from .prompt_remote import QWEN3_IM_END_TOKEN_ID
 
 
 @dataclass(frozen=True)
@@ -229,7 +228,7 @@ def _vllm_worker(
             "max_tokens": max_new_tokens,
             "temperature": temperature,
             "top_p": top_p,
-            "stop_token_ids": [_QWEN3_IM_END_TOKEN_ID],
+            "stop_token_ids": [QWEN3_IM_END_TOKEN_ID],
         }
         if top_k is not None:
             params_kwargs["top_k"] = top_k

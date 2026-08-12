@@ -4,8 +4,8 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException
 
+from ..shared.models import SubmissionStatus
 from .config import Settings, get_settings
-from .models import SubmissionStatus
 from .repository import EvalRepository
 
 
@@ -44,4 +44,4 @@ def submission_status(
 def main() -> None:
     import uvicorn
 
-    uvicorn.run("albedo_eval_service.api:app", host="0.0.0.0", port=8080)
+    uvicorn.run("albedo_eval_service.control.api:app", host="0.0.0.0", port=8080)

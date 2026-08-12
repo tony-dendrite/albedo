@@ -10,11 +10,9 @@ from difflib import SequenceMatcher
 from statistics import mean
 from typing import Any
 
-from .judge_prompts import (
+from .evaluator.prompt_rubric import (
     BEHAVIOR_COMMON,
     BEHAVIOR_PHASES,
-    JUDGE_SYSTEM,
-    JUDGE_USER,
     NO_TESTS_NOTE,
     REFERENCE_QUESTION_SYSTEM,
     REFERENCE_QUESTION_USER,
@@ -26,7 +24,8 @@ from .judge_prompts import (
     RUBRIC_NEGATIVE_CAP,
     RUBRIC_REFERENCE_TARGET,
 )
-from .observation_format import (
+from .judge.prompt_judge import JUDGE_SYSTEM, JUDGE_USER
+from .shared.observation_format import (
     THINK_CLOSE_RE,
     THINK_OPEN_RE,
     THINK_PAIR_RE,
@@ -34,6 +33,7 @@ from .observation_format import (
     mask_fenced_spans,
     unmask_fenced_spans,
 )
+from .simulator.prompt_simulator import COMPLETE_MARKER
 
 CHALLENGER_WIN_MARGIN = 0.03
 QUESTION_FLOOR_FRACTION = 0.22
@@ -436,7 +436,7 @@ def _edited_in_turn(text: str) -> bool:
     apply_measurement_gate permanently inert.
     """
     return any(_EDIT_COMMAND_RE.search(cmd) for cmd in _EDIT_BLOCK_RE.findall(text or ""))
-_SUBMIT_RE = re.compile(r"COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT")
+_SUBMIT_RE = re.compile(re.escape(COMPLETE_MARKER))
 _UNFOLDED_AVOID_RE = re.compile(
     r"^\s*(?:does[^?]{0,60}\bavoid|is[^?]{0,60}\bfree of|does[^?]{0,60}\brefrain)", re.IGNORECASE
 )

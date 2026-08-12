@@ -8,11 +8,11 @@ from uuid import uuid4
 import httpx
 import pytest
 
-import albedo_eval_service.remote_scoring as remote_scoring_module
-from albedo_eval_service.remote_config import RemoteSettings
-from albedo_eval_service.remote_dataset import EvalSample
-from albedo_eval_service.remote_generation import GenerationResult
-from albedo_eval_service.remote_scoring import (
+import albedo_eval_service.scoring.scoring_client as remote_scoring_module
+from albedo_eval_service.remote.config import RemoteSettings
+from albedo_eval_service.remote.dataset import EvalSample
+from albedo_eval_service.remote.generation import GenerationResult
+from albedo_eval_service.scoring.scoring_client import (
     WebSocketScoringClient,
     _category_prep_payload,
     _collect_score_batches,

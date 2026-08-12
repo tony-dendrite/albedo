@@ -1,6 +1,6 @@
 from uuid import uuid4
 
-from albedo_eval_service.artifacts import artifact_records_from_verdict
+from albedo_eval_service.control.artifacts import artifact_records_from_verdict
 
 
 def test_artifact_records_from_verdict_maps_known_s3_artifacts():

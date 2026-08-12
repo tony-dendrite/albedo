@@ -5,7 +5,7 @@ from typing import Any
 
 import httpx
 
-from .models import EvalRequest
+from ..shared.models import EvalRequest
 
 
 class RemoteEvalClient:

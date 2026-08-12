@@ -6,7 +6,7 @@ from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from albedo_eval_service.canonical_model_config import canonical_max_model_len
+from albedo_eval_service.modelstore.canonical_model_config import canonical_max_model_len
 
 
 class SanityRemoteSettings(BaseSettings):

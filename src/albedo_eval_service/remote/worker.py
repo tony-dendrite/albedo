@@ -12,37 +12,36 @@ from typing import Callable, Protocol, TypeVar
 import httpx
 from loguru import logger
 
-from .canonical_model_config import canonical_generation_config, canonical_max_model_len
-from .dataset_manifest import load_manifest_file
-from .judge_core import CHALLENGER_WIN_MARGIN, challenger_beats_king
-from .models import EvalRequest
-from .remote_artifacts import ArtifactUploader, RunArtifactSpool, build_artifact_uploader
-from .remote_config import RemoteSettings
-from .observation_format import (
+from ..modelstore.canonical_model_config import canonical_generation_config, canonical_max_model_len
+from ..shared.dataset_manifest import load_manifest_file
+from ..judge_core import CHALLENGER_WIN_MARGIN, challenger_beats_king
+from ..shared.models import EvalRequest
+from .artifacts import ArtifactUploader, RunArtifactSpool, build_artifact_uploader
+from .config import RemoteSettings
+from ..shared.observation_format import (
     detect_format,
     first_bash_block,
-    missing_command_output,
     truncation_notice,
     wrap,
 )
-from .remote_dataset import EvalSample, format_messages, load_manifest_samples
-from .remote_generation import (
+from ..simulator.prompt_simulator import COMPLETE_MARKER, missing_command_output
+from .dataset import EvalSample, format_messages, load_manifest_samples
+from .generation import (
     GenerationResult,
     Generator,
     VllmProcessGenerator,
     format_scored_trajectory,
 )
-from .remote_models import ModelArtifactResolver, ResolvedModel
-from .remote_scoring import Scorer, build_scorer
-from .remote_state import RemoteRun
-from .sampling import multi_source_manifest_sample_ids
+from ..modelstore.resolver import ModelArtifactResolver, ResolvedModel
+from ..scoring.scoring_client import Scorer, build_scorer
+from .state import RemoteRun
+from ..shared.sampling import multi_source_manifest_sample_ids
 
 GeneratorFactory = Callable[[str, list[str], str], Generator]
 T = TypeVar("T")
 _CANONICAL_TOKENIZER_PATH = (
-    Path(__file__).resolve().parents[2] / "assets" / "tokenizers" / "Qwen3.6-35B-A3B"
+    Path(__file__).resolve().parents[3] / "assets" / "tokenizers" / "Qwen3.6-35B-A3B"
 )
-_COMPLETE_MARKER = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 
 
 class ModelResolver(Protocol):
@@ -882,11 +881,11 @@ def _context_turns(sample: EvalSample) -> list[dict[str, object]]:
 
 
 def _assistant_submitted(output: str) -> bool:
-    return _COMPLETE_MARKER in output
+    return COMPLETE_MARKER in output
 
 
 def _completion_observation(sample: EvalSample) -> str:
-    return wrap(_COMPLETE_MARKER, detect_format(sample.sample_id, sample.messages))
+    return wrap(COMPLETE_MARKER, detect_format(sample.sample_id, sample.messages))
 
 
 def _missing_command_observation(sample: EvalSample) -> str:

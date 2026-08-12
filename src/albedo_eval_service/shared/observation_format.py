@@ -11,45 +11,6 @@ OPENHANDS = "openhands"
 TRUNCATION_SENTINEL = "MODEL_RESPONSE_TOKEN_LIMIT_EXCEEDED"
 UNCLOSED_THINK_BLOCK_SENTINEL = "MODEL_UNCLOSED_THINK_BLOCK"
 
-FORMAT_MINI_CODER = """OUTPUT FORMAT:
-- Your reply MUST have exactly this shape, with no text before or after:
-<returncode>RC</returncode>
-<output>
-OUTPUT
-</output>
-  where RC is the command's exit code and OUTPUT is exactly the stdout/stderr it would produce
-  (empty if the command prints nothing)."""
-
-FORMAT_SWE_AGENT = """OUTPUT FORMAT:
-- Your reply MUST begin with the literal string "OBSERVATION:" on its own line — no text may come
-  before it.
-- On the lines after it write exactly the stdout/stderr the command would produce — nothing else.
-- If the command would produce no output, reply with exactly "OBSERVATION:" and nothing more."""
-
-FORMAT_OPENHANDS = """OUTPUT FORMAT:
-- Your reply is the tool result itself: NO "Observation:" prefix, no "OBSERVATION:" header, no
-  <returncode> wrapper, no markdown code fence.
-- For a shell command, write its stdout/stderr and then close with exactly these two lines:
-[The command completed with exit code RC.]
-[Command finished with exit code RC]
-  where RC is the exit code. A command that prints nothing has an empty first line, then those two.
-- For a file view (`cat -n`, `sed -n ... | cat -n`), open with
-  "Here's the result of running `cat -n` on PATH:" and then the numbered lines, with no trailer.
-- For a directory listing, open with "Here's the files and directories up to 2 levels deep in
-  PATH, excluding hidden items:" and then the paths, with no trailer.
-- For a file write, reply exactly "File created successfully at: PATH", with no trailer."""
-
-_BLOCKS = {
-    RETURNCODE: FORMAT_MINI_CODER,
-    SWE_AGENT: FORMAT_SWE_AGENT,
-    OPENHANDS: FORMAT_OPENHANDS,
-}
-
-
-def format_block(fmt: str) -> str:
-    return _BLOCKS.get(fmt, FORMAT_OPENHANDS)
-
-
 def classify(observation: str) -> str:
     text = (observation or "").lstrip()
     if text.startswith("<returncode>"):
@@ -162,13 +123,6 @@ def unmask_fenced_spans(text: str, spans: list[str]) -> str:
     for index, span in enumerate(spans):
         text = text.replace(_FENCE_PLACEHOLDER.format(index), span)
     return text
-
-MISSING_COMMAND_MESSAGE = "No bash command found in assistant message."
-
-
-def missing_command_output(fmt: str) -> str:
-    return wrap(MISSING_COMMAND_MESSAGE, fmt, returncode=2)
-
 
 _TRAILER_RE = re.compile(
     r"^\s*\[(?:The command (?:completed|timed out)|Current working directory|"

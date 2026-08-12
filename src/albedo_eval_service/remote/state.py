@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from threading import RLock
 from typing import Any
 
-from .models import EvalRequest
+from ..shared.models import EvalRequest
 
 
 @dataclass

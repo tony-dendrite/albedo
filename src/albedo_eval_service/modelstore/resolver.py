@@ -20,7 +20,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse
 import httpx
 
 from .canonical_model_config import apply_canonical_model_config
-from .remote_config import RemoteSettings
+from ..remote.config import RemoteSettings
 
 
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -581,7 +581,8 @@ def _spawn_hf_download(
             [
                 sys.executable,
                 "-c",
-                f"from albedo_eval_service.remote_models import {child_entry}; {child_entry}()",
+                f"from albedo_eval_service.modelstore.resolver import {child_entry}; "
+                f"{child_entry}()",
                 repo,
                 revision,
                 str(temp_dir),

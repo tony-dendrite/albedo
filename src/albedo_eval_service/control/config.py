@@ -5,7 +5,7 @@ from functools import lru_cache
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from .sampling import SAMPLING_ALGO
+from ..shared.sampling import SAMPLING_ALGO
 
 
 class Settings(BaseSettings):

@@ -18,8 +18,7 @@ from pathlib import Path, PurePosixPath
 import httpx
 from loguru import logger
 
-from albedo_eval_service.dataset_manifest import load_manifest_file
-from albedo_eval_service.remote_dataset import (
+from albedo_eval_service.remote.dataset import (
     _content,
     _extract_turns,
     _parse_sample_id,
@@ -27,6 +26,8 @@ from albedo_eval_service.remote_dataset import (
     _role,
     _unwrap_column,
 )
+from albedo_eval_service.shared.dataset_manifest import load_manifest_file
+from albedo_eval_service.simulator.prompt_simulator import COMPLETE_MARKER
 
 from .settings import RepoContextSettings
 
@@ -39,7 +40,6 @@ _MAX_MEMBER_BYTES = 2 * 1024 * 1024
 _MAX_MEMBERS = 200_000
 _MAX_MISSING_PATHS = 10
 _RETRIES = 3
-_COMPLETE_MARKER = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 
 _COMMAND_BLOCK_RE = re.compile(r"```(?:bash|sh)?[ \t]*\n(.*?)```", re.DOTALL)
 
@@ -651,7 +651,7 @@ class RepoContextService:
             observation = _content(turns[position + 1]).strip()
             if not observation:
                 continue
-            if _COMPLETE_MARKER in command or _COMPLETE_MARKER in observation:
+            if COMPLETE_MARKER in command or COMPLETE_MARKER in observation:
                 continue
             pairs.append((command, observation))
             if len(pairs) >= self.settings.max_trajectory_pairs:

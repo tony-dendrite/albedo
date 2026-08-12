@@ -14,6 +14,8 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from .control.notifications import EvalErrorNotification, notify_eval_error
+from .evaluator.prompt_rubric import BEHAVIOR_K, BEHAVIOR_PHASES, RUBRIC_MAX_QUESTIONS
 from .judge_config import JudgeSettings, get_judge_settings
 from .judge_core import (
     JUDGE_MODELS,
@@ -41,26 +43,27 @@ from .judge_core import (
     trajectory_made_edit,
 )
 from .judge_llm_client import JudgeLLMClient
-from .judge_prompts import BEHAVIOR_K, BEHAVIOR_PHASES, RUBRIC_MAX_QUESTIONS
-from .notifications import EvalErrorNotification, notify_eval_error
-from .observation_format import (
+from .remote.generation import format_scored_trajectory
+from .shared.observation_format import (
     CommandContract,
     command_contract,
     contract_violation,
     detect_format,
     empty_output,
     first_bash_block,
-    format_block,
     has_content,
     is_truncated,
-    missing_command_output,
     repair_output,
     repair_to_contract,
     requires_output,
     valid_output,
-    wrap,
 )
-from .remote_generation import format_scored_trajectory
+from .simulator.prompt_simulator import (
+    COMPLETE_MARKER,
+    missing_command_output,
+    reference_completion_observation,
+    simulation_system_prompt,
+)
 
 
 class QuestionPrepSample(BaseModel):
@@ -145,36 +148,6 @@ class ObservationSimulationUnavailable(RuntimeError):
     pass
 
 
-BASE_PROMPT = """You are the ENVIRONMENT (execution harness) in a SWE-agent session. You are NOT the assistant and you must never act as the assistant.
-
-You will receive a transcript with "### system", "### user" and "### assistant" section markers.
-The transcript ends with the assistant's first message containing one command. Mentally execute
-that command against the repository state implied by the task description and reply with the
-environment's next message: the terminal output of that command.
-
-STRICT RULES:
-- Reply ONLY with the environment message in the exact format specified below — nothing else.
-- NEVER write "THOUGHT:", never write a bash command, never write "### user" or "### assistant"
-  headers, never use markdown code fences, never explain or comment. You are not solving the
-  task; you are only the terminal returning the command's output.
-- NEVER give task tips, hints, suggestions, next steps, encouragement, or any part of the
-  solution. A terminal has no opinion: it only prints what the command outputs, even if the
-  assistant is on the wrong track or asked a question.
-- Emulate realistic tool behavior: sed -i, cp, mv, mkdir, rm print nothing on success; echo
-  prints its argument; cat/sed -n print file content; grep -n prefixes matches with "NN:"
-  (context lines with "NN-"); find/ls list paths one per line; failed commands print realistic
-  error messages.
-- If the assistant message contains MORE THAN ONE bash code block, only the FIRST block is
-  executed — simulate the first command and ignore all later blocks.
-- Respect pipe limits exactly: "| head -N" outputs at most N lines, "| tail -N" the last N.
-  Count your output lines before replying.
-- Anchor on evidence: file, directory and symbol names mentioned in the task description are
-  real — build your output around them and the standard layout for the project's language.
-  When you cannot infer paths with confidence, prefer FEWER lines over invented ones; if the
-  command's filters plausibly match nothing in this project (e.g. a file extension foreign to
-  its language), the output is empty.
-"""
-
 def _evaluator_provider(settings: JudgeSettings) -> dict[str, Any]:
     block: dict[str, Any] = {"allow_fallbacks": True, "quantizations": ["fp8"]}
     order = [p.strip() for p in settings.evaluator_providers.split(",") if p.strip()]
@@ -191,12 +164,7 @@ def _simulation_provider(settings: JudgeSettings) -> dict[str, Any] | None:
     return {"order": allowed, "allow_fallbacks": False}
 
 
-_COMPLETE_MARKER = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 _REROLL_WINDOW_TURNS = 5
-
-
-def _reference_completion_observation(fmt: str) -> str:
-    return wrap(_COMPLETE_MARKER, fmt)
 
 
 class ReferenceTrajectoryService:
@@ -285,12 +253,12 @@ class ReferenceTrajectoryService:
             text = response.raw.strip()
             turns.append({"role": "assistant", "content": text, "score_target": True})
             last = turn_index == turn_count - 1
-            if _COMPLETE_MARKER in text:
+            if COMPLETE_MARKER in text:
                 if not last:
                     turns.append(
                         {
                             "role": "user",
-                            "content": _reference_completion_observation(fmt),
+                            "content": reference_completion_observation(fmt),
                             "environment_observation": True,
                         }
                     )
@@ -719,7 +687,7 @@ class ObservationSimulationService:
             messages = [
                 {
                     "role": "system",
-                    "content": _simulation_system_prompt(fmt, context_block),
+                    "content": simulation_system_prompt(fmt, context_block),
                 },
                 {"role": "user", "content": transcript},
             ]
@@ -1020,13 +988,6 @@ def _simulation_transcript(
             content = _command_only(content)
         sections.append(f"### {role}\n{content}")
     return "\n\n".join(sections).rstrip()
-
-
-def _simulation_system_prompt(fmt: str, context_block: str | None = None) -> str:
-    block = format_block(fmt)
-    if not context_block:
-        return f"{BASE_PROMPT}\n{block}"
-    return f"{BASE_PROMPT}\n{context_block}\n{block}"
 
 
 _LOOP_LINE_RUN = 25

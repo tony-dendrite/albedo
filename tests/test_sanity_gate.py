@@ -301,7 +301,7 @@ from sanity_remote.worker import (
 
 
 def test_max_model_len_default_matches_eval_context(monkeypatch):
-    from albedo_eval_service.canonical_model_config import canonical_max_model_len
+    from albedo_eval_service.modelstore.canonical_model_config import canonical_max_model_len
 
     monkeypatch.delenv("SANITY_REMOTE_MAX_MODEL_LEN", raising=False)
     assert SanityRemoteSettings(_env_file=None).max_model_len == canonical_max_model_len()

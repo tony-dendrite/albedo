@@ -9,27 +9,27 @@ from uuid import uuid4
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from albedo_eval_service.canonical_model_config import canonical_max_model_len
-from albedo_eval_service.models import (
+from albedo_eval_service.modelstore.canonical_model_config import canonical_max_model_len
+from albedo_eval_service.shared.models import (
     Challenger,
     DatasetConfig,
     EvalRequest,
     PreviousKing,
     ScoringConfig,
 )
-from albedo_eval_service.remote_config import RemoteSettings
-from albedo_eval_service.remote_generation import (
+from albedo_eval_service.remote.config import RemoteSettings
+from albedo_eval_service.remote.generation import (
     GenerationResult,
     VllmProcessGenerator,
     _generate_payload,
     _vllm_worker,
     format_scored_trajectory,
 )
-from albedo_eval_service.observation_format import TRUNCATION_SENTINEL
-from albedo_eval_service.remote_models import ResolvedModel
-from albedo_eval_service.remote_scoring import ScoringResult
-from albedo_eval_service.remote_state import RemoteRun
-from albedo_eval_service.remote_worker import (
+from albedo_eval_service.shared.observation_format import TRUNCATION_SENTINEL
+from albedo_eval_service.modelstore.resolver import ResolvedModel
+from albedo_eval_service.scoring.scoring_client import ScoringResult
+from albedo_eval_service.remote.state import RemoteRun
+from albedo_eval_service.remote.worker import (
     ObservationResult,
     RemoteEvalWorker,
     _completion_observation,
@@ -166,7 +166,7 @@ def test_vllm_generator_times_out_when_worker_sends_no_payload():
 def test_remote_worker_loads_parquet_and_runs_paired_generation(tmp_path, monkeypatch):
     _write_dataset(tmp_path)
     monkeypatch.setattr(
-        "albedo_eval_service.remote_dataset._load_tokenizer", lambda _path: _Tokenizer()
+        "albedo_eval_service.remote.dataset._load_tokenizer", lambda _path: _Tokenizer()
     )
     calls: list[dict[str, object]] = []
 
@@ -268,7 +268,7 @@ class RecordingScorer:
 def test_remote_worker_starts_category_prep_before_model_resolution(tmp_path, monkeypatch):
     _write_dataset(tmp_path)
     monkeypatch.setattr(
-        "albedo_eval_service.remote_dataset._load_tokenizer", lambda _path: _Tokenizer()
+        "albedo_eval_service.remote.dataset._load_tokenizer", lambda _path: _Tokenizer()
     )
     calls: list[object] = []
 
@@ -299,7 +299,7 @@ def test_remote_worker_starts_category_prep_before_model_resolution(tmp_path, mo
 
 def test_submit_echo_stops_future_trajectory_turns(monkeypatch):
     monkeypatch.setattr(
-        "albedo_eval_service.remote_worker.format_messages", lambda messages, **_kwargs: "next"
+        "albedo_eval_service.remote.worker.format_messages", lambda messages, **_kwargs: "next"
     )
     sample = types.SimpleNamespace(
         sample_id="sample-1",
@@ -372,7 +372,7 @@ def _trajectory_sample(sample_id: str = "sample-1"):
 
 def test_truncated_response_ends_trajectory_and_stays_valid(monkeypatch):
     monkeypatch.setattr(
-        "albedo_eval_service.remote_worker.format_messages", lambda messages, **_kwargs: "next"
+        "albedo_eval_service.remote.worker.format_messages", lambda messages, **_kwargs: "next"
     )
     sample = _trajectory_sample()
     oversized = "x" * 200
@@ -591,8 +591,8 @@ def test_vllm_worker_stops_on_qwen_im_end(monkeypatch):
 def test_prefetch_repo_context_fires_only_when_configured(monkeypatch):
     import threading
 
-    import albedo_eval_service.remote_worker as remote_worker_module
-    from albedo_eval_service.remote_dataset import EvalSample
+    import albedo_eval_service.remote.worker as remote_worker_module
+    from albedo_eval_service.remote.dataset import EvalSample
 
     recorded: dict[str, object] = {}
     posted = threading.Event()

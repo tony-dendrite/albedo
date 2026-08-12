@@ -4,11 +4,17 @@ from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
-import albedo_eval_service.remote_api as remote_api_module
-from albedo_eval_service.models import Challenger, DatasetConfig, EvalRequest, PreviousKing, ScoringConfig
-from albedo_eval_service.remote_api import app, store
-from albedo_eval_service.remote_config import RemoteSettings, get_remote_settings
-from albedo_eval_service.score_bridge import score_bridge_hub
+import albedo_eval_service.remote.api as remote_api_module
+from albedo_eval_service.shared.models import (
+    Challenger,
+    DatasetConfig,
+    EvalRequest,
+    PreviousKing,
+    ScoringConfig,
+)
+from albedo_eval_service.remote.api import app, store
+from albedo_eval_service.remote.config import RemoteSettings, get_remote_settings
+from albedo_eval_service.scoring.score_bridge import score_bridge_hub
 
 
 def _settings() -> RemoteSettings:

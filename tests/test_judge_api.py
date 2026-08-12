@@ -6,7 +6,6 @@ import json
 import pytest
 
 from albedo_eval_service.judge_api import (
-    BASE_PROMPT,
     JudgeSample,
     ObservationSimulationService,
     QuestionPrepStore,
@@ -19,14 +18,17 @@ from albedo_eval_service.judge_api import (
     _looping_output,
     _role_violation,
     _score_samples,
-    _simulation_system_prompt,
     _simulation_transcript,
 )
 from albedo_eval_service.judge_config import JudgeSettings
-from albedo_eval_service.observation_format import (
+from albedo_eval_service.simulator.prompt_simulator import (
+    BASE_PROMPT,
     FORMAT_MINI_CODER,
     FORMAT_OPENHANDS,
     FORMAT_SWE_AGENT,
+    simulation_system_prompt,
+)
+from albedo_eval_service.shared.observation_format import (
     OPENHANDS,
     RETURNCODE,
     SWE_AGENT,
@@ -96,9 +98,9 @@ def test_simulation_transcript_uses_section_markers():
 
 
 def test_simulation_system_prompt_carries_the_formats_block():
-    openhands = _simulation_system_prompt(OPENHANDS)
-    mini = _simulation_system_prompt(RETURNCODE)
-    swe_agent = _simulation_system_prompt(SWE_AGENT)
+    openhands = simulation_system_prompt(OPENHANDS)
+    mini = simulation_system_prompt(RETURNCODE)
+    swe_agent = simulation_system_prompt(SWE_AGENT)
 
     assert BASE_PROMPT in openhands and FORMAT_OPENHANDS in openhands
     assert BASE_PROMPT in mini and FORMAT_MINI_CODER in mini
@@ -460,6 +462,13 @@ def test_prepare_anchors_on_reference_and_filters_leaks():
     assert result.source["reference_model"] == "z-ai/glm-5.2"
     assert "REFERENCE STEP" in result.source["reference_trajectory"]
     assert all("the reference" not in q["text"].casefold() for q in result.questions)
+    behavior_tags = {q["tag"] for q in result.questions if q["requires"] == "action"
+                      and q["tag"].startswith("behavior:")}
+    assert behavior_tags == {
+        "behavior:precision_reads",
+        "behavior:issue_anchored_narrowing",
+        "behavior:convergence_and_orientation",
+    }
 
     behavior_tags = {q["tag"] for q in result.questions if q["requires"] == "action"
                       and q["tag"].startswith("behavior:")}
@@ -524,13 +533,13 @@ def test_simulation_transcript_keeps_text_without_command_block():
 
 
 def test_simulation_system_prompt_grounded_and_fallback():
-    assert _simulation_system_prompt(OPENHANDS) == f"{BASE_PROMPT}\n{FORMAT_OPENHANDS}"
-    assert _simulation_system_prompt(OPENHANDS, None) == f"{BASE_PROMPT}\n{FORMAT_OPENHANDS}"
-    assert _simulation_system_prompt(OPENHANDS, "") == f"{BASE_PROMPT}\n{FORMAT_OPENHANDS}"
+    assert simulation_system_prompt(OPENHANDS) == f"{BASE_PROMPT}\n{FORMAT_OPENHANDS}"
+    assert simulation_system_prompt(OPENHANDS, None) == f"{BASE_PROMPT}\n{FORMAT_OPENHANDS}"
+    assert simulation_system_prompt(OPENHANDS, "") == f"{BASE_PROMPT}\n{FORMAT_OPENHANDS}"
 
-    grounded = _simulation_system_prompt(OPENHANDS, "GROUNDING BLOCK")
+    grounded = simulation_system_prompt(OPENHANDS, "GROUNDING BLOCK")
     assert grounded == f"{BASE_PROMPT}\nGROUNDING BLOCK\n{FORMAT_OPENHANDS}"
-    assert FORMAT_MINI_CODER in _simulation_system_prompt(RETURNCODE, "GROUNDING BLOCK")
+    assert FORMAT_MINI_CODER in simulation_system_prompt(RETURNCODE, "GROUNDING BLOCK")
 
 
 def test_observation_simulation_uses_repo_context_when_available():

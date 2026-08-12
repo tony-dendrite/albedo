@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 from uuid import uuid4
 
-from albedo_eval_service.config import Settings
-from albedo_eval_service.dispatcher import EvalDispatcher
-import albedo_eval_service.dispatcher as dispatcher_module
+from albedo_eval_service.control.config import Settings
+from albedo_eval_service.control.dispatcher import EvalDispatcher
+import albedo_eval_service.control.dispatcher as dispatcher_module
 
 
 class RecordingRepository:

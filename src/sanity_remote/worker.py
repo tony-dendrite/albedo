@@ -15,8 +15,10 @@ from typing import Any
 import httpx
 from loguru import logger
 
-from albedo_eval_service.canonical_model_config import canonical_max_model_len
-from albedo_eval_service.observation_format import (
+from albedo_eval_service.modelstore.canonical_model_config import canonical_max_model_len
+from albedo_eval_service.remote.dataset import format_messages
+from albedo_eval_service.remote.prompt_remote import QWEN3_IM_END_TOKEN_ID
+from albedo_eval_service.shared.observation_format import (
     THINK_CLOSE_RE,
     THINK_OPEN_RE,
     THINK_TAG_RE,
@@ -25,7 +27,6 @@ from albedo_eval_service.observation_format import (
     unclosed_think_block_notice,
     unmask_fenced_spans,
 )
-from albedo_eval_service.remote_dataset import format_messages
 from sanity_remote.config import SanityRemoteSettings, get_remote_settings
 from sanity_remote.state import SanityRun
 from sanity_service.checks import (
@@ -38,7 +39,6 @@ from sanity_service.checks import (
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 _BASH_BLOCK_RE = re.compile(r"```(?:bash|sh|shell)\s*\n.*?```", re.IGNORECASE | re.DOTALL)
 _FORBIDDEN_CONFIG_KEYS = frozenset({"auto_map", "quantization_config"})
-_QWEN3_IM_END_TOKEN_ID = 248046
 
 
 def _warn_if_context_is_surprising(settings: SanityRemoteSettings) -> None:
@@ -313,7 +313,9 @@ class VllmEngine:
             except Exception:
                 await asyncio.to_thread(shutil.rmtree, dest, True)
                 raise
-        from albedo_eval_service.canonical_model_config import apply_canonical_model_config
+        from albedo_eval_service.modelstore.canonical_model_config import (
+            apply_canonical_model_config,
+        )
 
         await asyncio.to_thread(apply_canonical_model_config, Path(dest))
         await asyncio.to_thread(_inject_seed_processor_files, dest)
@@ -426,7 +428,7 @@ class VllmEngine:
                         "top_p": self._s.gen_top_p,
                         "top_k": self._s.gen_top_k,
                         "min_p": self._s.gen_min_p,
-                        "stop_token_ids": [_QWEN3_IM_END_TOKEN_ID],
+                        "stop_token_ids": [QWEN3_IM_END_TOKEN_ID],
                     },
                 )
             if r.status_code >= 400:

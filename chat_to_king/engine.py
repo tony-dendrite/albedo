@@ -19,7 +19,7 @@ from sanity_remote.worker import (
     _model_ref_parts,
     _strip_model_config,
 )
-from albedo_eval_service.remote_dataset import _QWEN3_CHAT_TEMPLATE
+from albedo_eval_service.remote.prompt_remote import QWEN3_CHAT_TEMPLATE
 
 from config import KingChatSettings
 from king_source import King
@@ -152,7 +152,7 @@ class KingVllmEngine:
         logger.info("[king-chat] starting vLLM port={} model={}", s.vllm_port, s.served_model_name)
         template_path = os.path.join(s.models_dir, "albedo_chat_template.jinja")
         with open(template_path, "w", encoding="utf-8") as fh:
-            fh.write(_QWEN3_CHAT_TEMPLATE)
+            fh.write(QWEN3_CHAT_TEMPLATE)
         cmd = [
             s.vllm_python,
             "-m",

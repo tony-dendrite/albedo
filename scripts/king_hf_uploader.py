@@ -19,8 +19,8 @@ import psycopg
 from loguru import logger
 from psycopg.rows import dict_row
 
-from albedo_eval_service.remote_config import RemoteSettings
-from albedo_eval_service.remote_models import ModelArtifactResolver, parse_oci_ref
+from albedo_eval_service.modelstore.resolver import ModelArtifactResolver, parse_oci_ref
+from albedo_eval_service.remote.config import RemoteSettings
 from config_validation.models import BACKEND_HF, detect_backend
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -492,7 +492,7 @@ def _delete_work_copy(path: Path, work_dir: Path, eval_dir: Path) -> None:
 def _missing_layers(manifest: dict, present: set[str], ignore_patterns: list[str]) -> list[tuple[str, str]]:
     from huggingface_hub.utils import filter_repo_objects
 
-    from albedo_eval_service.remote_models import _DIGEST_RE, _layer_filename
+    from albedo_eval_service.modelstore.resolver import _DIGEST_RE, _layer_filename
 
     layers = manifest.get("layers", [])
     names = [_layer_filename(layer, index) for index, layer in enumerate(layers)]
@@ -522,7 +522,11 @@ def download_missing_from_source(
 
     import httpx
 
-    from albedo_eval_service.remote_models import _bearer_token, _stream_blob_to_file, _verify_digest
+    from albedo_eval_service.modelstore.resolver import (
+        _bearer_token,
+        _stream_blob_to_file,
+        _verify_digest,
+    )
 
     registry, repository, digest = parsed
     out_dir = (

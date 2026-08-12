@@ -10,7 +10,7 @@ from uuid import UUID
 
 from loguru import logger
 
-from .remote_config import RemoteSettings
+from .config import RemoteSettings
 
 
 @dataclass(frozen=True)

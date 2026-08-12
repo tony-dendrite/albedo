@@ -5,7 +5,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from albedo_eval_service.sampling import multi_source_manifest_sample_ids
+from albedo_eval_service.shared.sampling import multi_source_manifest_sample_ids
 
 
 def _load_script(name: str):

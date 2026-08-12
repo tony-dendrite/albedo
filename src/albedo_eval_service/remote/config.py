@@ -4,7 +4,7 @@ from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from .canonical_model_config import GENESIS_MODEL_CONFIG_REF
+from ..modelstore.canonical_model_config import GENESIS_MODEL_CONFIG_REF
 
 
 class RemoteSettings(BaseSettings):

@@ -2,7 +2,7 @@ from collections import Counter
 
 import pytest
 
-from albedo_eval_service.sampling import (
+from albedo_eval_service.shared.sampling import (
     BENCHMARK_LANGUAGE,
     FAMILY_MIX,
     NON_BENCHMARK_LANGUAGE_FRACTION,

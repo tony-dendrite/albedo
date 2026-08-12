@@ -11,11 +11,11 @@ from typing import Any, Protocol
 
 import httpx
 
-from .judge_core import JUDGE_MODELS, aggregate_scores
-from .models import EvalRequest
-from .remote_config import RemoteSettings
-from .remote_dataset import EvalSample
-from .remote_generation import GenerationResult
+from ..judge_core import JUDGE_MODELS, aggregate_scores
+from ..remote.config import RemoteSettings
+from ..remote.dataset import EvalSample
+from ..remote.generation import GenerationResult
+from ..shared.models import EvalRequest
 from .score_bridge import score_bridge_hub
 
 

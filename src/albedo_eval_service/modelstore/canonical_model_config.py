@@ -11,7 +11,7 @@ GENESIS_MODEL_CONFIG_REF = (
     "registry.hippius.com/teutonic/qwen3.6-35b-a3b-genesis@"
     "sha256:efd5b8d0a1c1f472be56ff919419cdd0561bdecd9013d5c2a96dd0e23e89c165"
 )
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 _CANONICAL_TOKENIZER_DIR = _REPO_ROOT / "assets" / "tokenizers" / "Qwen3.6-35B-A3B"
 _CANONICAL_TOKENIZER_FILES = (
     "tokenizer_config.json",

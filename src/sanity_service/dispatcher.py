@@ -15,14 +15,17 @@ import httpx
 from loguru import logger
 
 from albedo_eval_service.judge_config import JudgeSettings, get_judge_settings
-from albedo_eval_service.observation_format import (
+from albedo_eval_service.remote.dataset import format_messages
+from albedo_eval_service.shared.observation_format import (
     detect_format,
     empty_output,
-    format_block,
     valid_output,
     wrap,
 )
-from albedo_eval_service.remote_dataset import format_messages
+from albedo_eval_service.simulator.prompt_simulator import (
+    COMPLETE_MARKER,
+    simulation_system_prompt,
+)
 from sanity_remote.models import SanityRunRequest
 from sanity_service.dataset import sample_prompts
 from sanity_service.db import ClaimedPreEval, PreEvalRepository
@@ -35,38 +38,7 @@ from sanity_service.uploads import put_sanity_fault
 _CANONICAL_TOKENIZER_PATH = (
     Path(__file__).resolve().parents[2] / "assets" / "tokenizers" / "Qwen3.6-35B-A3B"
 )
-_COMPLETE_MARKER = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 _BASH_BLOCK_RE = re.compile(r"```(?:bash|sh|shell)\s*\n.*?```", re.IGNORECASE | re.DOTALL)
-
-BASE_PROMPT = """You are the ENVIRONMENT (execution harness) in a SWE-agent session. You are NOT the assistant and you must never act as the assistant.
-
-You will receive a transcript with "### system", "### user" and "### assistant" section markers.
-The transcript ends with the assistant's first message containing one command. Mentally execute
-that command against the repository state implied by the task description and reply with the
-environment's next message: the terminal output of that command.
-
-STRICT RULES:
-- Reply ONLY with the environment message in the exact format specified below — nothing else.
-- NEVER write "THOUGHT:", never write a bash command, never write "### user" or "### assistant"
-  headers, never use markdown code fences, never explain or comment. You are not solving the
-  task; you are only the terminal returning the command's output.
-- NEVER give task tips, hints, suggestions, next steps, encouragement, or any part of the
-  solution. A terminal has no opinion: it only prints what the command outputs, even if the
-  assistant is on the wrong track or asked a question.
-- Emulate realistic tool behavior: sed -i, cp, mv, mkdir, rm print nothing on success; echo
-  prints its argument; cat/sed -n print file content; grep -n prefixes matches with "NN:"
-  (context lines with "NN-"); find/ls list paths one per line; failed commands print realistic
-  error messages.
-- If the assistant message contains MORE THAN ONE bash code block, only the FIRST block is
-  executed — simulate the first command and ignore all later blocks.
-- Respect pipe limits exactly: "| head -N" outputs at most N lines, "| tail -N" the last N.
-  Count your output lines before replying.
-- Anchor on evidence: file, directory and symbol names mentioned in the task description are
-  real — build your output around them and the standard layout for the project's language.
-  When you cannot infer paths with confidence, prefer FEWER lines over invented ones; if the
-  command's filters plausibly match nothing in this project (e.g. a file extension foreign to
-  its language), the output is empty.
-"""
 
 @dataclass
 class _TrajectoryState:
@@ -592,7 +564,7 @@ async def _simulate_observation(
     response = await client.complete(
         model=settings.evaluator_model,
         messages=[
-            {"role": "system", "content": _simulation_system_prompt(fmt)},
+            {"role": "system", "content": simulation_system_prompt(fmt)},
             {
                 "role": "user",
                 "content": _simulation_transcript(
@@ -692,10 +664,6 @@ def _simulation_transcript(
     return "\n\n".join(sections).rstrip()
 
 
-def _simulation_system_prompt(fmt: str) -> str:
-    return f"{BASE_PROMPT}\n{format_block(fmt)}"
-
-
 def _evaluator_provider(settings: JudgeSettings) -> dict[str, Any]:
     block: dict[str, Any] = {"allow_fallbacks": True, "quantizations": ["fp8"]}
     order = [p.strip() for p in settings.evaluator_providers.split(",") if p.strip()]
@@ -706,7 +674,7 @@ def _evaluator_provider(settings: JudgeSettings) -> dict[str, Any]:
 
 
 def _assistant_submitted(output: str) -> bool:
-    return _COMPLETE_MARKER in output
+    return COMPLETE_MARKER in output
 
 
 def _has_bash_command(output: str) -> bool:
@@ -714,7 +682,7 @@ def _has_bash_command(output: str) -> bool:
 
 
 def _completion_observation(sample_id: str, messages: list[dict[str, str]] | None = None) -> str:
-    return wrap(_COMPLETE_MARKER, detect_format(sample_id, messages))
+    return wrap(COMPLETE_MARKER, detect_format(sample_id, messages))
 
 
 def _missing_command_observation(

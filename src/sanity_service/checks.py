@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from albedo_eval_service.observation_format import is_truncated, has_unclosed_think_block
+from albedo_eval_service.shared.observation_format import is_truncated, has_unclosed_think_block
 
 _CODE_KEYWORDS = {
     "def","class","import","from","return","if","elif","else","for","while","try","except","finally","with","as","lambda",

@@ -8,20 +8,8 @@ from typing import Any
 
 import pyarrow.parquet as pq
 
-from .sampling import _SHARD_RE
-
-_IM_START = "<|im_start|>"
-_IM_END = "<|im_end|>"
-_QWEN3_CHAT_TEMPLATE = """{%- for message in messages %}
-{{- '<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>\n' }}
-{%- endfor %}
-{%- if add_generation_prompt %}
-{{- '<|im_start|>assistant\n' }}
-{%- if enable_thinking is defined and enable_thinking is false %}
-{{- '<think>\n\n</think>\n\n' }}
-{%- endif %}
-{%- endif %}
-"""
+from ..shared.sampling import _SHARD_RE
+from .prompt_remote import IM_END, IM_START, QWEN3_CHAT_TEMPLATE
 
 
 @dataclass(frozen=True)
@@ -166,7 +154,7 @@ def format_messages(
             "enable_thinking": enable_thinking,
         }
         if getattr(tokenizer, "chat_template", None) is None:
-            kwargs["chat_template"] = _QWEN3_CHAT_TEMPLATE
+            kwargs["chat_template"] = QWEN3_CHAT_TEMPLATE
         return tokenizer.apply_chat_template(messages, **kwargs)
     return _manual_chat_template(messages)
 
@@ -177,8 +165,8 @@ def _manual_chat_template(messages: list[dict[str, str]]) -> str:
         role = _chat_role(message.get("role"))
         content = message.get("content", "")
         if content:
-            parts.append(f"{_IM_START}{role}\n{content}{_IM_END}")
-    parts.append(f"{_IM_START}assistant\n")
+            parts.append(f"{IM_START}{role}\n{content}{IM_END}")
+    parts.append(f"{IM_START}assistant\n")
     return "\n".join(parts)
 
 

@@ -7,9 +7,9 @@ from uuid import UUID, uuid4
 import psycopg
 import pytest
 
-from albedo_eval_service.config import Settings
-from albedo_eval_service.dispatcher import build_eval_request
-from albedo_eval_service.repository import EvalRepository
+from albedo_eval_service.control.config import Settings
+from albedo_eval_service.control.dispatcher import build_eval_request
+from albedo_eval_service.control.repository import EvalRepository
 from weight_setter.service import WeightSetterRepository
 
 pytestmark = pytest.mark.integration

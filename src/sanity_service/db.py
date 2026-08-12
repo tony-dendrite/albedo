@@ -11,7 +11,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from albedo_eval_service.models import RemoteHost
+from albedo_eval_service.shared.models import RemoteHost
 
 
 @dataclass(frozen=True)

@@ -20,8 +20,8 @@ from sanity_service.checks import (
 )
 from sanity_service.dataset import sample_prompts
 from sanity_service.dispatcher import _format_scored_trajectory
-from albedo_eval_service.observation_format import (
-    MISSING_COMMAND_MESSAGE,
+from albedo_eval_service.simulator.prompt_simulator import MISSING_COMMAND_MESSAGE
+from albedo_eval_service.shared.observation_format import (
     detect_format,
     unclosed_think_block_notice,
     wrap,
