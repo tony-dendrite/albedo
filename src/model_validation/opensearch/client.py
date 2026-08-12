@@ -4,7 +4,9 @@ import functools
 
 from loguru import logger as log
 
-from model_validation import config
+from albedo_config import get_model_validation_settings
+
+config = get_model_validation_settings()
 
 
 @functools.lru_cache(maxsize=1)

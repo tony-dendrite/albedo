@@ -5,8 +5,8 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 
 import albedo_eval_service.remote.api as remote_api_module
+from albedo_config import RemoteSettings, get_remote_settings
 from albedo_eval_service.remote.api import app, store
-from albedo_eval_service.remote.config import RemoteSettings, get_remote_settings
 from albedo_eval_service.scoring.score_bridge import score_bridge_hub
 from albedo_eval_service.shared.models import (
     Challenger,

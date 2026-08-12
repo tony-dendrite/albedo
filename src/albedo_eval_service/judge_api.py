@@ -14,11 +14,12 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from albedo_config import JudgeSettings, get_judge_settings
+from albedo_config.models import JUDGE_MODELS
+
 from .control.notifications import EvalErrorNotification, notify_eval_error
 from .evaluator.prompt_rubric import BEHAVIOR_K, BEHAVIOR_PHASES, RUBRIC_MAX_QUESTIONS
-from .judge_config import JudgeSettings, get_judge_settings
 from .judge_core import (
-    JUDGE_MODELS,
     RUBRIC_TAG_REQUIRES,
     aggregate_scores,
     answer_schema,

@@ -5,7 +5,7 @@ import json
 
 import httpx
 
-from albedo_eval_service.judge_config import JudgeSettings
+from albedo_config import JudgeSettings
 from albedo_eval_service.judge_llm_client import JudgeLLMClient
 
 
@@ -21,7 +21,7 @@ def test_openrouter_payload_respects_provider_structured_output_support():
     assert "response_format" not in plain_payload
 
     schema_payload = payloads[1]
-    assert schema_payload["model"] == "qwen/qwen3.5-397b-a17b"
+    assert schema_payload["model"] == "z-ai/glm-5.2"
     assert "order" not in schema_payload["provider"]
     assert schema_payload["provider"]["quantizations"] == ["fp8"]
     assert schema_payload["provider"]["allow_fallbacks"] is True
@@ -47,7 +47,7 @@ async def _capture_payloads():
     try:
         await client.score(model="z-ai/glm-5.2", messages=[{"role": "user", "content": "x"}])
         await client.score(
-            model="qwen/qwen3.5-397b-a17b",
+            model="z-ai/glm-5.2",
             messages=[{"role": "user", "content": "x"}],
             response_schema={"type": "object", "properties": {"answers": {"type": "array"}}},
         )

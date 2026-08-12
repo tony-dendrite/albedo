@@ -10,11 +10,12 @@ from uuid import UUID
 import httpx
 from loguru import logger
 
+from albedo_config import Settings, get_eval_settings
+
 from ..shared.dataset_manifest import load_manifest_file
 from ..shared.faults import broken_stream_fault, classify_failure_verdict
 from ..shared.models import Challenger, DatasetConfig, EvalRequest, PreviousKing, ScoringConfig
 from ..shared.sampling import multi_source_manifest_sample_ids
-from .config import Settings, get_settings
 from .notifications import EvalErrorNotification, notify_eval_error
 from .remote_client import RemoteEvalClient
 from .repository import ClaimedEval, EvalRepository
@@ -371,7 +372,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    settings = get_settings()
+    settings = get_eval_settings()
     dispatcher = EvalDispatcher(
         settings=settings,
         repository=EvalRepository(settings.database_url),

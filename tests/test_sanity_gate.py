@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from loguru import logger
 
+from albedo_config import SanitySettings
 from albedo_eval_service.judge_llm_client import JudgeRawResponse
 from sanity_remote.models import SanityRunRequest
 from sanity_remote.state import SanityRunStore
@@ -15,7 +16,6 @@ from sanity_remote.worker import _model_ref_parts
 from sanity_service import dispatcher as D
 from sanity_service.llm_check import GateResult, LLMGate, SampleInput, run_gate
 from sanity_service.rubric import parse_injection, parse_viability
-from sanity_service.settings import SanitySettings
 
 
 def test_parse_injection_and_viability():
@@ -290,7 +290,7 @@ def test_worker_store_lifecycle():
     assert store.list_active() == []
 
 
-from sanity_remote.config import SanityRemoteSettings
+from albedo_config import SanityRemoteSettings
 from sanity_remote.worker import (
     VllmEngine,
     _strip_model_config,

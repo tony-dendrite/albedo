@@ -5,7 +5,7 @@ from typing import Annotated
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
 from loguru import logger
 
-from sanity_remote.config import SanityRemoteSettings, get_remote_settings
+from albedo_config import SanityRemoteSettings, get_sanity_remote_settings
 from sanity_remote.models import SanityRunRequest
 from sanity_remote.state import SanityRunStore
 from sanity_remote.worker import generate, teardown
@@ -16,7 +16,7 @@ store = SanityRunStore()
 
 def require_auth(
     authorization: Annotated[str | None, Header()] = None,
-    settings: SanityRemoteSettings = Depends(get_remote_settings),
+    settings: SanityRemoteSettings = Depends(get_sanity_remote_settings),
 ) -> None:
     if not settings.auth_token:
         return
@@ -31,7 +31,8 @@ def health() -> dict[str, str]:
 
 @app.get("/ready")
 def ready(
-    settings: SanityRemoteSettings = Depends(get_remote_settings), _: None = Depends(require_auth)
+    settings: SanityRemoteSettings = Depends(get_sanity_remote_settings),
+    _: None = Depends(require_auth),
 ) -> dict[str, object]:
     return {
         "ready": settings.ready,
@@ -43,7 +44,8 @@ def ready(
 
 @app.get("/capacity")
 def capacity(
-    settings: SanityRemoteSettings = Depends(get_remote_settings), _: None = Depends(require_auth)
+    settings: SanityRemoteSettings = Depends(get_sanity_remote_settings),
+    _: None = Depends(require_auth),
 ) -> dict[str, object]:
     return {
         "host_id": settings.host_id,
@@ -56,7 +58,7 @@ def capacity(
 async def start_run(
     request: SanityRunRequest,
     background_tasks: BackgroundTasks,
-    settings: SanityRemoteSettings = Depends(get_remote_settings),
+    settings: SanityRemoteSettings = Depends(get_sanity_remote_settings),
     _: None = Depends(require_auth),
 ) -> dict[str, str]:
     if not settings.ready:
@@ -112,12 +114,9 @@ async def teardown_worker(_: None = Depends(require_auth)) -> dict[str, str]:
 
 
 def main() -> None:
-    import os
-
     import uvicorn
 
-    settings = get_remote_settings()
-    os.environ.setdefault("ALBEDO_MODEL_CACHE_DIR", settings.model_cache_dir)
+    settings = get_sanity_remote_settings()
     uvicorn.run(
         "sanity_remote.api:app",
         host="0.0.0.0",

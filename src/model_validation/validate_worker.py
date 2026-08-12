@@ -11,8 +11,9 @@ from pathlib import Path
 import asyncpg
 from loguru import logger as log
 
+from albedo_config import get_model_validation_settings
 from config_validation.fingerprint import compute_fingerprint
-from model_validation import config, db
+from model_validation import db
 from model_validation.opensearch import find_duplicate, health, index_fingerprint
 from model_validation.storage import (
     download_config,
@@ -30,6 +31,8 @@ from model_validation.validate import (
     check_repo,
 )
 from model_validation.validate.chat_template import check as check_chat_template
+
+config = get_model_validation_settings()
 
 _WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
 

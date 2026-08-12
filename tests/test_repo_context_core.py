@@ -9,6 +9,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from albedo_config import RepoContextSettings
 from repo_context_service.core import (
     GroundingContext,
     RepoContextService,
@@ -18,7 +19,6 @@ from repo_context_service.core import (
     _SnapshotTooLarge,
     parse_instance,
 )
-from repo_context_service.settings import RepoContextSettings
 
 FULL_SHA = "abcdef1234567890abcdef1234567890abcdef12"
 SNAPSHOT_KEY = f"o__r__{FULL_SHA[:12]}"

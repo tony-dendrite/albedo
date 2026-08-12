@@ -4,7 +4,8 @@ import argparse
 
 from loguru import logger
 
-from .config import get_settings
+from albedo_config import get_eval_settings
+
 from .repository import EvalRepository
 
 
@@ -26,7 +27,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    settings = get_settings()
+    settings = get_eval_settings()
     max_retry_count = (
         settings.max_retry_count if args.max_retry_count is None else args.max_retry_count
     )

@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 import albedo_eval_service.scoring.scoring_client as remote_scoring_module
-from albedo_eval_service.remote.config import RemoteSettings
+from albedo_config import RemoteSettings
 from albedo_eval_service.remote.dataset import EvalSample
 from albedo_eval_service.remote.generation import GenerationResult
 from albedo_eval_service.scoring.scoring_client import (

@@ -7,6 +7,7 @@ from typing import Any
 
 from loguru import logger
 
+from albedo_config.chain_spec import SEED_DIGEST, SEED_REPO
 from config_validation import repo_pattern
 from config_validation.chain import CommitRecord
 from config_validation.checks import (
@@ -17,7 +18,6 @@ from config_validation.checks import (
     genesis_metadata,
     revision,
 )
-from config_validation.config import SEED_DIGEST, SEED_REPO
 from config_validation.fingerprint.store import FingerprintStore, NullFingerprintStore
 from config_validation.models import ModelRef
 from config_validation.result import ValidationResult

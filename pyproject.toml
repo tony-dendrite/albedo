@@ -64,6 +64,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = [
+    "src/albedo_config",
     "src/albedo_eval_service",
     "src/repo_context_service",
     "src/set_reign_worker",

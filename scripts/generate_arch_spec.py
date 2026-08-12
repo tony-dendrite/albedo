@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-from config_validation.config import ALL_LOCK_KEYS
+from albedo_config.chain_spec import ALL_LOCK_KEYS
 from config_validation.pipeline import load_seed_config
 
 _DEFAULT_OUT = (

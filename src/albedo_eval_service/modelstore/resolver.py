@@ -19,7 +19,8 @@ from urllib.parse import parse_qsl, urlencode, urlparse
 
 import httpx
 
-from ..remote.config import RemoteSettings
+from albedo_config import RemoteSettings
+
 from .canonical_model_config import apply_canonical_model_config
 
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")

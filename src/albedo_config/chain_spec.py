@@ -44,8 +44,10 @@ FORBIDDEN_GLOBS: tuple[str, ...] = tuple(_f.get("forbidden_globs", []))
 
 SIM_THRESHOLD: float = float(_p.get("similarity_threshold", 0.95))
 
-MODEL_CACHE_DIR: str = os.environ.get(
-    "CV_MODEL_CACHE_DIR", str(Path.home() / ".cache" / "cv_models")
+MODEL_CACHE_DIR: str = (
+    os.environ.get("CV_MODEL_CACHE_DIR")
+    or os.environ.get("ALBEDO_MODEL_CACHE_DIR")
+    or str(Path.home() / ".cache" / "cv_models")
 )
 
 MODEL_BACKEND: str = os.environ.get("ALBEDO_MODEL_BACKEND", "hf").strip().lower()

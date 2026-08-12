@@ -11,8 +11,10 @@ from typing import Any, Protocol
 
 import httpx
 
-from ..judge_core import JUDGE_MODELS, aggregate_scores
-from ..remote.config import RemoteSettings
+from albedo_config import RemoteSettings
+from albedo_config.models import JUDGE_MODELS
+
+from ..judge_core import aggregate_scores
 from ..remote.dataset import EvalSample
 from ..remote.generation import GenerationResult
 from ..shared.models import EvalRequest

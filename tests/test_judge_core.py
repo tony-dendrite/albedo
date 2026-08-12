@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import json
 
+from albedo_config.models import JUDGE_MODELS, JUDGE_PROVIDER_PINS
 from albedo_eval_service.judge_core import (
     CHALLENGER_WIN_MARGIN,
     GENERIC_HYGIENE_QUESTION_LIMIT,
-    JUDGE_MODELS,
-    JUDGE_PROVIDER_PINS,
     NEGATIVE_QUESTION_LIMIT,
     aggregate_scores,
     behavior_question_schema,
@@ -23,11 +22,7 @@ from albedo_eval_service.judge_core import (
 
 
 def test_judge_panel_allows_any_fp8_provider():
-    assert JUDGE_MODELS == (
-        "z-ai/glm-5.2",
-        "qwen/qwen3.5-397b-a17b",
-        "deepseek/deepseek-v3.2",
-    )
+    assert JUDGE_MODELS == ("z-ai/glm-5.2",)
     for model in JUDGE_MODELS:
         assert JUDGE_PROVIDER_PINS[model] == {"allow_fallbacks": True, "quantizations": ["fp8"]}
         assert "order" not in JUDGE_PROVIDER_PINS[model]

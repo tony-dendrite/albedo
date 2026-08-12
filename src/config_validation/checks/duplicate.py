@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import logging
 
+from albedo_config.chain_spec import SIM_THRESHOLD
 from config_validation.checks import CheckOutcome
-from config_validation.config import SIM_THRESHOLD
 from config_validation.fingerprint import compute_fingerprint, similarity
 from config_validation.fingerprint.store import FingerprintStore
 

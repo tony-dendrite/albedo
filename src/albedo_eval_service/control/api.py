@@ -4,12 +4,13 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException
 
+from albedo_config import Settings, get_eval_settings
+
 from ..shared.models import SubmissionStatus
-from .config import Settings, get_settings
 from .repository import EvalRepository
 
 
-def get_repository(settings: Settings = Depends(get_settings)) -> EvalRepository:
+def get_repository(settings: Settings = Depends(get_eval_settings)) -> EvalRepository:
     return EvalRepository(settings.database_url)
 
 
@@ -22,7 +23,7 @@ def health() -> dict[str, str]:
 
 
 @app.get("/ready")
-def ready(settings: Settings = Depends(get_settings)) -> dict[str, object]:
+def ready(settings: Settings = Depends(get_eval_settings)) -> dict[str, object]:
     missing = []
     for field_name in (
         "database_url",
@@ -49,4 +50,7 @@ def submission_status(
 def main() -> None:
     import uvicorn
 
-    uvicorn.run("albedo_eval_service.control.api:app", host="0.0.0.0", port=8080)
+    settings = get_eval_settings()
+    uvicorn.run(
+        "albedo_eval_service.control.api:app", host=settings.api_host, port=settings.api_port
+    )

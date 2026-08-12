@@ -4,7 +4,7 @@ import asyncio
 
 from loguru import logger
 
-from albedo_eval_service.judge_config import JudgeSettings, get_judge_settings
+from albedo_config import JudgeSettings, get_judge_settings
 from albedo_eval_service.judge_llm_client import JudgeLLMClient, JudgeRawResponse
 
 SANITY_DEFAULT_JUDGE_MODELS: tuple[str, ...] = ("z-ai/glm-5.2",)

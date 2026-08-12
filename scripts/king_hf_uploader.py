@@ -19,8 +19,8 @@ import psycopg
 from loguru import logger
 from psycopg.rows import dict_row
 
+from albedo_config import RemoteSettings
 from albedo_eval_service.modelstore.resolver import ModelArtifactResolver, parse_oci_ref
-from albedo_eval_service.remote.config import RemoteSettings
 from config_validation.models import BACKEND_HF, detect_backend
 
 _ROOT = Path(__file__).resolve().parents[1]

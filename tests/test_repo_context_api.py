@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
+from albedo_config import RepoContextSettings
 from repo_context_service.api import create_app
 from repo_context_service.core import GroundingContext
-from repo_context_service.settings import RepoContextSettings
 
 
 class FakeService:

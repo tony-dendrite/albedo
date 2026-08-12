@@ -4,7 +4,7 @@ import asyncio
 from uuid import uuid4
 
 import albedo_eval_service.control.dispatcher as dispatcher_module
-from albedo_eval_service.control.config import Settings
+from albedo_config import Settings
 from albedo_eval_service.control.dispatcher import EvalDispatcher
 
 

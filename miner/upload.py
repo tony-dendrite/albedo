@@ -5,7 +5,7 @@ import re
 
 from loguru import logger
 
-from config_validation.config import REPO_PATTERN
+from albedo_config.chain_spec import REPO_PATTERN
 from config_validation.models import BACKEND_HF, BACKEND_HIPPIUS, ModelRef
 
 _PREFIX = os.environ.get("ALBEDO_REPO_PREFIX", "albedo-qwen3.6-35b")

@@ -9,9 +9,9 @@ from uuid import uuid4
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from albedo_config import RemoteSettings
 from albedo_eval_service.modelstore.canonical_model_config import canonical_max_model_len
 from albedo_eval_service.modelstore.resolver import ResolvedModel
-from albedo_eval_service.remote.config import RemoteSettings
 from albedo_eval_service.remote.generation import (
     GenerationResult,
     VllmProcessGenerator,

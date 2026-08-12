@@ -5,6 +5,8 @@ import json
 
 import pytest
 
+from albedo_config import JudgeSettings
+from albedo_config.models import JUDGE_MODELS
 from albedo_eval_service.judge_api import (
     JudgeSample,
     ObservationSimulationService,
@@ -20,8 +22,6 @@ from albedo_eval_service.judge_api import (
     _score_samples,
     _simulation_transcript,
 )
-from albedo_eval_service.judge_config import JudgeSettings
-from albedo_eval_service.judge_core import JUDGE_MODELS
 from albedo_eval_service.judge_llm_client import JudgeLLMClient, JudgeRawResponse
 from albedo_eval_service.shared.observation_format import (
     OPENHANDS,
@@ -249,7 +249,7 @@ def test_scoring_scores_both_sides_independently():
     assert record["scored"] is True
     assert record["challenger_score"] == 1.0
     assert record["king_score"] == 0.0
-    assert len(record["judge_results"]) == 6
+    assert len(record["judge_results"]) == 2 * len(JUDGE_MODELS)
     assert {r["side"] for r in record["judge_results"]} == {"previous_king", "challenger"}
 
 

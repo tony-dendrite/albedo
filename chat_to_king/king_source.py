@@ -100,9 +100,10 @@ def _resolve_dsn(settings: KingChatSettings) -> str:
     if settings.database_url:
         return settings.database_url
     try:
-        from model_validation.config import DB_URL
+        from albedo_config.db import load_dotenv, postgres_dsn
 
-        return DB_URL
+        load_dotenv()
+        return postgres_dsn()
     except Exception as exc:
         logger.warning("[king-chat] could not build DSN from ALBEDO_POSTGRES_*: {}", exc)
         return ""

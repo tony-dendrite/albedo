@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import re
 
+from albedo_config.chain_spec import REPO_PATTERN
 from config_validation.checks import CheckOutcome
-from config_validation.config import REPO_PATTERN
 from config_validation.models import ModelRef
 
 NAME = "repo_pattern"

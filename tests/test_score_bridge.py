@@ -5,10 +5,10 @@ from uuid import uuid4
 
 import pytest
 
-from albedo_eval_service.remote.config import RemoteSettings
+from albedo_config import RemoteSettings, ScoreBridgeClientSettings
 from albedo_eval_service.remote.dataset import EvalSample
 from albedo_eval_service.scoring.score_bridge import ScoreBridgeHub, ScoreBridgeUnavailable
-from albedo_eval_service.scoring.score_bridge_client import ScoreBridgeClientSettings, run_bridge
+from albedo_eval_service.scoring.score_bridge_client import run_bridge
 from albedo_eval_service.scoring.scoring_client import build_scorer
 from albedo_eval_service.shared.models import (
     Challenger,

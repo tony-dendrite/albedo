@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+DEFAULT_DATASET_MANIFEST_HASH = "e3cff61772b0096811d4c5d8bbc8dee8dacbd9a069bc4557608adf1c1c2ddf40"
+
 
 def load_manifest_file(path: str | Path, *, expected_sha256: str) -> dict[str, Any]:
 

@@ -5,7 +5,9 @@ import json
 from pathlib import Path
 from typing import Any
 
-from model_validation import config
+from albedo_config import get_model_validation_settings
+
+config = get_model_validation_settings()
 
 
 @functools.lru_cache(maxsize=4)

@@ -4,14 +4,14 @@ import os
 from pathlib import Path
 from urllib.parse import quote_plus
 
-_ROOT = Path(__file__).resolve().parents[2]
-_ENV_PATH = _ROOT / ".env"
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _load_dotenv(path: Path) -> None:
-    if not path.exists():
+def load_dotenv(path: str | Path | None = None) -> None:
+    env_path = Path(path) if path is not None else REPO_ROOT / ".env"
+    if not env_path.exists():
         return
-    for line in path.read_text().splitlines():
+    for line in env_path.read_text().splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -19,10 +19,7 @@ def _load_dotenv(path: Path) -> None:
         os.environ.setdefault(key.strip(), val.strip().strip('"').strip("'"))
 
 
-_load_dotenv(_ENV_PATH)
-
-
-def _db_url() -> str:
+def postgres_dsn() -> str:
     user = os.environ.get("ALBEDO_POSTGRES_USER", "")
     password = os.environ.get("ALBEDO_POSTGRES_PASSWORD", "")
     db = os.environ.get("ALBEDO_POSTGRES_DB", "")
@@ -31,6 +28,3 @@ def _db_url() -> str:
     if not all((user, password, db, host, port)):
         return ""
     return f"postgresql://{quote_plus(user)}:{quote_plus(password)}@{host}:{port}/{db}"
-
-
-DB_URL: str = _db_url()

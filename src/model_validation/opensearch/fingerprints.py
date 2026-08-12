@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from loguru import logger as log
 
+from albedo_config import get_model_validation_settings
 from config_validation.fingerprint import similarity
-from model_validation import config
 from model_validation.opensearch.client import ensure_index, get_client
+
+config = get_model_validation_settings()
 
 
 def find_duplicate(

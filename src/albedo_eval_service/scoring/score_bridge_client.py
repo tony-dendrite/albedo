@@ -9,27 +9,9 @@ from typing import Any
 
 import httpx
 from loguru import logger
-from pydantic_settings import BaseSettings, SettingsConfigDict
 from uvicorn.importer import import_from_string
 
-
-class ScoreBridgeClientSettings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_file=".env", env_prefix="ALBEDO_SCORE_BRIDGE_", extra="ignore"
-    )
-
-    remote_ws_url: str = "ws://127.0.0.1:18090/score-bridge"
-    remote_auth_token: str = ""
-    judge_base_url: str = "http://127.0.0.1:8091"
-    judge_auth_token: str = ""
-    request_timeout_seconds: float = 1800.0
-    reconnect_min_seconds: float = 1.0
-    reconnect_max_seconds: float = 30.0
-    ping_interval_seconds: float = 20.0
-    ping_timeout_seconds: float = 20.0
-    websocket_max_size_bytes: int = 2048 * 1024 * 1024
-    retry_count: int = 5
-    retry_backoff_seconds: float = 1.5
+from albedo_config import ScoreBridgeClientSettings
 
 
 async def run_bridge(settings: ScoreBridgeClientSettings) -> None:

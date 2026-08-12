@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 from loguru import logger
 
+from albedo_config import SanityRemoteSettings, get_sanity_remote_settings
 from albedo_eval_service.modelstore.canonical_model_config import canonical_max_model_len
 from albedo_eval_service.remote.dataset import format_messages
 from albedo_eval_service.remote.prompt_remote import QWEN3_IM_END_TOKEN_ID
@@ -26,7 +27,6 @@ from albedo_eval_service.shared.observation_format import (
     unclosed_think_block_notice,
     unmask_fenced_spans,
 )
-from sanity_remote.config import SanityRemoteSettings, get_remote_settings
 from sanity_remote.state import SanityRun
 from sanity_service.checks import (
     check_code_present,
@@ -191,7 +191,7 @@ def _inject_seed_processor_files(model_dir: str) -> None:
     if all((Path(model_dir) / f).exists() for f in _SEED_PROCESSOR_FILES):
         return
     try:
-        from config_validation.config import SEED_DIGEST, SEED_REPO
+        from albedo_config.chain_spec import SEED_DIGEST, SEED_REPO
         from config_validation.storage import download_config
         from model_validation.storage import make_ref
 
@@ -529,7 +529,7 @@ _ENGINE: VllmEngine | None = None
 def _engine() -> VllmEngine:
     global _ENGINE
     if _ENGINE is None:
-        _ENGINE = VllmEngine(get_remote_settings())
+        _ENGINE = VllmEngine(get_sanity_remote_settings())
     return _ENGINE
 
 
@@ -568,7 +568,7 @@ def _heuristics(responses: list[str], req: Any, skip: bool = False) -> list[dict
 
 
 async def generate(run: SanityRun, settings: SanityRemoteSettings | None = None) -> None:
-    s = settings or get_remote_settings()
+    s = settings or get_sanity_remote_settings()
     req = run.request
     logger.info(
         "[sanity-remote] generate start run={} digest={:.16} uri={}",

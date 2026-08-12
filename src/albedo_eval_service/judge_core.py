@@ -44,16 +44,6 @@ def question_floor(n: int) -> int:
     return max(1, round(n * QUESTION_FLOOR_FRACTION))
 
 
-JUDGE_MODELS: tuple[str, ...] = (
-    "z-ai/glm-5.2",
-    "qwen/qwen3.5-397b-a17b",
-    "deepseek/deepseek-v3.2",
-)
-
-JUDGE_PROVIDER_PINS: dict[str, dict[str, object]] = {
-    model: {"allow_fallbacks": True, "quantizations": ["fp8"]} for model in JUDGE_MODELS
-}
-
 VALID_TAGS = ("explore", "verification", "action", "continuity", "economy")
 
 

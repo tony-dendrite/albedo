@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from albedo_config.chain_spec import ALL_LOCK_KEYS
 from config_validation.checks import CheckOutcome
-from config_validation.config import ALL_LOCK_KEYS
 
 NAME = "architecture"
 

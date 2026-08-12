@@ -13,7 +13,7 @@ from uuid import UUID
 import httpx
 from loguru import logger
 
-from albedo_eval_service.judge_config import JudgeSettings, get_judge_settings
+from albedo_config import JudgeSettings, SanitySettings, get_judge_settings, get_sanity_settings
 from albedo_eval_service.remote.dataset import format_messages
 from albedo_eval_service.shared.observation_format import (
     detect_format,
@@ -31,7 +31,6 @@ from sanity_service.db import ClaimedPreEval, PreEvalRepository
 from sanity_service.judge_panel import make_client
 from sanity_service.llm_check import SampleInput, run_gate
 from sanity_service.remote_client import SanityRemoteClient
-from sanity_service.settings import SanitySettings, get_settings
 from sanity_service.uploads import put_sanity_fault
 
 _CANONICAL_TOKENIZER_PATH = (
@@ -483,7 +482,7 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=10, help="Max active runs to reconcile.")
     args = parser.parse_args()
 
-    settings = get_settings()
+    settings = get_sanity_settings()
     dispatcher = SanityDispatcher(
         settings=settings,
         repository=PreEvalRepository(

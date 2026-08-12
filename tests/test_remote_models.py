@@ -9,10 +9,10 @@ from pathlib import Path
 import httpx
 import pytest
 
+from albedo_config import RemoteSettings
 from albedo_eval_service.modelstore import resolver as remote_models
 from albedo_eval_service.modelstore.canonical_model_config import canonical_max_model_len
 from albedo_eval_service.modelstore.resolver import ModelArtifactResolver, parse_oci_ref
-from albedo_eval_service.remote.config import RemoteSettings
 
 
 def _sha256(payload: bytes) -> str:

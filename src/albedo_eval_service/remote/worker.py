@@ -12,6 +12,8 @@ from typing import Callable, Protocol, TypeVar
 import httpx
 from loguru import logger
 
+from albedo_config import RemoteSettings
+
 from ..judge_core import CHALLENGER_WIN_MARGIN, challenger_beats_king
 from ..modelstore.canonical_model_config import canonical_generation_config, canonical_max_model_len
 from ..modelstore.resolver import ModelArtifactResolver, ResolvedModel
@@ -27,7 +29,6 @@ from ..shared.observation_format import (
 from ..shared.sampling import multi_source_manifest_sample_ids
 from ..simulator.prompt_simulator import COMPLETE_MARKER, missing_command_output
 from .artifacts import ArtifactUploader, RunArtifactSpool, build_artifact_uploader
-from .config import RemoteSettings
 from .dataset import EvalSample, format_messages, load_manifest_samples
 from .generation import (
     GenerationResult,

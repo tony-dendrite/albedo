@@ -7,8 +7,9 @@ from fastapi import BackgroundTasks, FastAPI
 from loguru import logger
 from pydantic import BaseModel
 
+from albedo_config import RepoContextSettings, get_repo_context_settings
+
 from .core import RepoContextService
-from .settings import RepoContextSettings, get_repo_context_settings
 
 
 class RepoContextRequest(BaseModel):

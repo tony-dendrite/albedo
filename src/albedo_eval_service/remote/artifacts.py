@@ -10,7 +10,7 @@ from uuid import UUID
 
 from loguru import logger
 
-from .config import RemoteSettings
+from albedo_config import RemoteSettings
 
 
 @dataclass(frozen=True)

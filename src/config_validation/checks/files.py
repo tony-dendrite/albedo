@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import fnmatch
 
-from config_validation.checks import CheckOutcome
-from config_validation.config import (
+from albedo_config.chain_spec import (
     ALLOWED_FILES,
     ALLOWED_GLOBS,
     FORBIDDEN_GLOBS,
     REQUIRE_SAFETENSORS,
     REQUIRED_FILES,
 )
+from config_validation.checks import CheckOutcome
 
 NAME = "file_manifest"
 

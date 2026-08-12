@@ -158,7 +158,9 @@ def _upload_manifest_to_hippius(manifest_path: Path, key: str) -> str:
     from botocore.config import Config
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-    from model_validation import config as hv
+    from albedo_config import get_model_validation_settings
+
+    hv = get_model_validation_settings()
 
     if not (hv.S3_BUCKET and hv.S3_ACCESS_KEY and hv.S3_SECRET_KEY):
         raise SystemExit(

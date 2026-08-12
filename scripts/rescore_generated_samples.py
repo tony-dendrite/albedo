@@ -16,7 +16,8 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from albedo_eval_service.judge_core import JUDGE_MODELS, aggregate_scores
+from albedo_config.models import JUDGE_MODELS
+from albedo_eval_service.judge_core import aggregate_scores
 
 
 def load_env(path: Path = Path(".env")) -> None:

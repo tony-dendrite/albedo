@@ -17,6 +17,7 @@ from pathlib import Path, PurePosixPath
 import httpx
 from loguru import logger
 
+from albedo_config import RepoContextSettings
 from albedo_eval_service.remote.dataset import (
     _content,
     _extract_turns,
@@ -27,8 +28,6 @@ from albedo_eval_service.remote.dataset import (
 )
 from albedo_eval_service.shared.dataset_manifest import load_manifest_file
 from albedo_eval_service.simulator.prompt_simulator import COMPLETE_MARKER
-
-from .settings import RepoContextSettings
 
 _API_BASE = "https://api.github.com"
 _DONE_MARKER = ".albedo-repo-context-done"

@@ -4,10 +4,13 @@ import asyncio
 
 from loguru import logger as log
 
+from albedo_config import get_chain_reader_settings
 from chain_guard import db as guard_db
 from chain_guard import scan as guard_scan
 from chain_guard import swap as guard_swap
-from chain_reader import chain, config, db
+from chain_reader import chain, db
+
+config = get_chain_reader_settings()
 
 
 async def run() -> None:

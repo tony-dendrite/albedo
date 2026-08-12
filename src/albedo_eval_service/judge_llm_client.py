@@ -11,8 +11,8 @@ from typing import Any, Callable
 import httpx
 from loguru import logger
 
-from .judge_config import JudgeSettings
-from .judge_core import JUDGE_MODELS, JUDGE_PROVIDER_PINS
+from albedo_config import JudgeSettings
+from albedo_config.models import JUDGE_MODELS, JUDGE_PROVIDER_PINS
 
 
 @dataclass(frozen=True)
