@@ -96,7 +96,8 @@ select = ["E", "W", "F", "I"]
 # Judge prompts are long-form prose inside string literals; line length is not meaningful there.
 "src/sanity_service/rubric.py" = ["E501"]
 "src/albedo_eval_service/judge/prompt_judge.py" = ["E501"]
-"src/albedo_eval_service/evaluator/prompt_rubric.py" = ["E501"]
+"src/albedo_eval_service/evaluator/reference/prompt_reference.py" = ["E501"]
+"src/albedo_eval_service/evaluator/behavior/prompt_behavior.py" = ["E501"]
 "src/albedo_eval_service/simulator/prompt_simulator.py" = ["E501"]
 "src/albedo_eval_service/remote/prompt_remote.py" = ["E501"]
 # Embedded SQL strings dominate the repository; line length is not meaningful there.
@@ -111,6 +112,7 @@ select = ["E", "W", "F", "I"]
 "tests/test_sanity_gate.py" = ["E402"]
 # Availability probe: the import itself is the feature test, inside try/except ImportError.
 "src/albedo_eval_service/modelstore/resolver.py" = ["F401"]
+"src/config_validation/storage/_fastdl.py" = ["F401"]
 # Long lines sit inside multi-line SQL/HTML literals, where a noqa comment would
 # become part of the string.
 "scripts/create_genesis_king.py" = ["E501"]

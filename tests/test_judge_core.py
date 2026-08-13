@@ -3,19 +3,21 @@ from __future__ import annotations
 import json
 
 from albedo_config.models import JUDGE_MODELS, JUDGE_PROVIDER_PINS
-from albedo_eval_service.judge_core import (
-    CHALLENGER_WIN_MARGIN,
+from albedo_eval_service.evaluator.behavior.questions import behavior_question_schema
+from albedo_eval_service.evaluator.shared.questions import (
     GENERIC_HYGIENE_QUESTION_LIMIT,
     NEGATIVE_QUESTION_LIMIT,
-    aggregate_scores,
-    behavior_question_schema,
-    build_judge_messages,
-    challenger_beats_king,
     is_measurement_bound_question,
     is_unbounded_submit_question,
+    parse_questions,
+)
+from albedo_eval_service.judge_core import (
+    CHALLENGER_WIN_MARGIN,
+    aggregate_scores,
+    build_judge_messages,
+    challenger_beats_king,
     judge_yes_rate,
     parse_answers,
-    parse_questions,
     response_score,
     strip_reply_injection,
 )
@@ -436,7 +438,7 @@ def test_parse_questions_accepts_sparse_terminal_gates_when_list_is_large_enough
 
 
 def test_candidate_output_measure_excludes_context():
-    from albedo_eval_service.judge_core import candidate_output_measure
+    from albedo_eval_service.evaluator.shared.questions import candidate_output_measure
 
     text = (
         "FULL CANDIDATE TRAJECTORY\nScore ONLY...\n\n"
@@ -456,7 +458,7 @@ def test_candidate_output_measure_excludes_context():
 def test_parse_keeps_size_ladder_rungs():
     import json
 
-    from albedo_eval_service.judge_core import parse_questions
+    from albedo_eval_service.evaluator.shared.questions import parse_questions
 
     rungs = [
         {
@@ -544,7 +546,7 @@ def test_edit_detection_ignores_prose_and_stderr_redirects():
     """The pattern used to run over the whole turn, so `2>/dev/null`, a `>` in prose and the `>` of
     a leaked `</think>` all read as a redirect. That marked every candidate as having edited, which
     left apply_measurement_gate permanently inert in production."""
-    from albedo_eval_service.judge_core import trajectory_made_edit
+    from albedo_eval_service.evaluator.shared.questions import trajectory_made_edit
 
     def block(cmd):
         return f"```bash\n{cmd}\n```"
@@ -567,7 +569,7 @@ def test_edit_detection_ignores_prose_and_stderr_redirects():
 
 
 def test_measurement_gate_fires_for_a_candidate_that_only_explored():
-    from albedo_eval_service.judge_core import apply_measurement_gate
+    from albedo_eval_service.evaluator.shared.questions import apply_measurement_gate
 
     questions = [
         {"id": "q_01", "requires": "action", "text": "Is the fix applied?"},
