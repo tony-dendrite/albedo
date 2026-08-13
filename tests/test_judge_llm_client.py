@@ -56,6 +56,41 @@ async def _capture_payloads():
     return payloads
 
 
+def test_provider_order_rotates_across_parse_attempts():
+    """Regression: with 2 pinned providers a stride of transport_budget+1 was a
+    multiple of the provider count, so rejected content retried the same provider."""
+    orders = asyncio.run(_capture_orders_under_rejection())
+    assert orders == [["deepseek", "cloudflare"], ["cloudflare", "deepseek"]]
+
+
+async def _capture_orders_under_rejection():
+    orders = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        orders.append(json.loads(request.content.decode())["provider"]["order"])
+        return httpx.Response(200, json={"choices": [{"message": {"content": "nope"}}]})
+
+    settings = JudgeSettings(openrouter_api_key="test-key", retry_backoff_seconds=0)
+    client = JudgeLLMClient(settings)
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(
+        base_url=settings.openrouter_base_url.rstrip("/"),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        await client.complete(
+            model="deepseek/deepseek-v4-flash-0731",
+            messages=[{"role": "user", "content": "x"}],
+            provider={"order": ["deepseek", "cloudflare"], "allow_fallbacks": False},
+            parse_retries=2,
+            retry_count=0,
+            accept=lambda raw: raw == "ok",
+        )
+    finally:
+        await client.aclose()
+    return orders
+
+
 def test_provider_order_rotates_across_retries():
     orders = asyncio.run(_capture_orders_under_failures())
     assert orders[0] == ["A", "B", "C"]
@@ -324,10 +359,11 @@ def test_engy_empty_200_counts_and_retries_on_openrouter():
         ("openrouter", "deepseek/deepseek-v4-flash-0731"),
     ]
     assert result.error is None and result.raw == "ok"
-    assert client_errors == {"eval-1": 1}
+    assert client_errors == {("eval-1", "deepseek/deepseek-v4-flash-0731"): 1}
 
 
-def test_engy_garbage_rejected_by_accept_counts_and_retries_on_openrouter():
+def test_engy_garbage_rejected_by_accept_retries_but_is_not_charged_to_engy():
+    """A delivered-but-rejected answer is the model's fault, not engy's."""
     garbage = {"choices": [{"message": {"content": "### assistant I think we should..."}}]}
     hits, result, client_errors = asyncio.run(
         _content_failure(garbage, accept=lambda raw: raw == "ok")
@@ -337,7 +373,7 @@ def test_engy_garbage_rejected_by_accept_counts_and_retries_on_openrouter():
         ("openrouter", "deepseek/deepseek-v4-flash-0731"),
     ]
     assert result.raw == "ok"
-    assert client_errors == {"eval-1": 1}
+    assert client_errors == {}
 
 
 async def _content_failure(engy_body, accept=None):
@@ -357,8 +393,8 @@ async def _content_failure(engy_body, accept=None):
     return hits, result, dict(client._engy_errors)
 
 
-def test_content_failures_alone_exhaust_the_engy_budget():
-    hits = asyncio.run(_content_failures_exhaust())
+def test_empty_engy_responses_alone_exhaust_the_engy_budget():
+    hits = asyncio.run(_empty_responses_exhaust())
     # budget 2: calls 1-2 try engy (empty) and rescue on OR; calls 3-4 skip engy
     assert [h[0] for h in hits] == [
         "engy",
@@ -370,7 +406,7 @@ def test_content_failures_alone_exhaust_the_engy_budget():
     ]
 
 
-async def _content_failures_exhaust():
+async def _empty_responses_exhaust():
     hits: list[tuple[str, str]] = []
     settings, client = _engy_client(None, engy_max_errors=2)
     await _swap_content_transports(client, settings, hits, {})
@@ -382,6 +418,118 @@ async def _content_failures_exhaust():
                 purpose="simulate",
                 eval_run_id="eval-1",
             )
+    finally:
+        await client.aclose()
+    return hits
+
+
+def test_rejected_content_never_exhausts_the_engy_budget():
+    """Regression: contract rejections used to kill engy minutes into every eval."""
+    hits = asyncio.run(_rejections_never_exhaust())
+    # engy is healthy, so every one of the 4 calls still gets to try it
+    assert [h[0] for h in hits] == ["engy", "openrouter"] * 4
+
+
+async def _rejections_never_exhaust():
+    hits: list[tuple[str, str]] = []
+    settings, client = _engy_client(None, engy_max_errors=2)
+    garbage = {"choices": [{"message": {"content": "nope"}}]}
+    await _swap_content_transports(client, settings, hits, garbage)
+    try:
+        for _ in range(4):
+            await client.complete(
+                model="deepseek/deepseek-v4-flash-0731",
+                messages=[{"role": "user", "content": "x"}],
+                purpose="simulate",
+                eval_run_id="eval-1",
+                accept=lambda raw: raw == "ok",
+            )
+    finally:
+        await client.aclose()
+    return hits
+
+
+def test_engy_gets_one_shot_per_call_then_the_call_stays_on_openrouter():
+    """Re-asking engy the same prompt at temperature 0 just repeats the rejection,
+    so later parse attempts of the SAME call must walk the pinned providers instead."""
+    hits = asyncio.run(_rejection_across_parse_attempts())
+    assert hits == [
+        ("engy", "deepseek-v4-flash-0731", "deepseek"),
+        ("openrouter", "deepseek/deepseek-v4-flash-0731", "deepseek"),
+        ("openrouter", "deepseek/deepseek-v4-flash-0731", "cloudflare"),
+    ]
+
+
+async def _rejection_across_parse_attempts():
+    hits: list[tuple[str, str, str]] = []
+
+    def make(tag):
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content.decode())
+            order = (body.get("provider") or {}).get("order") or ["-"]
+            hits.append((tag, body["model"], order[0]))
+            return httpx.Response(200, json={"choices": [{"message": {"content": "nope"}}]})
+
+        return handler
+
+    settings, client = _engy_client(None)
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(
+        base_url=settings.openrouter_base_url.rstrip("/"),
+        transport=httpx.MockTransport(make("openrouter")),
+    )
+    await client._engy.aclose()
+    client._engy = httpx.AsyncClient(
+        base_url=settings.engy_base_url.rstrip("/"),
+        transport=httpx.MockTransport(make("engy")),
+    )
+    try:
+        await client.complete(
+            model="deepseek/deepseek-v4-flash-0731",
+            messages=[{"role": "user", "content": "x"}],
+            purpose="simulate",
+            eval_run_id="eval-1",
+            provider={"order": ["deepseek", "cloudflare"], "allow_fallbacks": False},
+            parse_retries=2,
+            accept=lambda raw: raw == "ok",
+        )
+    finally:
+        await client.aclose()
+    return hits
+
+
+def test_reference_and_simulate_budgets_are_independent():
+    """glm reference failures must not disable deepseek for simulate, or vice versa."""
+    hits = asyncio.run(_two_models_one_eval())
+    # glm burns its own budget of 1, deepseek still gets its first engy try afterwards
+    assert hits == [
+        ("engy", "glm-5.2"),
+        ("openrouter", "z-ai/glm-5.2"),
+        ("openrouter", "z-ai/glm-5.2"),
+        ("engy", "deepseek-v4-flash-0731"),
+        ("openrouter", "deepseek/deepseek-v4-flash-0731"),
+    ]
+
+
+async def _two_models_one_eval():
+    hits: list[tuple[str, str]] = []
+    settings, client = _engy_client(None, engy_max_errors=1)
+    await _swap_transports(client, settings, hits)
+    client._engy_should_fail = True
+    try:
+        for _ in range(2):
+            await client.complete(
+                model="z-ai/glm-5.2",
+                messages=[{"role": "user", "content": "x"}],
+                purpose="reference",
+                eval_run_id="eval-1",
+            )
+        await client.complete(
+            model="deepseek/deepseek-v4-flash-0731",
+            messages=[{"role": "user", "content": "x"}],
+            purpose="simulate",
+            eval_run_id="eval-1",
+        )
     finally:
         await client.aclose()
     return hits

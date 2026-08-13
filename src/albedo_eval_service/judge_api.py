@@ -710,7 +710,7 @@ class ObservationSimulationService:
         observation = ""
         best_rank = -1
         for model, tries in attempts:
-            single_shot = model == primary and primary != fallback_model
+            capped = model == primary and primary != fallback_model
             messages = [
                 {
                     "role": "system",
@@ -718,7 +718,7 @@ class ObservationSimulationService:
                 },
                 {"role": "user", "content": transcript},
             ]
-            single_shot_kwargs = {"parse_retries": 1, "retry_count": 0} if single_shot else {}
+            capped_kwargs = {"parse_retries": 2, "retry_count": 1} if capped else {}
             for attempt in range(tries):
                 response = await self.client.complete(
                     purpose="simulate",
@@ -738,7 +738,7 @@ class ObservationSimulationService:
                         require_content=require_content,
                         contract=contract,
                     ),
-                    **single_shot_kwargs,
+                    **capped_kwargs,
                 )
                 if response.error:
                     if model != fallback_model:

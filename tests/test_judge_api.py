@@ -138,7 +138,7 @@ def test_simulation_system_prompt_carries_the_formats_block():
     assert "Anchor on evidence" in openhands
 
 
-def test_observation_simulation_primary_single_shot_then_fallback():
+def test_observation_simulation_primary_capped_then_fallback():
     class SimClient:
         def __init__(self, fail_first=False):
             self.calls = []
@@ -174,8 +174,8 @@ def test_observation_simulation_primary_single_shot_then_fallback():
     (primary_call,) = client.calls
     assert primary_call["model"] == "openai/gpt-5.6-luna"
     assert primary_call["provider"] == {"order": ["openai"], "allow_fallbacks": False}
-    assert primary_call["parse_retries"] == 1
-    assert primary_call["retry_count"] == 0
+    assert primary_call["parse_retries"] == 2
+    assert primary_call["retry_count"] == 1
     assert primary_call["max_tokens"] == 123
     assert primary_call["accept"](_RC_OBSERVATION) is True
     assert primary_call["accept"]("Observation: ok") is False

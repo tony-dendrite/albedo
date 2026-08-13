@@ -50,7 +50,7 @@ class JudgeLLMClient:
             else None
         )
         self._engy_models = {m.strip() for m in settings.engy_models.split(",") if m.strip()}
-        self._engy_errors: collections.Counter[str] = collections.Counter()
+        self._engy_errors: collections.Counter[tuple[str, str]] = collections.Counter()
         logger.info(
             f"[judge-llm] engy routing for purposes={sorted(ENGY_PURPOSES)}: "
             + (
@@ -71,7 +71,7 @@ class JudgeLLMClient:
             return False
         if purpose == "simulate" and model != self.settings.simulation_model:
             return False
-        return self._engy_errors[eval_run_id] < self.settings.engy_max_errors
+        return self._engy_errors[(eval_run_id, model)] < self.settings.engy_max_errors
 
     async def __aenter__(self) -> "JudgeLLMClient":
         return self
@@ -154,6 +154,7 @@ class JudgeLLMClient:
         transport_budget = self.settings.retry_count if retry_count is None else retry_count
         async with sem:
             last: JudgeRawResponse | None = None
+            engy_spent = False  # engy gets one shot per call; re-asking at t=0 repeats itself
             for parse_attempt in range(max(1, parse_budget)):
                 last = await self._score_with_retries(
                     model=model,
@@ -163,18 +164,18 @@ class JudgeLLMClient:
                     temperature=temperature,
                     max_tokens=max_tokens,
                     provider=provider,
-                    base_shift=parse_attempt * (transport_budget + 1),
+                    base_shift=parse_attempt,
                     purpose=purpose,
                     retry_count=transport_budget,
                     eval_run_id=eval_run_id,
+                    force_openrouter=engy_spent,
                 )
                 if _usable(last, accept):
                     return last
                 if last.provider == "engy":
-                    self._engy_errors[eval_run_id] += 1
+                    engy_spent = True
                     logger.warning(
-                        f"[judge-llm] engy unusable content, error "
-                        f"{self._engy_errors[eval_run_id]}/{self.settings.engy_max_errors} "
+                        f"[judge-llm] engy content rejected (not charged to engy health) "
                         f"eval_run_id={eval_run_id} model={model} purpose={purpose}, "
                         f"retrying this call on openrouter"
                     )
@@ -186,7 +187,7 @@ class JudgeLLMClient:
                         temperature=temperature,
                         max_tokens=max_tokens,
                         provider=provider,
-                        base_shift=parse_attempt * (transport_budget + 1),
+                        base_shift=parse_attempt,
                         purpose=purpose,
                         retry_count=transport_budget,
                         eval_run_id=eval_run_id,
@@ -286,9 +287,9 @@ class JudgeLLMClient:
         except Exception as exc:
             if not on_engy:
                 raise
-            self._engy_errors[eval_run_id] += 1
+            self._engy_errors[(eval_run_id, model)] += 1
             logger.warning(
-                f"[judge-llm] engy error {self._engy_errors[eval_run_id]}/"
+                f"[judge-llm] engy error {self._engy_errors[(eval_run_id, model)]}/"
                 f"{self.settings.engy_max_errors} eval_run_id={eval_run_id} "
                 f"model={model}, retrying this call on openrouter: "
                 f"{type(exc).__name__}: {exc}"
@@ -310,9 +311,11 @@ class JudgeLLMClient:
         )
         raw = _message_content(body.get("choices", []))
         if on_engy and not raw.strip():
+            self._engy_errors[(eval_run_id, model)] += 1
             logger.warning(
-                f"[judge-llm] engy returned empty content eval_run_id={eval_run_id} "
-                f"model={model} body={str(body)[:200]}"
+                f"[judge-llm] engy returned empty content "
+                f"{self._engy_errors[(eval_run_id, model)]}/{self.settings.engy_max_errors} "
+                f"eval_run_id={eval_run_id} model={model} body={str(body)[:200]}"
             )
         provider = "engy" if on_engy else _provider_name(model)
         return JudgeRawResponse(model=model, provider=provider, raw=raw)
