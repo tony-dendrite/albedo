@@ -222,10 +222,6 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-dev = [
-    { name = "pre-commit" },
-    { name = "ruff" },
-]
 train = [
     { name = "accelerate" },
     { name = "deepspeed" },
@@ -234,7 +230,9 @@ train = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "pre-commit" },
     { name = "pytest" },
+    { name = "ruff" },
 ]
 
 [package.metadata]
@@ -254,13 +252,11 @@ requires-dist = [
     { name = "numpy" },
     { name = "opensearch-py", specifier = ">=2,<3" },
     { name = "pandas" },
-    { name = "pre-commit", marker = "extra == 'dev'" },
     { name = "prompt-toolkit", specifier = ">=3" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2.0" },
     { name = "pyarrow", specifier = ">=16.0.0" },
     { name = "pydantic", specifier = ">=2.8.0" },
     { name = "pydantic-settings", specifier = ">=2.4.0" },
-    { name = "ruff", marker = "extra == 'dev'" },
     { name = "safetensors" },
     { name = "torch", specifier = "==2.11.0" },
     { name = "torchaudio", specifier = "==2.11.0" },
@@ -270,10 +266,14 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30.0" },
     { name = "vllm", specifier = "==0.23.0" },
 ]
-provides-extras = ["train", "dev"]
+provides-extras = ["train"]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=8.2.0" }]
+dev = [
+    { name = "pre-commit" },
+    { name = "pytest", specifier = ">=8.2.0" },
+    { name = "ruff" },
+]
 
 [[package]]
 name = "annotated-doc"

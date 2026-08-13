@@ -35,7 +35,6 @@ dependencies = [
 [project.optional-dependencies]
 # Miner-side SFT/RL training.
 train = ["trl", "accelerate", "deepspeed"]
-dev = ["ruff", "pre-commit"]
 
 [project.scripts]
 albedo-eval-api = "albedo_eval_service.control.api:main"
@@ -55,7 +54,9 @@ albedo = "miner.cli:main"
 
 [dependency-groups]
 dev = [
+    "pre-commit",
     "pytest>=8.2.0",
+    "ruff",
 ]
 
 [build-system]
