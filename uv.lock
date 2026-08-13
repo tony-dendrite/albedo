@@ -207,11 +207,14 @@ dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
     { name = "opensearch-py" },
     { name = "pandas" },
+    { name = "pre-commit" },
     { name = "prompt-toolkit" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pyarrow" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
+    { name = "pytest" },
+    { name = "ruff" },
     { name = "safetensors" },
     { name = "torch" },
     { name = "torchaudio" },
@@ -226,13 +229,6 @@ train = [
     { name = "accelerate" },
     { name = "deepspeed" },
     { name = "trl" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pre-commit" },
-    { name = "pytest" },
-    { name = "ruff" },
 ]
 
 [package.metadata]
@@ -252,11 +248,14 @@ requires-dist = [
     { name = "numpy" },
     { name = "opensearch-py", specifier = ">=2,<3" },
     { name = "pandas" },
+    { name = "pre-commit" },
     { name = "prompt-toolkit", specifier = ">=3" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2.0" },
     { name = "pyarrow", specifier = ">=16.0.0" },
     { name = "pydantic", specifier = ">=2.8.0" },
     { name = "pydantic-settings", specifier = ">=2.4.0" },
+    { name = "pytest", specifier = ">=8.2.0" },
+    { name = "ruff" },
     { name = "safetensors" },
     { name = "torch", specifier = "==2.11.0" },
     { name = "torchaudio", specifier = "==2.11.0" },
@@ -267,13 +266,6 @@ requires-dist = [
     { name = "vllm", specifier = "==0.23.0" },
 ]
 provides-extras = ["train"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pre-commit" },
-    { name = "pytest", specifier = ">=8.2.0" },
-    { name = "ruff" },
-]
 
 [[package]]
 name = "annotated-doc"

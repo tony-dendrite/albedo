@@ -18,11 +18,14 @@ dependencies = [
     "numpy",
     "opensearch-py>=2,<3",
     "pandas",
+    "pre-commit",
     "prompt_toolkit>=3",
     "psycopg[binary]>=3.2.0",
     "pydantic>=2.8.0",
     "pydantic-settings>=2.4.0",
     "pyarrow>=16.0.0",
+    "pytest>=8.2.0",
+    "ruff",
     "safetensors",
     "torch==2.11.0",
     "torchaudio==2.11.0",
@@ -51,13 +54,6 @@ model-validation = "model_validation.validate_worker:main"
 sanity-remote = "sanity_remote.api:main"
 sanity-dispatcher = "sanity_service.dispatcher:main"
 albedo = "miner.cli:main"
-
-[dependency-groups]
-dev = [
-    "pre-commit",
-    "pytest>=8.2.0",
-    "ruff",
-]
 
 [build-system]
 requires = ["hatchling"]
