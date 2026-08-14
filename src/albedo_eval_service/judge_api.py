@@ -711,20 +711,24 @@ class ObservationSimulationService:
             rungs = [
                 {**sim_provider, "order": order[i:] + order[:i]} for i in range(len(order))
             ] or [sim_provider]
-            attempts = [(primary, self.settings.simulation_loop_reruns + 1, rung) for rung in rungs]
-            attempts.append((fallback_model, 1, _evaluator_provider(self.settings)))
+            attempts = [
+                (primary, self.settings.simulation_loop_reruns + 1, rung, index > 0)
+                for index, rung in enumerate(rungs)
+            ]
+            attempts.append((fallback_model, 1, _evaluator_provider(self.settings), False))
         else:
             attempts = [
                 (
                     primary,
                     self.settings.simulation_loop_reruns + 1,
                     _evaluator_provider(self.settings),
+                    False,
                 )
             ]
 
         observation = ""
         best_rank = -1
-        for model, tries, provider_block in attempts:
+        for model, tries, provider_block, or_only in attempts:
             capped = model == primary and primary != fallback_model
             messages = [
                 {
@@ -733,7 +737,9 @@ class ObservationSimulationService:
                 },
                 {"role": "user", "content": transcript},
             ]
-            capped_kwargs = {"parse_retries": 2, "retry_count": 1} if capped else {}
+            # one parse attempt per rung: the ladder itself is the retry mechanism, and
+            # every extra in-rung attempt lands on the turn barrier's critical path
+            capped_kwargs = {"parse_retries": 1, "retry_count": 1} if capped else {}
             for attempt in range(tries):
                 response = await self.client.complete(
                     purpose="simulate",
@@ -743,6 +749,7 @@ class ObservationSimulationService:
                     eval_run_id=request.eval_run_id,
                     max_tokens=self.settings.simulation_max_tokens,
                     provider=provider_block,
+                    force_openrouter=or_only,
                     accept=lambda raw: _usable_simulation_output(
                         repair_to_contract(repair_output(raw, fmt), fmt, contract),
                         fmt,

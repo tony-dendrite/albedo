@@ -23,7 +23,7 @@ class JudgeRawResponse:
     error: str | None = None
 
 
-ENGY_PURPOSES = frozenset({"reference", "simulate"})
+ENGY_PURPOSES = frozenset({"reference"})
 
 
 class JudgeLLMClient:
@@ -116,6 +116,7 @@ class JudgeLLMClient:
         parse_retries: int | None = None,
         retry_count: int | None = None,
         eval_run_id: str = "",
+        force_openrouter: bool = False,
     ) -> JudgeRawResponse:
         return await self._call(
             model=model,
@@ -129,6 +130,7 @@ class JudgeLLMClient:
             parse_retries=parse_retries,
             retry_count=retry_count,
             eval_run_id=eval_run_id,
+            force_openrouter=force_openrouter,
         )
 
     async def _call(
@@ -146,6 +148,7 @@ class JudgeLLMClient:
         parse_retries: int | None = None,
         retry_count: int | None = None,
         eval_run_id: str = "",
+        force_openrouter: bool = False,
     ) -> JudgeRawResponse:
         sem = self._semaphores.setdefault(
             model, asyncio.Semaphore(max(1, self.settings.max_concurrency_per_model))
@@ -154,7 +157,9 @@ class JudgeLLMClient:
         transport_budget = self.settings.retry_count if retry_count is None else retry_count
         async with sem:
             last: JudgeRawResponse | None = None
-            engy_spent = False  # engy gets one shot per call; re-asking at t=0 repeats itself
+            # engy gets one shot per call; re-asking at t=0 repeats itself. Callers that
+            # already spent engy in an earlier rung of their own ladder skip it entirely.
+            engy_spent = force_openrouter
             for parse_attempt in range(max(1, parse_budget)):
                 last = await self._score_with_retries(
                     model=model,

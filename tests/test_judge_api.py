@@ -63,6 +63,7 @@ class FakeClient:
         accept=None,
         purpose="",
         eval_run_id="",
+        force_openrouter=False,
     ):
         questions = [{"text": f"q{i}?", "example_bad": "bad"} for i in range(self.n_questions)]
         return JudgeRawResponse(
@@ -174,7 +175,7 @@ def test_observation_simulation_primary_capped_then_fallback():
     (primary_call,) = client.calls
     assert primary_call["model"] == "openai/gpt-5.6-luna"
     assert primary_call["provider"] == {"order": ["openai"], "allow_fallbacks": False}
-    assert primary_call["parse_retries"] == 2
+    assert primary_call["parse_retries"] == 1
     assert primary_call["retry_count"] == 1
     assert primary_call["max_tokens"] == 123
     assert primary_call["accept"](_RC_OBSERVATION) is True
@@ -311,6 +312,7 @@ class OneJudgeBrokenClient:
         accept=None,
         purpose="",
         eval_run_id="",
+        force_openrouter=False,
     ):
         qs = [{"text": f"q{i}", "example_bad": "b"} for i in range(self.n_questions)]
         return JudgeRawResponse(model=model, provider="fake", raw=json.dumps({"questions": qs}))
@@ -489,6 +491,7 @@ class _AnchorFakeClient:
         parse_retries=None,
         retry_count=None,
         eval_run_id="",
+        force_openrouter=False,
     ):
         if response_schema is None:
             if self.fail_reference:
