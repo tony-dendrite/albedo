@@ -135,7 +135,7 @@ def test_unbounded_submit_questions_are_diagnostic_only():
 
 
 def test_challenger_win_requires_margin():
-    assert CHALLENGER_WIN_MARGIN == 0.03
+    assert CHALLENGER_WIN_MARGIN == 0.025
     assert challenger_beats_king(0.34, 0.30) is True
     assert challenger_beats_king(0.32, 0.30) is False
 
@@ -470,7 +470,7 @@ def test_parse_keeps_size_ladder_rungs():
     extras = [{"text": f"q{i} gate{i}?", "example_bad": "bad"} for i in range(20)]
     parsed, ok = parse_questions(json.dumps({"questions": rungs + extras}), 50)
     ladder = [q for q in parsed if is_measurement_bound_question(q["text"])]
-    assert len(ladder) == 6
+    assert len(ladder) == 5
     assert ok
 
 

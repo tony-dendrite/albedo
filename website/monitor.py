@@ -279,6 +279,10 @@ def _eval_runs(
                er.challenger_won, er.score_challenger, er.score_king, er.win_margin,
                er.valid_turns, er.total_turns, er.chal_vllm_errors, er.king_vllm_errors,
                er.finished_at,
+               (SELECT json_agg(w.win_margin ORDER BY w.finished_at)
+                FROM eval_runs w
+                WHERE w.submission_id = er.submission_id AND w.state = 'SUCCEEDED'
+                  AND w.win_margin IS NOT NULL) AS pass_margins,
                ms.uid, ms.hotkey, ms.model_uri,
                sa.result_summary,
                ckv.version AS crowned_king_version,
@@ -332,6 +336,9 @@ def _eval_runs(
                 "score_challenger": _num(row["score_challenger"]),
                 "score_king": _num(row["score_king"]),
                 "win_margin": _num(row["win_margin"]),
+                # win-on-both: margins of every scored pass for this submission, in
+                # eval order — two entries when a pass-1 win led to a confirmation eval
+                "pass_margins": [_num(m) for m in (row["pass_margins"] or [])],
                 "finished_at": row["finished_at"],
                 "model_uri": row["model_uri"],
                 "hotkey": row["hotkey"],
@@ -368,7 +375,10 @@ def _current_eval(conn, *, model_filter: str) -> dict[str, Any] | None:
     row = conn.execute(
         """
         SELECT er.id AS eval_run_id, er.state, er.sample_count, er.generated_sample_count,
-               er.started_at, ms.id AS submission_id, ms.model_uri, ms.hotkey, ms.uid
+               er.started_at, ms.id AS submission_id, ms.model_uri, ms.hotkey, ms.uid,
+               (SELECT count(*) FROM eval_runs w
+                WHERE w.submission_id = ms.id AND w.state = 'SUCCEEDED'
+                  AND w.challenger_won IS TRUE AND w.id != er.id) AS prior_wins
         FROM eval_runs er
         JOIN model_submissions ms ON ms.id = er.submission_id
         WHERE er.state = ANY(%s)
@@ -390,17 +400,22 @@ def _current_eval(conn, *, model_filter: str) -> dict[str, Any] | None:
         "model_uri": row["model_uri"],
         "hotkey": row["hotkey"],
         "uid": row["uid"],
+        # win-on-both: >=1 means this running eval is the confirmation pass (2/2)
+        "prior_wins": int(row["prior_wins"] or 0),
     }
 
 
 def _queue(conn, *, exclude_submission_id: str | None, model_filter: str) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
-        SELECT id AS submission_id, state, model_uri, hotkey, uid, created_at
-        FROM model_submissions
-        WHERE state = ANY(%s)
-          AND model_uri LIKE %s
-        ORDER BY priority ASC, created_at ASC
+        SELECT ms.id AS submission_id, ms.state, ms.model_uri, ms.hotkey, ms.uid, ms.created_at,
+               (SELECT count(*) FROM eval_runs w
+                WHERE w.submission_id = ms.id AND w.state = 'SUCCEEDED'
+                  AND w.challenger_won IS TRUE) AS prior_wins
+        FROM model_submissions ms
+        WHERE ms.state = ANY(%s)
+          AND ms.model_uri LIKE %s
+        ORDER BY ms.priority ASC, ms.created_at ASC
         """,
         (list(QUEUE_STATES), f"%{model_filter}%"),
     ).fetchall()
@@ -412,6 +427,8 @@ def _queue(conn, *, exclude_submission_id: str | None, model_filter: str) -> lis
             "hotkey": row["hotkey"],
             "uid": row["uid"],
             "created_at": row["created_at"],
+            # win-on-both: >=1 means pass 1 is won and the confirmation eval is queued
+            "prior_wins": int(row["prior_wins"] or 0),
         }
         for row in rows
         if str(row["submission_id"]) != exclude_submission_id
@@ -501,11 +518,14 @@ def build_state(conn, *, model_filter: str) -> dict[str, Any]:
     )
     rows = conn.execute(
         """
-        SELECT id AS submission_id, state, uid, hotkey, model_uri, updated_at
-        FROM model_submissions
-        WHERE state = ANY(%s)
-          AND model_uri LIKE %s
-        ORDER BY updated_at DESC
+        SELECT ms.id AS submission_id, ms.state, ms.uid, ms.hotkey, ms.model_uri, ms.updated_at,
+               (SELECT count(*) FROM eval_runs w
+                WHERE w.submission_id = ms.id AND w.state = 'SUCCEEDED'
+                  AND w.challenger_won IS TRUE) AS prior_wins
+        FROM model_submissions ms
+        WHERE ms.state = ANY(%s)
+          AND ms.model_uri LIKE %s
+        ORDER BY ms.updated_at DESC
         """,
         (tracked, f"%{model_filter}%"),
     ).fetchall()
@@ -521,6 +541,8 @@ def build_state(conn, *, model_filter: str) -> dict[str, Any]:
             "model_uri": row["model_uri"],
             "state": row["state"],
             "updated_at": row["updated_at"],
+            # win-on-both: >=1 -> pass 1 won; running = confirmation pass, queued = awaiting it
+            "prior_wins": int(row["prior_wins"] or 0),
         }
         for stage_name, buckets in STAGE_BUCKETS.items():
             for bucket, states in buckets.items():

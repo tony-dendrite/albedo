@@ -14,6 +14,7 @@ import httpx
 from albedo_config import RemoteSettings
 from albedo_config.models import JUDGE_MODELS
 
+from ..evaluator.shared.questions import assign_horizons
 from ..judge_core import aggregate_scores
 from ..remote.dataset import EvalSample
 from ..remote.generation import GenerationResult
@@ -272,6 +273,7 @@ def build_scorer(settings: RemoteSettings) -> Scorer:
 def _category_prep_payload(
     request: EvalRequest, samples: list[EvalSample], assistant_turns: int = 0
 ) -> dict[str, Any]:
+    horizons = assign_horizons(samples)
     return {
         "eval_run_id": str(request.eval_run_id),
         "batch_id": "category-prep",
@@ -281,7 +283,7 @@ def _category_prep_payload(
                 "sample_id": sample.sample_id,
                 "prompt": sample.prompt,
                 "messages": sample.messages,
-                "assistant_turns": assistant_turns,
+                "assistant_turns": horizons.get(sample.sample_id, assistant_turns),
             }
             for sample in samples
         ],

@@ -17,7 +17,7 @@ from .shared.observation_format import (
     unmask_fenced_spans,
 )
 
-CHALLENGER_WIN_MARGIN = 0.03
+CHALLENGER_WIN_MARGIN = 0.025
 
 NO_VISIBLE_OUTPUT = "[no visible output]"
 _COMMAND_FENCE_RE = re.compile(r"```(?:bash|sh|shell)[ \t]*\n", re.IGNORECASE)

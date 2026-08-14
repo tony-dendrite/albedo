@@ -9,7 +9,7 @@ from dataclasses import dataclass
 # QuestionService._prepare_once() in judge_api.py whenever num_questions >= 3 * BEHAVIOR_K.
 # ============================================================================
 
-BEHAVIOR_K = 8
+BEHAVIOR_K = 6
 
 _WASTE_NOTE = """ WASTE MEANS ONLY: re-issuing a command whose output was already received, \
 verbatim retries of failed commands, or spending most turns on one repeated action type. \

@@ -802,7 +802,7 @@ def test_simulation_primary_model_falls_back_to_evaluator():
         }
     )
     assert run(stuck) == "from the fallback"
-    assert stuck.calls == ["xiaomi/mimo-v2.5-pro", "xiaomi/mimo-v2.5-pro", "z-ai/glm-5.2"]
+    assert stuck.calls == ["xiaomi/mimo-v2.5-pro"] * 4 + ["z-ai/glm-5.2"]
 
     bad_format = Scripted(
         {

@@ -14,6 +14,7 @@ from loguru import logger
 
 from albedo_config import RemoteSettings
 
+from ..evaluator.shared.questions import assign_horizons
 from ..judge_core import CHALLENGER_WIN_MARGIN, challenger_beats_king
 from ..modelstore.canonical_model_config import canonical_generation_config, canonical_max_model_len
 from ..modelstore.resolver import ModelArtifactResolver, ResolvedModel
@@ -321,7 +322,10 @@ class RemoteEvalWorker:
         king_generator: Generator,
         challenger_generator: Generator,
     ) -> tuple[list[GenerationResult], list[GenerationResult]]:
-        turn_count = max(1, int(self.settings.trajectory_assistant_turns))
+        horizons = assign_horizons(samples)
+        turn_count = max(
+            horizons.values(), default=max(1, int(self.settings.trajectory_assistant_turns))
+        )
         generators = {"previous_king": king_generator, "challenger": challenger_generator}
         current_samples = {"previous_king": samples, "challenger": samples}
         all_results: dict[str, list[list[GenerationResult]]] = {
@@ -347,15 +351,34 @@ class RemoteEvalWorker:
                 if turn_index == turn_count - 1:
                     break
 
+                continuing_samples = {
+                    side: [
+                        s
+                        for s in side_samples
+                        if horizons.get(s.sample_id, turn_count) > turn_index + 1
+                    ]
+                    for side, side_samples in current_samples.items()
+                }
+                continuing_results = {
+                    side: [
+                        r
+                        for r in turn_results[side]
+                        if horizons.get(r.sample_id, turn_count) > turn_index + 1
+                    ]
+                    for side in generators
+                }
+                if not any(continuing_samples.values()):
+                    break
+
                 observations = self._simulate_observations(
                     request=request,
-                    samples_by_side=current_samples,
-                    results_by_side=turn_results,
+                    samples_by_side=continuing_samples,
+                    results_by_side=continuing_results,
                 )
                 for side in generators:
                     all_observations[side].append(observations)
                     current_samples[side] = _next_turn_samples(
-                        current_samples[side], turn_results[side], observations, side=side
+                        continuing_samples[side], continuing_results[side], observations, side=side
                     )
 
             return (
@@ -365,6 +388,7 @@ class RemoteEvalWorker:
                     all_observations["previous_king"],
                     side="previous_king",
                     token_limit=self.settings.max_new_tokens,
+                    horizons=horizons,
                 ),
                 _merge_trajectory_results(
                     samples,
@@ -372,6 +396,7 @@ class RemoteEvalWorker:
                     all_observations["challenger"],
                     side="challenger",
                     token_limit=self.settings.max_new_tokens,
+                    horizons=horizons,
                 ),
             )
         finally:
@@ -818,10 +843,12 @@ def _merge_trajectory_results(
     *,
     side: str,
     token_limit: int,
+    horizons: dict[str, int] | None = None,
 ) -> list[GenerationResult]:
     result_maps = [{result.sample_id: result for result in results} for results in turn_results]
     merged = []
     for sample in samples:
+        sample_turn_count = (horizons or {}).get(sample.sample_id, len(result_maps))
         turns = _context_turns(sample)
         error = None
         truncated = False
@@ -845,6 +872,8 @@ def _merge_trajectory_results(
                 )
                 break
             turns.append({"role": "assistant", "content": result.text, "score_target": True})
+            if index + 1 >= sample_turn_count:
+                break
             if index >= len(turn_observations):
                 continue
             observation = turn_observations[index].get((side, sample.sample_id))

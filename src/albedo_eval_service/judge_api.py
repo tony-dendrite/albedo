@@ -457,7 +457,8 @@ class QuestionService:
                 reference=reference,
                 fmt=detect_format(sample.sample_id, prefix),
                 prefix_turns=sum(1 for m in prefix or [] if m.get("role") == "assistant"),
-                candidate_turns=self.settings.sota_trajectory_turns,
+                candidate_turns=getattr(sample, "assistant_turns", 0)
+                or self.settings.sota_trajectory_turns,
             )
 
             return self.client.complete(
@@ -703,13 +704,27 @@ class ObservationSimulationService:
         contract = command_contract(command)
         primary = self.settings.simulation_model or self.settings.evaluator_model
         fallback_model = self.settings.evaluator_model
-        attempts: list[tuple[str, int]] = [(primary, self.settings.simulation_loop_reruns + 1)]
+        attempts: list[tuple[str, int, dict[str, Any] | None]] = []
         if primary != fallback_model:
-            attempts.append((fallback_model, 1))
+            sim_provider = _simulation_provider(self.settings)
+            order = (sim_provider or {}).get("order") or []
+            rungs = [
+                {**sim_provider, "order": order[i:] + order[:i]} for i in range(len(order))
+            ] or [sim_provider]
+            attempts = [(primary, self.settings.simulation_loop_reruns + 1, rung) for rung in rungs]
+            attempts.append((fallback_model, 1, _evaluator_provider(self.settings)))
+        else:
+            attempts = [
+                (
+                    primary,
+                    self.settings.simulation_loop_reruns + 1,
+                    _evaluator_provider(self.settings),
+                )
+            ]
 
         observation = ""
         best_rank = -1
-        for model, tries in attempts:
+        for model, tries, provider_block in attempts:
             capped = model == primary and primary != fallback_model
             messages = [
                 {
@@ -727,11 +742,7 @@ class ObservationSimulationService:
                     temperature=0.0,
                     eval_run_id=request.eval_run_id,
                     max_tokens=self.settings.simulation_max_tokens,
-                    provider=(
-                        _evaluator_provider(self.settings)
-                        if model == fallback_model
-                        else _simulation_provider(self.settings)
-                    ),
+                    provider=provider_block,
                     accept=lambda raw: _usable_simulation_output(
                         repair_to_contract(repair_output(raw, fmt), fmt, contract),
                         fmt,
@@ -763,10 +774,11 @@ class ObservationSimulationService:
                     break
                 logger.warning(
                     "observation_simulation_unusable eval_run_id={} sample_id={} model={} "
-                    "attempt={}/{} reason={} kept_rank={}",
+                    "provider={} attempt={}/{} reason={} kept_rank={}",
                     request.eval_run_id,
                     request.sample_id,
                     model,
+                    ((provider_block or {}).get("order") or ["auto"])[0],
                     attempt + 1,
                     tries,
                     _unusable_reason(

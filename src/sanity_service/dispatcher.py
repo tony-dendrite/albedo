@@ -31,6 +31,7 @@ from sanity_service.db import ClaimedPreEval, PreEvalRepository
 from sanity_service.judge_panel import make_client
 from sanity_service.llm_check import SampleInput, run_gate
 from sanity_service.remote_client import SanityRemoteClient
+from sanity_service.tail_check import run_tail_check
 from sanity_service.uploads import put_sanity_fault
 
 _CANONICAL_TOKENIZER_PATH = (
@@ -230,6 +231,7 @@ class SanityDispatcher:
                 if turn_index == turn_count - 1:
                     break
                 await _append_observations(active, str(claimed.attempt_id), turn_index + 1)
+            await run_tail_check(states)
             return _trajectory_result(str(claimed.attempt_id), states, turn_count)
         finally:
             if kept_warm:

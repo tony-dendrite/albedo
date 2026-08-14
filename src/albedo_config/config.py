@@ -262,7 +262,7 @@ class SanitySettings(BaseSettings):
     dataset_manifest_hash: str = DEFAULT_DATASET_MANIFEST_HASH
     dataset_root: str = ""
     sample_count: int = 3
-    trajectory_assistant_turns: int = 8
+    trajectory_assistant_turns: int = 32
     gen_max_tokens: int = 16384
 
     skip_viability: bool = True

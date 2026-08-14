@@ -32,13 +32,22 @@ def _samples(counts: dict[str, int]) -> list[EvalSample]:
 
 
 def test_category_prep_payload_carries_context_for_reference_anchoring():
+    from collections import Counter
+
+    from albedo_eval_service.evaluator.shared.questions import HORIZON_STRATA, assign_horizons
+
     samples = _samples({"swe-zero": 4, "mini-coder": 2})
     request = types.SimpleNamespace(eval_run_id=uuid4())
     payload = _category_prep_payload(request, samples, 3)
     assert payload["total_sample_count"] == len(samples)
+    horizons = assign_horizons(samples)
     for entry in payload["samples"]:
         assert set(entry) == {"sample_id", "prompt", "messages", "assistant_turns"}
-        assert entry["assistant_turns"] == 3
+        assert entry["assistant_turns"] == horizons[entry["sample_id"]]
+        assert entry["assistant_turns"] in HORIZON_STRATA
+    assert Counter(e["assistant_turns"] for e in payload["samples"]) == Counter(
+        {8: 2, 12: 2, 16: 2}
+    )
 
 
 def test_score_batch_payload_carries_both_outputs_no_index():

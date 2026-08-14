@@ -100,6 +100,20 @@ def sample_phase(messages: list[dict[str, str]] | None) -> str:
     return "cold" if len(turns) <= 2 else "pre_edit"
 
 
+HORIZON_STRATA = (8, 12, 16)
+
+
+def assign_horizons(samples) -> dict[str, int]:
+    by_phase: dict[str, list[str]] = {}
+    for sample in samples:
+        by_phase.setdefault(sample_phase(sample.messages), []).append(sample.sample_id)
+    horizons: dict[str, int] = {}
+    for ids in by_phase.values():
+        for index, sample_id in enumerate(sorted(ids)):
+            horizons[sample_id] = HORIZON_STRATA[index % len(HORIZON_STRATA)]
+    return horizons
+
+
 # rubric tags carry no requires label; map them so the gate and label caps keep working
 RUBRIC_TAG_REQUIRES = {
     "action": "action",
@@ -213,6 +227,16 @@ def enforce_question_labels(
     return kept, drops
 
 
+_MUTED_PROSE_WORDS_PER_TURN = 10
+
+
+def _is_muted(candidate_turn_texts: list[str]) -> bool:
+    if not candidate_turn_texts:
+        return False
+    prose = sum(len(_FENCE_RE.sub("", t).split()) for t in candidate_turn_texts)
+    return prose < _MUTED_PROSE_WORDS_PER_TURN * len(candidate_turn_texts)
+
+
 def apply_measurement_gate(
     answers: dict[str, str | None],
     questions: list[dict[str, str]],
@@ -220,14 +244,19 @@ def apply_measurement_gate(
     candidate_turn_texts: list[str],
     reference_made_edit: bool,
 ) -> dict[str, str | None]:
+    gated = dict(answers)
+    if _is_muted(candidate_turn_texts):
+        for question in questions:
+            qid = question.get("id")
+            if qid in gated and is_measurement_bound_question(question.get("text", "")):
+                gated.pop(qid)
     made_edit = trajectory_made_edit(candidate_turn_texts)
     if made_edit:
-        return answers
+        return gated
     final_is_read = bool(candidate_turn_texts) and not (
         _edited_in_turn(candidate_turn_texts[-1])
         or _SUBMIT_RE.search(candidate_turn_texts[-1] or "")
     )
-    gated = dict(answers)
     for question in questions:
         qid = question.get("id")
         if qid not in gated:
@@ -337,7 +366,7 @@ _MEASUREMENT_BOUND_RE = re.compile(
     r"|\b(?:words?|characters?|sentences?|lines)\b[^?]{0,40}\b\d{2,6}\b",
     re.IGNORECASE,
 )
-MEASUREMENT_QUESTION_LIMIT = 8
+MEASUREMENT_QUESTION_LIMIT = 5
 
 
 def is_measurement_bound_question(text: str) -> bool:

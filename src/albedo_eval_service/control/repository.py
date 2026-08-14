@@ -592,6 +592,21 @@ class EvalRepository:
         next_state = "EVAL_WIN" if verdict.get("challenger_won") else "COMPLETE_LOSS"
         with self._connect() as conn:
             with conn.transaction():
+                if next_state == "EVAL_WIN":
+                    prior_wins = conn.execute(
+                        """
+                        SELECT count(*) AS n FROM eval_runs
+                        WHERE submission_id = %s AND state = 'SUCCEEDED'
+                          AND challenger_won IS TRUE AND id != %s
+                        """,
+                        (submission_id, eval_run_id),
+                    ).fetchone()["n"]
+                    if prior_wins == 0:
+                        next_state = "EVAL_QUEUED"
+                        conn.execute(
+                            "UPDATE model_submissions SET priority = 0 WHERE id = %s",
+                            (submission_id,),
+                        )
                 conn.execute(
                     """
                     UPDATE eval_runs
