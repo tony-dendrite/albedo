@@ -1,5 +1,5 @@
 import { el, mount } from "../dom.js";
-import { pct, fmtDateTime, fmtRelative, fmtDuration } from "../format.js";
+import { pct, fmtRelative, fmtDuration } from "../format.js";
 import { modelRepo, kingTitleName } from "../model.js";
 import { PREDS_TOTAL_FALLBACK, PREDS_STALE_MS } from "../config.js";
 
@@ -236,11 +236,6 @@ export function suiteScores(model) {
   return scores;
 }
 
-function latestScoreDate(model) {
-  const dates = Object.values(suiteScores(model)).map(entry => entry?.finished_at).filter(Boolean).sort();
-  return dates[dates.length - 1] || null;
-}
-
 function hasPanelScores(model) {
   const scores = suiteScores(model);
   return BENCHMARK_ORDER.some(suite => scores[suite]?.score != null);
@@ -461,8 +456,7 @@ function renderHistoryPanel(sorted, selectedModel, rerender) {
       onClick: e => { if (!e.target.closest("a")) location.href = detailHref(model); },
     },
       el("td", { class: "bench-king-col" },
-        el("a", { href: detailHref(model) }, modelLabel(model)),
-        " ", el("span", { class: "muted" }, fmtDateTime(latestScoreDate(model)))),
+        el("a", { href: detailHref(model) }, modelLabel(model))),
       el("td", { class: "model" }, repoUrl
         ? el("a", { href: repoUrl, target: "_blank", rel: "noopener" }, modelName(model))
         : el("span", { class: "model-cell" }, modelName(model))),

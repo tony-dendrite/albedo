@@ -26,6 +26,8 @@ const judgeLabel = m => {
 };
 const scoreCls = n => n == null ? "" : Number(n) >= 0.5 ? "ok" : "bad";
 
+const TAG_NAMESPACE_ORDER = ["reference", "behavior"];
+
 function parseJsonl(text) {
   return text.split(/\n+/).map(line => {
     try { return line.trim() ? JSON.parse(line) : null; } catch { return null; }
@@ -54,19 +56,77 @@ function pivotBinary(record) {
   return { judges, king: bySide.previous_king || {}, chal: bySide.challenger || {} };
 }
 
-// mirrors judge_core.aggregate_scores: per-judge mean yes_rate for the king side,
-// over scored records with parse_ok judge results
-function kingByJudge(records) {
-  const rates = {};
+const namespaceOf = tag => (tag && tag.includes(":") ? tag.slice(0, tag.indexOf(":")) : "");
+
+// king vs challenger yes-rate, grouped by keyFn(question) across all scored samples/judges
+function marginsByKey(records, keyFn) {
+  const acc = {};
   for (const record of records.filter(x => x.scored)) {
-    for (const j of record.judge_results || []) {
-      if (j.side === "previous_king" && j.parse_ok && j.yes_rate != null) {
-        (rates[j.judge_model] ||= []).push(Number(j.yes_rate));
+    const p = pivotBinary(record);
+    for (const q of record.questions || []) {
+      const key = keyFn(q);
+      const bucket = (acc[key] ||= { kingYes: 0, kingN: 0, chalYes: 0, chalN: 0 });
+      for (const m of p.judges) {
+        const kj = p.king[m], cj = p.chal[m];
+        const ka = kj?.parse_ok ? kj.answers?.[q.id] : null;
+        if (ka === "1" || ka === "0") { bucket.kingYes += ka === "1" ? 1 : 0; bucket.kingN++; }
+        const ca = cj?.parse_ok ? cj.answers?.[q.id] : null;
+        if (ca === "1" || ca === "0") { bucket.chalYes += ca === "1" ? 1 : 0; bucket.chalN++; }
       }
     }
   }
-  return Object.fromEntries(Object.entries(rates).map(([m, v]) => [m, mean(v)]));
+  return Object.entries(acc).map(([key, b]) => {
+    const kingRate = b.kingN ? b.kingYes / b.kingN : null;
+    const chalRate = b.chalN ? b.chalYes / b.chalN : null;
+    return {
+      key, kingRate, chalRate, n: Math.max(b.kingN, b.chalN),
+      margin: kingRate != null && chalRate != null ? chalRate - kingRate : null,
+    };
+  });
 }
+
+// per-tag breakdown (not enumerated — see TAG_NAMESPACE_ORDER above)
+function tagMargins(records) {
+  return marginsByKey(records, q => q.tag || "untagged").sort((a, b) => {
+    const ra = TAG_NAMESPACE_ORDER.indexOf(namespaceOf(a.key));
+    const rb = TAG_NAMESPACE_ORDER.indexOf(namespaceOf(b.key));
+    const oa = ra === -1 ? TAG_NAMESPACE_ORDER.length : ra;
+    const ob = rb === -1 ? TAG_NAMESPACE_ORDER.length : rb;
+    return oa !== ob ? oa - ob : a.key.localeCompare(b.key);
+  });
+}
+
+// per-namespace breakdown: reference:* vs behavior:* (untagged/unnamespaced tags -> "other")
+function typeMargins(records) {
+  return marginsByKey(records, q => namespaceOf(q.tag) || "other").sort((a, b) => {
+    const ra = TAG_NAMESPACE_ORDER.indexOf(a.key);
+    const rb = TAG_NAMESPACE_ORDER.indexOf(b.key);
+    const oa = ra === -1 ? TAG_NAMESPACE_ORDER.length : ra;
+    const ob = rb === -1 ? TAG_NAMESPACE_ORDER.length : rb;
+    return oa !== ob ? oa - ob : a.key.localeCompare(b.key);
+  });
+}
+
+function marginTable(rows, keyHeader) {
+  const scoreAgainst = (s1, s2) => (s1 == null || s2 == null) ? "" : Number(s1) > Number(s2) ? "ok" : "bad";
+
+  if (!rows.length) return el("div", { class: "empty" }, "no tagged questions.");
+  return el("table", { class: "data-table sample-judge-table" },
+    el("thead", {}, el("tr", {},
+      el("th", {}, keyHeader), el("th", { class: "r" }, "questions"),
+      el("th", { class: "r" }, "king"), el("th", { class: "r" }, "challenger"),
+      el("th", { class: "r" }, "margin"))),
+    el("tbody", {}, rows.map(row => el("tr", {},
+      el("td", {}, row.key),
+      el("td", { class: "r" }, String(row.n)),
+      el("td", { class: `r ${scoreAgainst(row.kingRate, row.chalRate)}` }, pct(row.kingRate)),
+      el("td", { class: `r ${scoreAgainst(row.chalRate, row.kingRate)}` }, pct(row.chalRate)),
+      el("td", { class: `r ${row.margin > 0 ? "ok" : row.margin < 0 ? "bad" : ""}` },
+        row.margin == null ? "—" : `${row.margin >= 0 ? "+" : ""}${(row.margin * 100).toFixed(2)}`)))));
+}
+
+const tagMarginTable = records => marginTable(tagMargins(records), "tag");
+const typeMarginTable = records => marginTable(typeMargins(records), "type");
 
 function lazyDetails(props, summaryChildren, buildBody, bodyClass) {
   const body = el("div", { class: bodyClass });
@@ -297,39 +357,7 @@ function renderEval(r, netuid) {
     ? fetchText(r.artifacts.SCORING_RESULTS).then(t => t ? parseJsonl(t) : [])
     : Promise.resolve([]);
 
-  const byJudge = Object.entries(r.score_breakdown?.by_judge || {});
-  // binary mode: by_judge is the challenger's independent mean yes-rate per judge —
-  // king is NOT 1 - chal and isn't in the summary, so fill the king column from
-  // the SCORING_RESULTS artifact once it loads.
   const binary = r.scoring_mode === "binary";
-  const summaryKing = r.score_breakdown?.by_judge_king || {};
-  const kingCells = {};
-  const judgeTable = byJudge.length
-    ? el("table", { class: "data-table judges-table" },
-        el("thead", {}, el("tr", {},
-          el("th", {}, "judge"),
-          el("th", { class: "r" }, binary ? "challenger yes-rate" : "challenger"),
-          el("th", { class: "r" }, binary ? "king yes-rate" : "king"),
-          binary ? false : el("th", { class: "center" }, "outcome"))),
-        el("tbody", {}, byJudge.map(([model, chal]) => {
-          const o = chal > 0.5 ? "win" : chal < 0.5 ? "lose" : "tie";
-          return el("tr", {},
-            el("td", { class: "judge", title: model }, judgeLabel(model)),
-            el("td", { class: "r" }, pct(chal)),
-            binary
-              ? (kingCells[model] = el("td", { class: "r" }, summaryKing[model] != null ? pct(summaryKing[model]) : "…"))
-              : el("td", { class: "r" }, pct(1 - chal)),
-            binary ? false : el("td", { class: "center " + o }, o));
-        })))
-    : el("div", { class: "empty" }, "no judge breakdown.");
-  if (binary && byJudge.some(([model]) => summaryKing[model] == null)) {
-    recordsP.then(records => {
-      const king = kingByJudge(records);
-      for (const [model, cell] of Object.entries(kingCells)) {
-        if (summaryKing[model] == null) cell.textContent = pct(king[model]);
-      }
-    });
-  }
 
   const byMetric = Object.keys(r.score_breakdown?.by_category || {}).length
     ? r.score_breakdown.by_category
@@ -341,11 +369,14 @@ function renderEval(r, netuid) {
 
   const king = r.king || {};
   const tao = taoMinerUrl(netuid, king.hotkey);
+  const typeSection = binary ? el("div", { class: "detail-section" }) : null;
+  const tagSection = binary ? el("div", { class: "detail-section" }) : null;
   const samplesSection = el("div", { class: "detail-section" });
 
   mount($("d-body"),
     grid,
-    el("div", { class: "detail-section" }, el("h2", {}, "judges"), judgeTable),
+    typeSection,
+    tagSection,
     metrics ? el("div", { class: "detail-section" }, el("h2", {}, metricTitle), metrics) : false,
     samplesSection,
     el("div", { class: "detail-section" }, el("h2", {}, "king it faced"),
@@ -354,6 +385,14 @@ function renderEval(r, netuid) {
         kv("king model", modelName(king)),
         kv("king uid", tao ? link(tao, String(king.uid ?? "—")) : (king.uid ?? "—")))));
 
+  if (typeSection) {
+    mount(typeSection, el("h2", {}, "margin by origin"), el("div", { class: "note" }, "Loading…"));
+    recordsP.then(records => mount(typeSection, el("h2", {}, "margin by origin"), typeMarginTable(records)));
+  }
+  if (tagSection) {
+    mount(tagSection, el("h2", {}, "margin by tag"), el("div", { class: "note" }, "Loading…"));
+    recordsP.then(records => mount(tagSection, el("h2", {}, "margin by tag"), tagMarginTable(records)));
+  }
   renderSampleScores(r, samplesSection, recordsP);
   renderArtifacts(r.artifacts, `eval-${r.eval_run_id}`);
 }
