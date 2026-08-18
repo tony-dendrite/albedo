@@ -12,7 +12,11 @@ The runtime Python entrypoints used by the eval stack are registered in `pyproje
 - `albedo-eval-dispatcher`: claims queued eval submissions and sends them to a remote GPU host.
 - `albedo-eval-requeuer`: moves `EVAL_RETRYABLE` submissions back to `EVAL_QUEUED`.
 - `albedo-remote-eval-api`: GPU-host control plane on a localhost-only port.
-- `albedo-judge-api`: backend judge/scoring API on a localhost-only port.
+- `albedo-judge-api`: backend judge/scoring/observation API on a localhost-only port.
+- `albedo-repo-context-api`: grounding service on the EVAL GPU box — executes a candidate's command
+  against a snapshot of the real repository at the sampled commit.
+- `sanity-dispatcher` / `sanity-remote`: the pre-eval gate (coordinator on the backend, GPU worker on
+  the PRE_EVAL box).
 - `albedo-score-bridge`: backend-to-remote WebSocket scoring bridge.
 - `chain-reader` and `model-validation`: upstream ingestion/validation services, present but separate from the eval coordinator loop.
 
@@ -48,8 +52,10 @@ Run these on the backend/controller host.
 - `albedo-judge-api`
   - PM2 config: `pm2/ecosystem.judge-api.config.js`
   - Command: `uv run albedo-judge-api`
-  - Serves `/health`, `/ready`, and `/score-batch`.
-  - Needs OpenRouter settings if real judging is used.
+  - Serves `/health`, `/ready`, `/category-prep` (checklist generation), `/simulate-observation`
+    (per-turn observations) and `/score-batch`.
+  - Needs OpenRouter settings if real judging is used, and `ALBEDO_JUDGE_REPO_CONTEXT_URL` if
+    observations should be grounded against the real repository instead of simulated.
 
 - `albedo-score-bridge`
   - PM2 config: `pm2/ecosystem.score-bridge.config.js`
@@ -156,6 +162,9 @@ The backend needs to reach the GPU host remote API. The provided PM2 tunnel is:
 - `albedo-backend-to-gpu-api-tunnel`
   - PM2 config: `pm2/ecosystem.gpu-host-tunnel.config.js`
   - Opens `ALBEDO_TUNNEL_BACKEND_LOCAL_GPU_PORT` on the backend and forwards it to `127.0.0.1:ALBEDO_REMOTE_EVAL_API_PORT` on the GPU host.
+  - Also forwards `ALBEDO_TUNNEL_BACKEND_LOCAL_REPO_CONTEXT_PORT` → the GPU box's
+    `ALBEDO_REPO_CONTEXT_API_PORT`, which is how judge-api reaches the grounding service. Leave that
+    variable empty to skip the second forward.
 
 Set these in `.env` on the backend:
 
@@ -173,11 +182,11 @@ The PRE_EVAL host has the same pattern via `pm2/ecosystem.sanity-host-tunnel.con
 `remote_gpu_hosts` row at `http://localhost:<port>`.
 
 **DB tunnels (GPU host → backend Postgres).** GPU-host services that need the DB
-(model_validation, eval-cache-cleanup) expect Postgres on `localhost:<port>`. Preferred: the
-pod-side `pm2/ecosystem.db-tunnel.config.js` (`ssh -L <port>:localhost:<port> <backend>` using the
-box's own key, driven by the `ALBEDO_DB_TUNNEL_*` env vars). If the pod has no key of its own, run
-a reverse tunnel from the backend instead (`ssh -R localhost:<port>:localhost:<port> <gpu-host>`
-under pm2 on the backend).
+(model_validation, eval-cache-cleanup) expect Postgres on `localhost:<port>`. There is **no committed
+config for this** — `pm2/ecosystem.db-tunnel.config.js` does not exist in the repo. Register it by
+hand on whichever side holds a usable key: pod-side forward
+(`ssh -L <port>:localhost:<port> <backend>`), or, if the pod has no key of its own, a reverse tunnel
+from the backend (`ssh -R localhost:<port>:localhost:<port> <gpu-host>`) under pm2 on the backend.
 
 **PM2 env-snapshot gotcha.** pm2 captures env at registration time — after any `.env` change or
 ssh-target repoint, `pm2 delete <name> && pm2 start <config>`; a plain `restart` resurrects the old
@@ -193,10 +202,12 @@ Backend/controller host needs at least:
 ALBEDO_EVAL_DATABASE_URL=postgresql://user:password@localhost:<port>/db
 ALBEDO_EVAL_WORKER_ID=eval-dispatcher-1
 ALBEDO_EVAL_REMOTE_AUTH_TOKEN=shared-remote-token
-ALBEDO_EVAL_DATASET_MANIFEST_URI=s3://albedo-artifacts/datasets/swe-zero/manifest.json
-ALBEDO_EVAL_DATASET_MANIFEST_HASH=982a92bd85d122d287b15f2ddb4e2050b9e345fb3921aa9a63382c7af022bd7f
+ALBEDO_EVAL_DATASET_MANIFEST_URI=s3://albedo/datasets/manifest.json
+# optional — this is the code default in shared/dataset_manifest.py; set it only to override
+ALBEDO_EVAL_DATASET_MANIFEST_HASH=e3cff61772b0096811d4c5d8bbc8dee8dacbd9a069bc4557608adf1c1c2ddf40
 ALBEDO_EVAL_JUDGE_CONFIG_HASH=sha256:replace-with-real-hash
-ALBEDO_EVAL_ARTIFACT_PREFIX=s3://albedo-artifacts
+# optional — code default is s3://albedo/albedo-eval-service, which prod uses as-is
+ALBEDO_EVAL_ARTIFACT_PREFIX=s3://albedo/albedo-eval-service
 ALBEDO_JUDGE_API_AUTH_TOKEN=shared-judge-token
 ALBEDO_JUDGE_OPENROUTER_API_KEY=...
 ALBEDO_SCORE_BRIDGE_REMOTE_WS_URL=ws://localhost:<port>/score-bridge
@@ -213,11 +224,19 @@ must equal the backend's `ALBEDO_EVAL_REMOTE_AUTH_TOKEN` *and* its
 `ALBEDO_SCORE_BRIDGE_REMOTE_AUTH_TOKEN` — both hit the same check on the remote API; an empty
 token on the box disables auth entirely.
 
-> The eval draws on two datasets in full — **SWE-ZERO (12M)** and **mini-coder (400k)**; at scoring
-> time the eval tasks are split **70/30** across them, per the per-source `weight` in the manifest.
-> The combined `manifest.json` is published at
-> `https://s3.hippius.com/albedo/datasets/manifest.json` (built/uploaded by
-> `scripts/prepare_datasets.py --upload`); repin `…_MANIFEST_HASH` to its sha256 after rebuilding.
+> The eval draws on **four** corpora — `mini-coder`, `mini-coder-rs`, `open-swe-traces` and
+> `swe-hero` (SWE-ZERO was retired). Samples are pooled one rollout per unique `instance_id` across
+> all four and stratified by phase x bug family, so there is no fixed per-source split any more; the
+> per-source `weight` in the manifest only shapes the pool. `dataset_version` is
+> `mini-coder+open-swe+smith-rs+hero-v1`. The combined `manifest.json` (160 MB) is published at
+> `https://albedo.tech/datasets/manifest.json` (R2 bucket `albedo`, built/uploaded by
+> `scripts/prepare_datasets.py --upload`) and its sha256 is
+> `e3cff61772b0096811d4c5d8bbc8dee8dacbd9a069bc4557608adf1c1c2ddf40` — which is also
+> `DEFAULT_DATASET_MANIFEST_HASH` in `shared/dataset_manifest.py`, so prod does **not** set the env
+> var at all. After rebuilding, update that constant (and repin any box that overrides it).
+> Note the older `https://s3.hippius.com/albedo/datasets/manifest.json` still serves a stale 1.3 GB
+> pre-migration copy; do not pin to it.
+> See [DATASETS.md](DATASETS.md).
 
 GPU host needs at least:
 
@@ -230,7 +249,7 @@ ALBEDO_REMOTE_FREE_GPU_COUNT=8
 ALBEDO_REMOTE_ACCELERATOR_TYPE=<gpu-type>
 ALBEDO_REMOTE_READY=true
 ALBEDO_REMOTE_GENERATION_BACKEND=vllm
-ALBEDO_REMOTE_DATASET_ROOT=/path/to/swe-zero
+ALBEDO_REMOTE_DATASET_ROOT=/path/to/datasets
 ALBEDO_REMOTE_PREVIOUS_KING_GPU_IDS=0,1,2,3
 ALBEDO_REMOTE_CHALLENGER_GPU_IDS=4,5,6,7
 ALBEDO_REMOTE_SCORING_BACKEND=websocket
@@ -299,10 +318,17 @@ pm2 start pm2/ecosystem.eval-sweeper.config.js
 pm2 start pm2/ecosystem.eval-requeuer.config.js
 ```
 
-GPU host:
+GPU host (EVAL box):
 
 ```bash
 pm2 start pm2/ecosystem.remote-eval-api.config.js
+pm2 start pm2/ecosystem.repo-context-api.config.js
+```
+
+PRE_EVAL box:
+
+```bash
+pm2 start pm2/ecosystem.sanity-remote-api.config.js
 ```
 
 Optional complete-ingestion services on the backend:
@@ -374,8 +400,15 @@ Normal success path:
 ```text
 EVAL_QUEUED
   -> EVAL_RUNNING
-  -> EVAL_WIN or COMPLETE_LOSS
+  -> COMPLETE_LOSS                      (challenger did not clear the 0.025 margin)
+   or EVAL_QUEUED (priority=0)          (FIRST win — re-queued, not crowned)
+        -> EVAL_RUNNING
+        -> EVAL_WIN                     (SECOND independent win — promoted)
 ```
+
+The win-both rule lives in `control/repository.py`: on an `EVAL_WIN` verdict it counts prior
+`SUCCEEDED` eval runs for that submission with `challenger_won`; if there are none it rewrites the
+next state to `EVAL_QUEUED` and sets `priority = 0` so the rematch is picked up first.
 
 Retryable failure path:
 

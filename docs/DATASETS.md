@@ -2,8 +2,8 @@
 
 What models are evaluated on, how samples are drawn, and the format rule the environment simulator
 must obey. Sources of truth: `scripts/prepare_datasets.py`, `scripts/render_trajectories.py`,
-`scripts/build_manifest.py`, `src/albedo_eval_service/sampling.py`,
-`src/albedo_eval_service/observation_format.py`.
+`scripts/build_manifest.py`, `src/albedo_eval_service/shared/sampling.py`,
+`src/albedo_eval_service/shared/observation_format.py`, and `src/repo_context_service/` for grounding.
 
 For how the resulting trajectories are turned into a score, see [SCORING.md](SCORING.md).
 
@@ -88,20 +88,50 @@ Rejected output is retried, then falls back to `empty_output(fmt)` for that form
 observations the harness injects itself — task submitted, no bash command found, empty output — go
 through `wrap(body, fmt)` so they match the trajectory too.
 
-### The simulator chain
+### Grounding comes first: the command is actually executed
 
-`ObservationSimulationService.simulate` runs, per turn:
+The simulator is now the *fallback*, not the first resort. `ObservationSimulationService.simulate`
+resolves each turn in this order:
 
-1. **primary** — `ALBEDO_JUDGE_SIMULATION_MODEL` (`deepseek/deepseek-v4-flash-0731`) hard-pinned to
-   `ALBEDO_JUDGE_SIMULATION_PROVIDERS` (`cloudflare`) via `provider: {"only": [...]}`, given exactly
-   **one** HTTP call — no parse or transport retries, so a dead endpoint fails fast instead of
-   silently re-routing;
-2. **fallback** — the evaluator model with its full retry budget;
-3. **empty observation** in the detected format.
+1. **Absent tool** — `absent_tool_output(command)` recognises commands whose tool does not exist in
+   this environment (a missing `pytest`, `pip install` in a sealed box) and returns that tool's
+   canonical refusal text with the right returncode. No model call.
+2. **Grounded execution** — the **repo-context service** (`src/repo_context_service/`) resolves the
+   sample id to a repository + commit, fetches a snapshot, and *runs the command against it*:
+   - `command_search.py` executes `find` / `grep` / `ls` / `sed` / `cat` and friends — BRE→Python
+     translation, `-prune`/`-o` rewriting, `-name`/`-iname`/`-path`, POSIX classes, `2>/dev/null`.
+   - `git_sim/` executes a subset of `git` (log, show, diff, status, branch…) against the snapshot,
+     including patch/diff rendering and a session view of the working tree.
+   - `overlay.py` keeps an in-memory write overlay, so the candidate's *own* edits — including full
+     `sed -i` emulation — are visible to its later reads.
+
+   When this produces an exact result, the response carries `exact_output` + `exact_returncode` and
+   **that is the observation** (wrapped in the trajectory's format). No LLM is involved at all. The
+   grounding block also carries `GIT SEMANTICS` notes and, for `&&` chains, per-stage `CHAIN
+   EVIDENCE`.
+3. **Transcribe** — if grounding produced a `COMMAND OUTPUT` block but not an exact result, the
+   simulator is handed only `$ <command>` plus that block and told to transcribe it
+   (`TRANSCRIBE_PROMPT`), which removes its freedom to invent.
+4. **Simulate** — otherwise the LLM ladder: `ALBEDO_JUDGE_SIMULATION_MODEL`
+   (`deepseek/deepseek-v4-flash-0731`) over **one rung per provider** in
+   `ALBEDO_JUDGE_SIMULATION_PROVIDERS` (`deepseek,cloudflare`), rotated so each rung leads with a
+   different provider and rungs after the first are forced through OpenRouter; then the evaluator
+   model as the final rung. Each rung gets a single parse attempt — the ladder itself is the retry
+   mechanism, because every extra in-rung attempt sits on the turn barrier's critical path.
+
+Candidates are not merely accepted or rejected: each is repaired (`repair_output` +
+`repair_to_contract`) and then **ranked** against the command's output contract, and the best-ranked
+candidate across the whole ladder is kept. The contract comes from `command_contract(command)` and
+`output_expectation(command)`:
+
+| contract | meaning |
+|---|---|
+| `must_print` | this command always writes something; an empty observation is rejected and re-asked (`MUST_PRINT_RETRY`) |
+| `may_be_silent` | silence is a legitimate result (a successful `sed -i`, a matchless `grep -q`) |
+| `not_derivable` | the output cannot be inferred from the repo at all |
 
 Looping output (25 identical consecutive lines, or a fully periodic 512-char tail) is collapsed
-before use. Repo-context grounding, when configured, injects a tarball snapshot of the repository at
-the sampled commit.
+before use.
 
 ---
 
@@ -120,9 +150,11 @@ sources**, then fills a stratified grid:
 - `NON_BENCHMARK_LANGUAGE_FRACTION = 0.30` — 30% of the draw is non-`python`.
 - `MAX_PREFIX_CHARS = 54_000` — prefixes above this are skipped.
 
-Sample ids are `"<source>/data/train-XXXXX.parquet:<row>:<turn>"`. Defaults:
-`sample_count = 100`, `trajectory_assistant_turns = 8` (candidate turns generated per sample),
-`max_turns_per_sample = 10`.
+Sample ids are `"<source>/data/train-XXXXX.parquet:<row>:<turn>"`. Defaults: `sample_count = 100`
+(`ALBEDO_EVAL_SAMPLE_COUNT`; the function's own default is 64). The number of candidate turns per
+sample is **not** a single constant — `HORIZON_STRATA = (8, 12, 16)` in
+`evaluator/shared/questions.py` assigns a horizon round-robin within each phase bucket, and
+`ALBEDO_REMOTE_TRAJECTORY_ASSISTANT_TURNS` (8) is only the fallback when no horizon is assigned.
 
 ## The manifest
 

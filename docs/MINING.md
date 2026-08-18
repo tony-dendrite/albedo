@@ -1,6 +1,6 @@
 # Mining on Albedo (SN97)
 
-How to mine on the Albedo subnet using the `albedo` miner CLI in [miner/](miner/).
+How to mine on the Albedo subnet using the `albedo` miner CLI in [miner/](../miner/).
 
 ## What mining is
 
@@ -17,19 +17,21 @@ used, run
 the **same validation checks you can run locally** (file manifest + architecture lock +
 near-duplicate dedup), and finally **evaluate** the model. A model that beats the current
 king earns weight/emissions. So your job is: produce a model that (a) passes validation and
-(b) scores higher than the incumbent by at least the **3% win margin**.
+(b) scores higher than the incumbent by at least the **2.5% win margin**, in **two separate evals**.
 
 Evaluation is a multiturn duel: 100 sampled coding-trajectory prefixes drawn from four real-agent
 corpora (`mini-coder`, `mini-coder-rs`, `open-swe-traces`, `swe-hero`), on which your model and the
-king each generate **8 assistant turns** per sample; tool observations between turns are produced by
-an LLM simulator in whatever observation format that trajectory natively uses. Judges then score
+king each generate **8, 12 or 16 assistant turns** per sample (the horizon is stratified per sample).
+Between turns your command is run against a real checkout of the repository at that commit, so
+`git`/`grep`/`find`/`sed` return real output; only what cannot be executed is filled in by an LLM
+simulator, always in whatever observation format that trajectory natively uses. Judges then score
 both sides on the same per-sample yes/no checklist, anchored on a SOTA reference trajectory for that
 exact task.
 
 Two documents cover this in detail:
 
-- **[SCORING.md](SCORING.md)** — the checklist, the weights, the size multiplier and measurement
-  gate, the 3-point win margin, and the anti-gaming rules.
+- **[SCORING.md](SCORING.md)** — the checklist, the measurement gate, the loop short-circuit, the
+  2.5-point win margin, and the anti-gaming rules.
 - **[DATASETS.md](DATASETS.md)** — the four corpora, how samples are drawn (seeded by your
   submission's block hash), and the observation formats the simulator must speak.
 
@@ -56,14 +58,15 @@ validate (local) → upload (HF or Hippius) → check uploaded repo → hotkey r
 
 ### The model must be a valid Qwen3.6-35B-A3B checkpoint
 
-Validation is strict and defined in [chain.toml](chain.toml). Your uploaded repo must:
+Validation is strict and defined in [chain.toml](../chain.toml). Your uploaded repo must:
 
 **Repo naming** — `<namespace>/albedo-qwen3.6-35b-<suffix>` (pattern `^[^/]+/albedo-qwen3\.6-35b-.+$`).
 The CLI builds this for you from `--namespace` + `--name`.
 
-**File manifest** — the repo's file set is checked against a strict allowlist. The live
-authority is `src/model_validation/config.py` (the `[files]` block in [chain.toml](chain.toml)
-has drifted and is NOT what validators enforce):
+**File manifest** — the repo's file set is checked against a strict allowlist. The live authority is
+`ModelValidationSettings` in `src/albedo_config/config.py`, applied by
+`src/model_validation/validate/repo.py`; the `[files]` block in [chain.toml](../chain.toml) now matches it
+(the live list additionally tolerates `LICENSE`):
 
 - **Required (all seven):** `config.json`, `generation_config.json`, `tokenizer_config.json`,
   `tokenizer.json`, `chat_template.jinja`, `preprocessor_config.json`,
@@ -76,7 +79,7 @@ has drifted and is NOT what validators enforce):
   `configuration.json`, `special_tokens_map.json`, `added_tokens.json` — delete them from the
   repo before committing (`tokenizer.json` already carries the tokenizer).
 
-**Architecture lock** (`[arch]` / `[seed]` in [chain.toml](chain.toml)) — your `config.json`
+**Architecture lock** (`[arch]` / `[seed]` in [chain.toml](../chain.toml)) — your `config.json`
 must match the genesis Qwen3.6-35B-A3B seed exactly on:
 
 - `architectures` and `model_type`, `vocab_size`
@@ -160,7 +163,7 @@ real env vars and CLI flags always override):
 | `HF_TOKEN` | HuggingFace token for the default HF upload |
 | `HIPPIUS_HUB_TOKEN` | Hippius auth token (wins over username/password) |
 | `HIPPIUS_HUB_USERNAME` / `HIPPIUS_HUB_PASSWORD` | alternative Hippius login |
-| `ALBEDO_NAMESPACE` | your Hippius namespace; lets you omit `--namespace` |
+| `ALBEDO_NAMESPACE` | your HF or Hippius namespace; lets you omit `--namespace` |
 | `ALBEDO_REPO_PREFIX` | leave as `albedo-qwen3.6-35b` unless the subnet changes it |
 | `ALBEDO_MODEL_CACHE_DIR` | where remote `check-model` caches `config.json` |
 
@@ -206,9 +209,10 @@ Prints `[PASS]/[FAIL]` per check and `VALID`/`INVALID`. Note: dedup is **not** c
 albedo check-model --repo <ns>/albedo-qwen3.6-35b-v1 --digest sha256:...
 ```
 
-Lists the repo's files on Hippius and downloads only `config.json` to re-run the checks.
+Lists the repo's files on whichever hub the pin points at (HF or Hippius) and downloads only
+`config.json` to re-run the checks.
 
-### Upload a model to Hippius
+### Upload a model
 
 ```bash
 albedo upload --path /path/to/model --name v1            # uses ALBEDO_NAMESPACE
@@ -320,7 +324,10 @@ CHAIN_NETWORK=test albedo check-commit
 - **Registration is required to commit.** Both `commit` and `publish` verify your hotkey is in the
   netuid metagraph and abort if not.
 - **Beating the king by a hair is a loss.** The challenger needs `score_challenger - score_king >=
-  0.03`; see [SCORING.md](SCORING.md) for how those scores are built.
+  0.025`; see [SCORING.md](SCORING.md) for how those scores are built.
+- **You have to win twice.** The first eval win does not crown you — the submission is re-queued and
+  must win a **second, independent** eval before it is promoted. A marginal model that wins once on
+  luck loses the rematch.
 - **You cannot pre-compute the checklist.** Questions are generated per sample from a reference
   trajectory produced at eval time, and your sample set is seeded by your submission's block hash —
   see [DATASETS.md](DATASETS.md).
@@ -331,5 +338,5 @@ CHAIN_NETWORK=test albedo check-commit
 
 | document | covers |
 |---|---|
-| [SCORING.md](SCORING.md) | checklist construction, answer weighting, size multiplier, measurement gate, win margin, anti-gaming |
-| [DATASETS.md](DATASETS.md) | the four corpora, trajectory rendering, observation formats, the simulator chain, sampling and the manifest pin |
+| [SCORING.md](SCORING.md) | checklist construction, measurement gate, loop short-circuit, win margin, anti-gaming |
+| [DATASETS.md](DATASETS.md) | the four corpora, trajectory rendering, observation formats, grounded execution + the simulator ladder, sampling and the manifest pin |
