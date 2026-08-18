@@ -317,6 +317,7 @@ class EvalRepository:
                 WHERE er.remote_run_id IS NOT NULL
                   AND er.state IN ('DISPATCHED', 'GENERATING', 'SCORING', 'VERDICT_READY')
                   AND sa.state = 'RUNNING'
+                  AND sa.lease_expires_at < now()
                   AND ms.state = 'EVAL_RUNNING'
                 ORDER BY er.started_at ASC
                 LIMIT %s
@@ -592,6 +593,21 @@ class EvalRepository:
         next_state = "EVAL_WIN" if verdict.get("challenger_won") else "COMPLETE_LOSS"
         with self._connect() as conn:
             with conn.transaction():
+                latched = conn.execute(
+                    """
+                    UPDATE stage_attempts
+                    SET state = 'SUCCEEDED', finished_at = now(), result_summary = %s
+                    WHERE id = %s AND state = 'RUNNING'
+                    RETURNING id
+                    """,
+                    (Jsonb(verdict), attempt_id),
+                ).fetchone()
+                if latched is None:
+                    logger.info(
+                        f"[eval-repo] completion skipped, attempt already finalized "
+                        f"submission={submission_id} eval_run={eval_run_id} attempt={attempt_id}"
+                    )
+                    return
                 if next_state == "EVAL_WIN":
                     prior_wins = conn.execute(
                         """
@@ -644,14 +660,6 @@ class EvalRepository:
                 )
                 conn.execute(
                     """
-                    UPDATE stage_attempts
-                    SET state = 'SUCCEEDED', finished_at = now(), result_summary = %s
-                    WHERE id = %s
-                    """,
-                    (Jsonb(verdict), attempt_id),
-                )
-                conn.execute(
-                    """
                     UPDATE model_submissions
                     SET state = %s, updated_at = now(),
                         finished_at = CASE WHEN %s = 'COMPLETE_LOSS' THEN now() ELSE finished_at END
@@ -687,12 +695,28 @@ class EvalRepository:
         attempt_state = "FAILED_RETRYABLE" if retryable else "FAILED_TERMINAL"
         submission_state = "EVAL_RETRYABLE" if retryable else "TERMINAL_INVALID"
         eval_state = "FAILED_RETRYABLE" if retryable else "FAILED_TERMINAL"
-        logger.warning(
-            f"[eval-repo] eval failed submission={submission_id} eval_run={eval_run_id} "
-            f"fault_class={fault_class} fault_code={fault_code} retryable={retryable}: {fault_message}"
-        )
         with self._connect() as conn:
             with conn.transaction():
+                latched = conn.execute(
+                    """
+                    UPDATE stage_attempts
+                    SET state = %s, finished_at = now(), fault_class = %s,
+                        fault_code = %s, fault_message = %s
+                    WHERE id = %s AND state = 'RUNNING'
+                    RETURNING id
+                    """,
+                    (attempt_state, fault_class, fault_code, fault_message, attempt_id),
+                ).fetchone()
+                if latched is None:
+                    logger.info(
+                        f"[eval-repo] failure skipped, attempt already finalized "
+                        f"submission={submission_id} eval_run={eval_run_id} attempt={attempt_id}"
+                    )
+                    return
+                logger.warning(
+                    f"[eval-repo] eval failed submission={submission_id} eval_run={eval_run_id} "
+                    f"fault_class={fault_class} fault_code={fault_code} retryable={retryable}: {fault_message}"  # noqa: E501
+                )
                 conn.execute(
                     """
                     UPDATE eval_runs
@@ -701,15 +725,6 @@ class EvalRepository:
                     WHERE id = %s
                     """,
                     (eval_state, fault_class, fault_code, fault_message, eval_run_id),
-                )
-                conn.execute(
-                    """
-                    UPDATE stage_attempts
-                    SET state = %s, finished_at = now(), fault_class = %s,
-                        fault_code = %s, fault_message = %s
-                    WHERE id = %s
-                    """,
-                    (attempt_state, fault_class, fault_code, fault_message, attempt_id),
                 )
                 conn.execute(
                     """
