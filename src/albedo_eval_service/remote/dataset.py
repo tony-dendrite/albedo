@@ -218,10 +218,56 @@ def _role(turn: Any) -> str | None:
     return None
 
 
+_SHELL_TOOLS = {
+    "bash",
+    "execute_bash",
+    "run_bash",
+    "shell",
+    "run_command",
+    "execute_command",
+    "terminal",
+}
+
+
+def _render_tool_call(call: Any) -> str:
+    if not isinstance(call, dict):
+        return ""
+    function = call.get("function")
+    function = function if isinstance(function, dict) else call
+    name = str(function.get("name") or "").strip()
+    arguments = _maybe_json(function.get("arguments"))
+    if not isinstance(arguments, dict):
+        arguments = {}
+    if name in _SHELL_TOOLS:
+        command = arguments.get("command")
+        if isinstance(command, str) and command.strip():
+            return f"```bash\n{command.strip()}\n```"
+    for key in ("thought", "message", "answer", "summary"):
+        value = arguments.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    if not name:
+        return ""
+    detail = " ".join(
+        f"{k}={v!r}"
+        for k, v in arguments.items()
+        if isinstance(v, (str, int, float, bool)) and str(v).strip()
+    )
+    return f"[{name}{(' ' + detail) if detail else ''}]"
+
+
 def _content(turn: Any) -> str:
-    if isinstance(turn, dict):
-        for key in ("content", "text", "value", "message"):
-            value = turn.get(key)
-            if value is not None:
-                return str(value)
-    return str(turn) if turn is not None else ""
+    if not isinstance(turn, dict):
+        return str(turn) if turn is not None else ""
+    body = ""
+    for key in ("content", "text", "value", "message"):
+        value = turn.get(key)
+        if value is not None:
+            body = str(value)
+            break
+    calls = turn.get("tool_calls")
+    if isinstance(calls, list) and calls:
+        rendered = [r for r in (_render_tool_call(c) for c in calls) if r]
+        if rendered:
+            body = "\n\n".join([body.strip(), *rendered]) if body.strip() else "\n\n".join(rendered)
+    return body
