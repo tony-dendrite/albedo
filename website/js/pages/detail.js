@@ -330,7 +330,36 @@ function explCell(j, qid) {
     el("b", {}, glyph), el("span", {}, text));
 }
 
-function renderEval(r, netuid) {
+const ROMAN = ["I", "II", "III", "IV"];
+const stopClick = e => e.stopPropagation();
+
+// win-on-both: a submission has two scored passes, so each gets its own head — same
+// model, its own eval run id — and the head doubles as the selector for the body below.
+function passHeads(r, netuid, passes) {
+  const repoUrl = hubRepoUrl(r.model_uri);
+  return passes.map((p, i) => {
+    const active = p.eval_run_id === r.eval_run_id;
+    const v = verdictInfo(p);
+    const name = modelName(p);
+    return el("div", {
+      class: active ? "detail-head pass-head active" : "detail-head pass-head",
+      title: `${v.badge} · ${fmtDateTime(p.finished_at)}`,
+      onClick: () => {
+        if (active) return;
+        history.replaceState(null, "", `?eval_run_id=${encodeURIComponent(p.eval_run_id)}`);
+        renderEval(p, netuid, passes);
+      },
+    },
+      el("div", { class: "eyebrow" }, `eval result ${ROMAN[i] || i + 1}`),
+      el("h1", {}, repoUrl ? link(repoUrl, name, { title: modelRepo(p.model_uri), onClick: stopClick }) : name),
+      el("div", { class: "sub" }, `${p.eval_run_id} · uid ${p.uid ?? "—"} · ${shortHotkey(p.hotkey)}`));
+  });
+}
+
+function renderEval(r, netuid, passes = [r]) {
+  const multi = passes.length >= 2;
+  $("d-head").style.display = multi ? "none" : "";
+  mount($("d-heads"), multi ? passHeads(r, netuid, passes) : []);
   $("d-eyebrow").textContent = "eval result";
   setHead(modelName(r), `${r.eval_run_id} · uid ${r.uid ?? "—"} · ${shortHotkey(r.hotkey)}`, r.model_uri);
 
@@ -421,6 +450,14 @@ function renderFail(f) {
   renderArtifacts(f.artifacts, `submission-${f.submission_id}`);
 }
 
+function passesOf(raw, r) {
+  if (!r.submission_id) return [r];
+  const runs = (raw.eval_runs || [])
+    .filter(e => e.submission_id === r.submission_id)
+    .sort((a, b) => String(a.finished_at || "").localeCompare(String(b.finished_at || "")));
+  return runs.length >= 2 ? runs : [r];
+}
+
 async function load() {
   const raw = await fetchDashboard();
   if (!raw) { setHead("unavailable", "could not load dashboard data"); return; }
@@ -429,7 +466,7 @@ async function load() {
   if (evalRunId) {
     const r = (raw.eval_runs || []).find(e => e.eval_run_id === evalRunId)
       || (raw.current_eval?.eval_run_id === evalRunId ? raw.current_eval : null);
-    if (r) return renderEval(r, netuid);
+    if (r) return renderEval(r, netuid, passesOf(raw, r));
     const f = (raw.fails || []).find(e => e.eval_run_id === evalRunId);
     if (f) return renderFail(f);
     setHead(evalRunId, "eval run not found");

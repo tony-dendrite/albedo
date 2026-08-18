@@ -5,12 +5,31 @@ import { verdictInfo, faultCategory, faultCodeLabel } from "../data.js";
 
 const stop = e => e.stopPropagation();
 
+// win-on-both: the two passes of one submission are one duel, so they collapse into
+// a single row (newest pass represents it) and the margin cell carries both margins.
+export function collapsePasses(rows) {
+  const seen = new Map();
+  const out = [];
+  for (const r of rows) {
+    const group = r.submission_id && seen.get(r.submission_id);
+    if (group) { group.passes.push(r); continue; }
+    const entry = { ...r, passes: [r] };
+    if (r.submission_id) seen.set(r.submission_id, entry);
+    out.push(entry);
+  }
+  return out;
+}
+
+const passScores = r => (r.passes || [r]).slice().reverse()
+  .map((p, i) => `pass ${i + 1}: ${pct(p.score_challenger)} / ${pct(p.score_king)}`).join(" · ");
+
 // final score aggregated across all judges (challenger / king); the per-judge
 // breakdown stays on the detail page.
 function scoreCell(r) {
   if (r.score_challenger == null) return el("span", { class: "muted-dash" }, "—");
+  const title = (r.passes || []).length >= 2 ? passScores(r) : "challenger / king";
   if (r.score_king == null) return el("span", { class: "judge-scores", title: "challenger" }, pct(r.score_challenger));
-  return el("span", { class: "judge-scores", title: "challenger / king" },
+  return el("span", { class: "judge-scores", title },
     pct(r.score_challenger), el("span", { class: "sep" }, " / "),
     el("span", { class: "king-score" }, pct(r.score_king)));
 }

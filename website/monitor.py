@@ -330,6 +330,7 @@ def _eval_runs(
         runs.append(
             {
                 "eval_run_id": run_id,
+                "submission_id": str(row["submission_id"]),
                 "challenger_won": row["challenger_won"],
                 "coronated": row["crowned_king_version"] is not None,
                 "king_version": version_map.get(row["crowned_king_version"]),

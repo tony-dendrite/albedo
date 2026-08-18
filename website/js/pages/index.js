@@ -7,7 +7,7 @@ import { kingTitleName, hubRepoUrl, modelRepo } from "../model.js";
 import { renderReign } from "../render/reign.js";
 import { renderBenchmarks, liveScoreRunId } from "../render/benchmarks.js";
 import { renderPipeline } from "../render/pipeline.js";
-import { renderHistory, renderFails } from "../render/history.js";
+import { renderHistory, renderFails, collapsePasses } from "../render/history.js";
 import { renderDatasets } from "../render/datasets.js";
 import { renderHeroChart } from "../render/heroChart.js";
 import { renderRegistrationChart } from "../render/registrationChart.js";
@@ -44,7 +44,7 @@ function renderStats(d) {
 
 function renderTables(d) {
   const netuid = d.chain.netuid;
-  const histRows = d.history.filter(x => matches(x, filter));
+  const histRows = collapsePasses(d.history.filter(x => matches(x, filter)));
   const failRows = d.fails.filter(x => matches(x, filter));
 
   renderHistory($("history-wrap"), histRows, netuid, d.reign.members?.[0]?.eval_run_id);
