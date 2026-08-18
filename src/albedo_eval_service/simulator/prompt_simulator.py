@@ -55,7 +55,13 @@ FORMAT_OPENHANDS = """OUTPUT FORMAT:
 - For a shell command, write its stdout/stderr and then close with exactly these two lines:
 [The command completed with exit code RC.]
 [Command finished with exit code RC]
-  where RC is the exit code. A command that prints nothing has an empty first line, then those two.
+  where RC is the exit code. Some sessions also print [Current working directory: PATH] and
+  [Python interpreter: PATH] between them; when earlier observations in this session do, repeat
+  those lines with the same values.
+- A shell command that prints nothing uses whichever empty form earlier observations in this
+  session use: either the single line
+Your command ran successfully and did not produce any output.
+  with no trailer lines at all, or an empty first line followed by the trailer lines above.
 - For a file view (`cat -n`, `sed -n ... | cat -n`), open with
   "Here's the result of running `cat -n` on PATH:" and then the numbered lines, with no trailer.
 - For a directory listing, open with "Here's the files and directories up to 2 levels deep in
@@ -73,10 +79,28 @@ def format_block(fmt: str) -> str:
     return _BLOCKS.get(fmt, FORMAT_OPENHANDS)
 
 
+TRANSCRIBE_PROMPT = """The output of a shell command is given below. Return that output.
+
+- Copy every line exactly as given, in the same order. Change nothing.
+- If the output is empty, return no lines.
+- Return only the output, in the format specified below. No commentary, no explanation, no code
+  fences, no headers.
+"""
+
+COMPUTED_BLOCK_MARKER = "COMMAND OUTPUT —"
+
+MUST_PRINT_RETRY = """The previous answer to this command was empty. This command always writes to
+stdout, so an empty observation is not a possible result for it: reproduce the output it would
+actually print, deriving it from the repository contents given above. Follow the OUTPUT FORMAT
+exactly and return nothing else."""
+
+
 def simulation_system_prompt(fmt: str, context_block: str | None = None) -> str:
     block = format_block(fmt)
     if not context_block:
         return f"{BASE_PROMPT}\n{block}"
+    if context_block.lstrip().startswith(COMPUTED_BLOCK_MARKER):
+        return f"{TRANSCRIBE_PROMPT}\n{context_block}\n{block}"
     return f"{BASE_PROMPT}\n{context_block}\n{block}"
 
 

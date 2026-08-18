@@ -10,6 +10,17 @@ OPENHANDS = "openhands"
 TRUNCATION_SENTINEL = "MODEL_RESPONSE_TOKEN_LIMIT_EXCEEDED"
 UNCLOSED_THINK_BLOCK_SENTINEL = "MODEL_UNCLOSED_THINK_BLOCK"
 
+OPENHANDS_TRUNCATION_NOTICE = "[... Observation truncated due to length ...]"
+_SCAFFOLD_TRUNCATED = re.compile(
+    r"<warning>|<output_head>|<response clipped>|output of your last command was too long|"
+    + re.escape(OPENHANDS_TRUNCATION_NOTICE),
+    re.I,
+)
+
+
+def is_scaffold_truncated(raw: str) -> bool:
+    return bool(_SCAFFOLD_TRUNCATED.search(raw or ""))
+
 
 def classify(observation: str) -> str:
     text = (observation or "").lstrip()
@@ -33,11 +44,14 @@ def _first_observation(messages: list[dict[str, str]] | None) -> str | None:
         role = str(message.get("role") or "").lower()
         if role == "assistant":
             seen_assistant = True
-        elif role == "user" and seen_assistant:
+        elif role in ("user", "tool") and seen_assistant:
             content = str(message.get("content") or "")
             if content.strip():
                 return content
     return None
+
+
+_ROLE_MARKER = re.compile(r"(?:^|\n)\s*(?:THOUGHT:|### (?:assistant|user|system)\b)")
 
 
 def valid_output(raw: str, fmt: str) -> bool:
@@ -59,9 +73,15 @@ def valid_output(raw: str, fmt: str) -> bool:
 def repair_output(raw: str, fmt: str) -> str:
     text = (raw or "").strip()
     if fmt != RETURNCODE or not text.startswith("<returncode>"):
+        marker = _ROLE_MARKER.search(text)
+        if marker and text[: marker.start()].strip():
+            return text[: marker.start()].rstrip()
         return text
     if "<output>" in text and "<output>\n" not in text:
         text = text.replace("<output>", "<output>\n", 1)
+    end = text.find("</output>")
+    if end != -1:
+        text = text[: end + len("</output>")]
     if text.endswith("</output>") and not text.endswith("\n</output>"):
         text = text[: -len("</output>")].rstrip("\n") + "\n</output>"
     return text
@@ -137,10 +157,6 @@ _VIEW_HEADER_RE = re.compile(r"^\s*Here's the (?:result of running|files and dir
 
 
 def observation_body(raw: str, fmt: str) -> str:
-    """The payload of an observation, with envelope, trailers and view header removed.
-
-    Horizontal whitespace is kept because source indentation is meaningful.
-    """
     text = (raw or "").strip()
     if fmt == RETURNCODE:
         match = re.search(r"<output>\n(.*)\n?</output>", text, re.DOTALL)
@@ -163,10 +179,13 @@ def has_content(raw: str, fmt: str) -> bool:
 
 
 _FIRST_BLOCK_RE = re.compile(r"```(?:bash|sh)?[ \t]*\n(.*?)```", re.DOTALL)
+_TAGGED_BLOCK_RE = re.compile(r"```(?:bash|sh)[ \t]*\n(.*?)```", re.DOTALL)
 
 
 def first_bash_block(assistant_output: str) -> str:
-    match = _FIRST_BLOCK_RE.search(assistant_output or "")
+    match = _TAGGED_BLOCK_RE.search(assistant_output or "") or _FIRST_BLOCK_RE.search(
+        assistant_output or ""
+    )
     return match.group(1).strip() if match else ""
 
 
@@ -178,6 +197,16 @@ _ALWAYS_PRINTS_RE = re.compile(
     r"^\s*(?:git\s+(?:log|show|status|branch)\b|ls\b|pwd\b|tree\b|which\s+\S|wc\s+\S|echo\s+\S)"
 )
 _WRITE_RE = re.compile(r"(?<![0-9<>])>>?[ \t]*\S|<<-?[ \t]*['\"]?\w")
+_SEARCH_HEAD_RE = re.compile(
+    r"^\s*(?:grep|rg|egrep|fgrep|ag|ack|find|awk|diff|comm|cut|tr|sort|uniq|xargs|"
+    r"git\s+grep)\b"
+)
+_SILENT_RE = re.compile(
+    r"^\s*(?:sed\s+-i|tee\b|touch\b|mkdir\b|rmdir\b|rm\b|mv\b|cp\b|ln\b|chmod\b|chown\b|"
+    r"export\b|unset\b|cd\b|pushd\b|popd\b|true\b|:\s*$|"
+    r"git\s+(?:add|rm|mv|checkout|switch|restore|apply|stash|config|init|reset)\b|"
+    r"apply_patch\b|patch\s+-p)"
+)
 _MAY_BE_EMPTY_TAIL_RE = re.compile(
     r"\|[ \t]*(?:grep|rg|ag|ack|egrep|fgrep|awk|find|comm|diff|uniq|sort[ \t]+-u)\b"
 )
@@ -189,20 +218,97 @@ def _unquoted(text: str) -> str:
     return _QUOTED_SPAN_RE.sub(lambda m: "'" + "_" * (len(m.group(0)) - 2) + "'", text)
 
 
-def requires_output(command: str) -> bool:
-    """True when the command cannot legitimately produce an empty observation.
+MUST_PRINT = "must_print"
+MAY_BE_SILENT = "may_be_silent"
+NOT_DERIVABLE = "not_derivable"
 
-    A read of an existing file prints its content; a read of a missing one prints an error. Writes,
-    in-place edits and pipelines ending in a filter that can match nothing are excluded.
+
+def _missing_module(name: str) -> str:
+    return f"/opt/conda/bin/python: No module named {name}"
+
+
+def _pip_unavailable(names: str) -> str:
+    return (
+        f"ERROR: Could not find a version that satisfies the requirement {names} "
+        "(from versions: none)\n"
+        f"ERROR: No matching distribution found for {names}"
+    )
+
+
+PYTEST_MISSING = _missing_module("pytest")
+PIP_PYTEST_ABSENT = _pip_unavailable("pytest")
+
+_STAGE = r"(?:^|[;&|(]|&&|\|\|)\s*"
+_PYTEST_RUN_RE = re.compile(
+    _STAGE + r"(?:py\.test|pytest)(?![\w.-])"
+    r"|" + _STAGE + r"[\w./-]*python[\d.]*\s+-m\s+pytest(?![\w.-])"
+)
+_PIP_INSTALL_RE = re.compile(
+    r"\bpip[\d.]*\s+install\b([^;&|]*)"
+    r"|\bpython[\d.]*\s+-m\s+pip\s+install\b([^;&|]*)"
+)
+_PY_MODULE_RE = re.compile(_STAGE + r"[\w./-]*python[\d.]*\s+-m\s+([A-Za-z_][\w.]*)")
+_IMPORT_RE = re.compile(r"\bimport\s+([A-Za-z_][\w.]*)")
+_SCRIPT_RE = re.compile(r"\b([\w-]+)\.py\b")
+
+
+_PY_HEAD_RE = re.compile(r"[\w./-]*python[\d.]*\b")
+
+
+def no_output_notice(command: str = "") -> tuple[str, int]:
+    """What a command we cannot run reports, shaped like the pytest refusal.
+
+    It has to read as ordinary terminal output: a note about the session would tell the
+    model it is being simulated, and would never appear in a recorded trajectory. The same
+    command always gets the same failure, so retrying cannot look like progress.
     """
     text = _CD_PREFIX_RE.sub("", (command or "").strip())
+    if _PY_HEAD_RE.match(text):
+        for pattern in (_PY_MODULE_RE, _IMPORT_RE, _SCRIPT_RE):
+            if match := pattern.search(text):
+                return _missing_module(match.group(1).split(".")[0]), 1
+        return _missing_module("__main__"), 1
+    head = re.match(r"[\w./-]+", text)
+    return f"bash: {head.group(0) if head else text}: command not found", 127
+
+
+def absent_tool_output(command: str) -> tuple[str, int] | None:
+    text = command or ""
+    if match := _PIP_INSTALL_RE.search(text):
+        wanted = [
+            token
+            for token in (match.group(1) or match.group(2) or "").split()
+            if not token.startswith("-")
+        ]
+        return _pip_unavailable(" ".join(wanted) or "the requested packages"), 1
+    if _PYTEST_RUN_RE.search(text):
+        return PYTEST_MISSING, 1
+    if match := _PY_MODULE_RE.search(text):
+        return _missing_module(match.group(1)), 1
+    return None
+
+
+def output_expectation(command: str) -> str:
+    text = _CD_PREFIX_RE.sub("", (command or "").strip())
     if not text or _WRITE_RE.search(text) or _MAY_BE_EMPTY_TAIL_RE.search(text):
-        return False
+        return MAY_BE_SILENT
     if _ALWAYS_PRINTS_RE.match(text):
-        return True
+        return MUST_PRINT
     if not _READ_HEAD_RE.match(text.split("&&")[0]):
-        return False
-    return bool(re.search(r"[\w./-]*[./][\w./-]+|\s[\w-]+\.\w{1,6}\b", text.split("&&")[0]))
+        if _SILENT_RE.match(text) or _SEARCH_HEAD_RE.match(text):
+            return MAY_BE_SILENT
+        return NOT_DERIVABLE
+    named = re.search(r"[\w./-]*[./][\w./-]+|\s[\w-]+\.\w{1,6}\b", text.split("&&")[0])
+    return MUST_PRINT if named else MAY_BE_SILENT
+
+
+def is_file_read(command: str) -> bool:
+    """A read of a named file, whose contents the prompt can actually supply."""
+    return bool(_READ_HEAD_RE.match(_CD_PREFIX_RE.sub("", (command or "").strip())))
+
+
+def requires_output(command: str) -> bool:
+    return output_expectation(command) == MUST_PRINT
 
 
 _SED_RANGE_RE = re.compile(r"^sed\s+-n\s+['\"][^'\"]*['\"]\s+\S+(?:\s*\|\s*(?:cat\s+-n|nl\b.*))?$")
@@ -213,8 +319,6 @@ _HEAD_TAIL_ONLY_RE = re.compile(r"^(?:head|tail)\s+-n?\s*(\d+)\s+\S+$")
 
 @dataclass(frozen=True)
 class CommandContract:
-    """The output length the command itself guarantees, when it states one unambiguously."""
-
     max_lines: int | None = None
 
     def __bool__(self) -> bool:
@@ -241,10 +345,9 @@ def command_contract(command: str) -> CommandContract:
 
 
 def contract_violation(raw: str, fmt: str, contract: CommandContract) -> str | None:
-    """The unmet guarantee, or None. Emptiness is left to has_content()/requires_output()."""
-    if not contract:
+    if not contract or is_scaffold_truncated(raw):
         return None
-    lines = [line for line in observation_body(raw, fmt).splitlines() if line.strip()]
+    lines = observation_body(raw, fmt).splitlines()
     if lines and len(lines) > contract.max_lines:
         return f"too_many_lines:{len(lines)}>{contract.max_lines}"
     return None
@@ -254,28 +357,25 @@ _RC_OUTPUT_RE = re.compile(r"(<returncode>\d+</returncode>\n<output>\n).*\n?</ou
 
 
 def repair_to_contract(raw: str, fmt: str, contract: CommandContract) -> str:
-    """Truncate to the length the command states — exactly what `head`/`sed` do.
-
-    Deterministic and content-preserving, so it cannot add fabrication.
-    """
-    if not contract or not has_content(raw, fmt):
+    if not contract or is_scaffold_truncated(raw) or not has_content(raw, fmt):
         return raw
-    lines, kept, seen = observation_body(raw, fmt).splitlines(), [], 0
-    for line in lines:
-        if line.strip():
-            if seen >= contract.max_lines:
-                break
-            seen += 1
-        kept.append(line)
+    lines = observation_body(raw, fmt).splitlines()
+    kept = lines[: contract.max_lines]
     return raw if kept == lines else _replace_body(raw, fmt, kept)
 
 
+def with_body(raw: str, fmt: str, body: str) -> str:
+    return _replace_body(raw, fmt, body.split("\n"))
+
+
 def _replace_body(raw: str, fmt: str, lines: list[str]) -> str:
-    """Put lines back inside the original envelope, keeping return code, header and trailer."""
     body, text = "\n".join(lines), (raw or "").strip()
     if fmt == RETURNCODE:
         match = _RC_OUTPUT_RE.search(text)
-        return f"{match.group(1)}{body}\n</output>" if match else wrap(body, fmt)
+        if match is None:
+            return wrap(body, fmt)
+        # an empty body must not leave a stray blank line behind
+        return f"{match.group(1)}{body}\n</output>" if body else f"{match.group(1)}</output>"
     if fmt == SWE_AGENT:
         return f"OBSERVATION:\n{body}" if body else "OBSERVATION:"
     rest, head, tail = text.splitlines(), [], []
