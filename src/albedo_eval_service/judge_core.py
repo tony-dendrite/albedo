@@ -240,15 +240,16 @@ _INJECTION_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r'\{\s*"verdict"\s*:\s*"[^"]*"[^}]*\}', re.IGNORECASE),
     re.compile(r'\{\s*"injection"\s*:\s*(true|false)[^}]*\}', re.IGNORECASE),
 )
-_DELIMITER_INJECTION_RE = re.compile(
-    r'\s*-{3,}[\s\S]*?(?:"verdict"\s*:|GRADING\s+INSTRUCTION)[\s\S]*$',
-    re.DOTALL | re.IGNORECASE,
-)
+_DASH_RUN_RE = re.compile(r"-{3,}")
+_INJECTION_MARKER_RE = re.compile(r'"verdict"\s*:|GRADING\s+INSTRUCTION', re.IGNORECASE)
 _VERDICT_LABELS = frozenset({"accept", "weak_pass", "reject"})
 
 
 def strip_reply_injection(reply: str) -> str:
-    cleaned = _DELIMITER_INJECTION_RE.sub("", reply or "")
+    cleaned = reply or ""
+    dash = _DASH_RUN_RE.search(cleaned)
+    if dash and _INJECTION_MARKER_RE.search(cleaned, dash.end()):
+        cleaned = cleaned[: dash.start()].rstrip()
     for pattern in _INJECTION_PATTERNS:
         cleaned = pattern.sub("", cleaned)
     if _scan_verdict_json(cleaned):
