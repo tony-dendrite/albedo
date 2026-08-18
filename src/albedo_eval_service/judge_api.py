@@ -52,6 +52,7 @@ from .judge_core import (
 )
 from .judge_llm_client import JudgeLLMClient
 from .remote.generation import format_scored_trajectory
+from .shared.loop_check import LoopVerdict, loop_explanation, loop_verdict_for_document
 from .shared.observation_format import (
     NOT_DERIVABLE,
     RETURNCODE,
@@ -1341,6 +1342,43 @@ def _corrupted_side(
     return per_judge_answers, records
 
 
+def _looped_side(
+    *,
+    side: str,
+    questions: list[dict[str, str]],
+    judge_models: list[str],
+    verdict: LoopVerdict,
+) -> tuple[dict[str, dict[str, str | None]], list[dict[str, Any]]]:
+    explanation = loop_explanation(verdict)
+    per_judge_answers: dict[str, dict[str, str | None]] = {
+        model: {q["id"]: "0" for q in questions} for model in judge_models
+    }
+    records = [
+        {
+            "side": side,
+            "judge_model": model,
+            "provider": None,
+            "answers": per_judge_answers[model],
+            "explanations": {q["id"]: explanation for q in questions},
+            "yes_rate": judge_yes_rate(per_judge_answers[model], questions),
+            "parse_ok": True,
+            "error": None,
+            "looped": True,
+            "loop_reasons": list(verdict.reasons),
+            "loop_commands": [
+                {
+                    "command": entry.command,
+                    "count": entry.count,
+                    "longest_run": entry.longest_run,
+                }
+                for entry in verdict.commands
+            ],
+        }
+        for model in judge_models
+    ]
+    return per_judge_answers, records
+
+
 async def _judge_side(
     *,
     client: JudgeLLMClient,
@@ -1458,6 +1496,26 @@ async def _score_samples(
             if is_truncated(response_text):
                 return _corrupted_side(
                     side=side, questions=questions, judge_models=request.judge_models
+                )
+            looping = loop_verdict_for_document(response_text)
+            if looping.looped:
+                logger.warning(
+                    "score_batch_side_looped eval_run_id={} batch_id={} sample_id={} side={} "
+                    "reasons={} n_cmds={} dup_ratio={:.2f} max_run={}",
+                    request.eval_run_id,
+                    request.batch_id,
+                    sample.sample_id,
+                    side,
+                    "; ".join(looping.reasons),
+                    looping.n_cmds,
+                    looping.dup_cmd_ratio,
+                    looping.max_cmd_run,
+                )
+                return _looped_side(
+                    side=side,
+                    questions=questions,
+                    judge_models=request.judge_models,
+                    verdict=looping,
                 )
             return await _judge_side(
                 client=client,

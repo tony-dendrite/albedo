@@ -411,6 +411,102 @@ def test_truncated_side_scores_zero_without_calling_the_judge():
     assert all("KING" in judged for judged in fake.judged)
 
 
+def test_looped_side_scores_zero_without_calling_the_judge():
+    class RecordingClient(FakeClient):
+        def __init__(self):
+            super().__init__(n_questions=8)
+            self.judged = []
+
+        async def score(self, **kwargs):
+            content = kwargs["messages"][1]["content"]
+            if "KING" in content or "CHAL" in content:
+                self.judged.append(content)
+            return await super().score(**kwargs)
+
+    looped = "\n".join(
+        f"CANDIDATE OUTPUT {index}:\n------\nCHAL turn {index}\n\n```bash\ngit status\n```\n------"
+        for index in range(1, 6)
+    )
+    settings = JudgeSettings(num_questions=3, sota_trajectory_turns=1)
+    fake = RecordingClient()
+    store = QuestionPrepStore(settings, _reference_backed_service(settings, fake))
+    request = ScoreBatchRequest(
+        eval_run_id="r",
+        batch_id="b",
+        total_sample_count=1,
+        judge_models=list(JUDGE_MODELS[:1]),
+        samples=[
+            JudgeSample(
+                sample_id="s1",
+                prompt="task",
+                previous_king_output="KING",
+                challenger_output=looped,
+                messages=_MESSAGES,
+            )
+        ],
+    )
+    record = asyncio.run(
+        _score_samples(client=fake, request=request, settings=settings, prep_store=store)
+    )[0]
+
+    assert record["scored"] is True
+    assert record["challenger_score"] == 0.0
+    assert record["king_score"] is not None
+
+    challenger_results = [r for r in record["judge_results"] if r["side"] == "challenger"]
+    assert challenger_results
+    assert all(r["looped"] for r in challenger_results)
+    assert all(r["parse_ok"] for r in challenger_results)
+    assert all(r["yes_rate"] == 0.0 for r in challenger_results)
+    assert all(value == "0" for r in challenger_results for value in r["answers"].values())
+
+    questions = record["questions"]
+    assert questions
+    for result in challenger_results:
+        assert set(result["explanations"]) == {q["id"] for q in questions}
+        for text in result["explanations"].values():
+            assert "looped" in text
+            assert "`git status`" in text
+            assert "5x" in text
+        assert result["loop_commands"][0]["command"] == "git status"
+        assert result["loop_commands"][0]["count"] == 5
+
+    assert len(fake.judged) == 1
+    assert all("KING" in judged for judged in fake.judged)
+
+
+def test_a_clean_challenger_is_still_judged_normally():
+    clean = "\n".join(
+        f"CANDIDATE OUTPUT {index}:\n------\nCHAL turn {index}\n\n```bash\n{command}\n```\n------"
+        for index, command in enumerate(["ls", "cat a.py", "pytest -q", "git diff"], start=1)
+    )
+    settings = JudgeSettings(num_questions=3, sota_trajectory_turns=1)
+    fake = FakeClient(n_questions=8)
+    store = QuestionPrepStore(settings, _reference_backed_service(settings, fake))
+    request = ScoreBatchRequest(
+        eval_run_id="r",
+        batch_id="b",
+        total_sample_count=1,
+        judge_models=list(JUDGE_MODELS[:1]),
+        samples=[
+            JudgeSample(
+                sample_id="s1",
+                prompt="task",
+                previous_king_output="KING",
+                challenger_output=clean,
+                messages=_MESSAGES,
+            )
+        ],
+    )
+    record = asyncio.run(
+        _score_samples(client=fake, request=request, settings=settings, prep_store=store)
+    )[0]
+
+    challenger_results = [r for r in record["judge_results"] if r["side"] == "challenger"]
+    assert challenger_results
+    assert not any(r.get("looped") for r in challenger_results)
+
+
 def test_scoring_regenerates_questions_when_async_prep_failed():
     class PrepFailsOnceClient(FakeClient):
         def __init__(self):
