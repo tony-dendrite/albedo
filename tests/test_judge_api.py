@@ -36,6 +36,7 @@ from albedo_eval_service.simulator.prompt_simulator import (
     FORMAT_MINI_CODER,
     FORMAT_OPENHANDS,
     FORMAT_SWE_AGENT,
+    MUST_PRINT_RETRY,
     simulation_system_prompt,
 )
 
@@ -655,9 +656,9 @@ def test_observation_simulation_uses_repo_context_when_available():
             self.block = block
             self.calls = []
 
-        async def context_for(self, sample_id, assistant_output):
+        async def context_for(self, sample_id, assistant_output, messages=None):
             self.calls.append((sample_id, assistant_output))
-            return self.block
+            return self.block, None, None
 
     async def run(repo_context):
         client = SimClient()
@@ -751,7 +752,7 @@ def test_observation_simulation_reruns_looping_then_collapses():
 
 
 def test_simulation_primary_model_falls_back_to_evaluator():
-    ROLE_LEAK = "ls output\n### assistant\n```bash\nfind .\n```"
+    ROLE_LEAK = "<returncode>0</returncode>\n<output>\nwrong dialect\n</output>"
 
     class Scripted:
         def __init__(self, by_model):
@@ -769,6 +770,7 @@ def test_simulation_primary_model_falls_back_to_evaluator():
         evaluator_model="z-ai/glm-5.2",
         simulation_model="xiaomi/mimo-v2.5-pro",
         simulation_loop_reruns=1,
+        simulation_providers="deepseek,cloudflare",
     )
 
     def run(client):
@@ -849,12 +851,16 @@ def test_same_prompt_used_for_primary_and_fallback():
 
         async def complete(self, **kw):
             self.systems.append((kw["model"], kw["messages"][0]["content"]))
-            raw = "ok" if kw["model"] == "z-ai/glm-5.2" else "x\n### assistant\nbad"
+            raw = (
+                "ok"
+                if kw["model"] == "z-ai/glm-5.2"
+                else "<returncode>0</returncode>\n<output>\nwrong dialect\n</output>"
+            )
             return JudgeRawResponse(model=kw["model"], provider="fake", raw=raw)
 
     class Ctx:
-        async def context_for(self, sample_id, assistant_output):
-            return "GROUNDING BLOCK"
+        async def context_for(self, sample_id, assistant_output, messages=None):
+            return "GROUNDING BLOCK", None, None
 
     client = Recorder()
     settings = JudgeSettings(
@@ -888,6 +894,85 @@ def test_repo_context_client_degrades_to_none_on_error():
     )
     client = RepoContextClient(settings)
     try:
-        assert asyncio.run(client.context_for("swe-zero/x:0:0", "```bash\nls\n```")) is None
+        result = asyncio.run(client.context_for("swe-zero/x:0:0", "```bash\nls\n```"))
+        assert result == (None, None, None)
     finally:
         asyncio.run(client.aclose())
+
+
+def test_a_read_that_must_print_is_asked_once_more_before_shipping_silence():
+    class SilentThenContent:
+        def __init__(self):
+            self.prompts = []
+
+        async def complete(self, **kwargs):
+            self.prompts.append(kwargs["messages"][-1]["content"])
+            if MUST_PRINT_RETRY in self.prompts[-1]:
+                return JudgeRawResponse(
+                    model=kwargs["model"],
+                    provider="fake",
+                    raw="<returncode>0</returncode>\n<output>\nAPP CONTENT\n</output>",
+                )
+            return JudgeRawResponse(
+                model=kwargs["model"],
+                provider="fake",
+                raw="<returncode>0</returncode>\n<output>\n</output>",
+            )
+
+    def run(command):
+        client = SilentThenContent()
+        service = ObservationSimulationService(
+            JudgeSettings(simulation_model="", evaluator_model="z-ai/glm-5.2"), client, None
+        )
+        observation = asyncio.run(
+            service.simulate(
+                SimulateObservationRequest(
+                    eval_run_id="run",
+                    sample_id="mini-coder/x:0:0",
+                    prompt="task",
+                    messages=[{"role": "user", "content": "task"}],
+                    assistant_output=f"```bash\n{command}\n```",
+                )
+            )
+        )
+        return observation, client.prompts
+
+    read, prompts = run("cat src/app.py")
+    assert read == "<returncode>0</returncode>\n<output>\nAPP CONTENT\n</output>"
+    assert sum(MUST_PRINT_RETRY in p for p in prompts) == 1
+
+    # a command that may legitimately print nothing is never pushed for output
+    silent, prompts = run("sed -i 's/a/b/' src/app.py")
+    assert silent == "<returncode>0</returncode>\n<output>\n</output>"
+    assert not any(MUST_PRINT_RETRY in p for p in prompts)
+
+
+def test_a_verified_empty_search_overrides_invented_matches():
+    class InventsMatches:
+        async def complete(self, **kwargs):
+            return JudgeRawResponse(
+                model=kwargs["model"],
+                provider="fake",
+                raw="<returncode>1</returncode>\n<output>\nsrc/app.py:12:def plausible():\n</output>",  # noqa E501
+            )
+
+    class EmptyRepoContext:
+        async def context_for(self, sample_id, assistant_output, messages=None):
+            return "COMMAND OUTPUT — matched NOTHING", "", None
+
+    service = ObservationSimulationService(
+        JudgeSettings(simulation_model=""), InventsMatches(), EmptyRepoContext()
+    )
+    observation = asyncio.run(
+        service.simulate(
+            SimulateObservationRequest(
+                eval_run_id="run",
+                sample_id="mini-coder/x:0:0",
+                prompt="task",
+                messages=[{"role": "user", "content": "task"}],
+                assistant_output="```bash\ngrep -rn plausible src/\n```",
+            )
+        )
+    )
+    # the verified empty wins, and grep's own exit code survives the correction
+    assert observation == "<returncode>1</returncode>\n<output>\n</output>"

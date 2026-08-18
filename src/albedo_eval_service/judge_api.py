@@ -53,21 +53,31 @@ from .judge_core import (
 from .judge_llm_client import JudgeLLMClient
 from .remote.generation import format_scored_trajectory
 from .shared.observation_format import (
+    NOT_DERIVABLE,
+    RETURNCODE,
     CommandContract,
+    absent_tool_output,
     command_contract,
     contract_violation,
     detect_format,
     empty_output,
     first_bash_block,
     has_content,
+    is_file_read,
     is_truncated,
+    no_output_notice,
+    output_expectation,
     repair_output,
     repair_to_contract,
     requires_output,
     valid_output,
+    with_body,
+    wrap,
 )
 from .simulator.prompt_simulator import (
     COMPLETE_MARKER,
+    COMPUTED_BLOCK_MARKER,
+    MUST_PRINT_RETRY,
     missing_command_output,
     reference_completion_observation,
     simulation_system_prompt,
@@ -642,15 +652,28 @@ class RepoContextClient:
         )
         self._last_warning = 0.0
 
-    async def context_for(self, sample_id: str, assistant_output: str) -> str | None:
+    async def context_for(
+        self, sample_id: str, assistant_output: str, messages: list[dict[str, str]] | None = None
+    ) -> tuple[str | None, str | None, int | None]:
         try:
             response = await self._client.post(
                 "/repo-context",
-                json={"sample_id": sample_id, "assistant_output": assistant_output},
+                json={
+                    "sample_id": sample_id,
+                    "assistant_output": assistant_output,
+                    "messages": messages or [],
+                },
             )
             response.raise_for_status()
-            context = response.json().get("context")
-            return context if isinstance(context, str) and context else None
+            body = response.json()
+            context = body.get("context")
+            exact = body.get("exact_output")
+            returncode = body.get("exact_returncode")
+            return (
+                context if isinstance(context, str) and context else None,
+                exact if isinstance(exact, str) else None,
+                returncode if isinstance(returncode, int) else None,
+            )
         except Exception as exc:
             now = time.monotonic()
             if now - self._last_warning > 60.0:
@@ -660,7 +683,7 @@ class RepoContextClient:
                     sample_id,
                     f"{type(exc).__name__}: {exc}",
                 )
-            return None
+            return None, None, None
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -677,10 +700,50 @@ class ObservationSimulationService:
         self.client = client
         self.repo_context = repo_context
 
+    async def _retry_for_output(
+        self,
+        request: SimulateObservationRequest,
+        command: str,
+        fmt: str,
+        context_block: str | None,
+        transcript: str,
+        contract: CommandContract,
+        observation: str,
+    ) -> str:
+        """One more ask when a command that must print came back silent anyway."""
+        primary = self.settings.simulation_model or self.settings.evaluator_model
+        response = await self.client.complete(
+            purpose="simulate",
+            model=primary,
+            messages=[
+                {"role": "system", "content": simulation_system_prompt(fmt, context_block)},
+                {"role": "user", "content": f"{transcript}\n\n{MUST_PRINT_RETRY}"},
+            ],
+            temperature=0.0,
+            eval_run_id=request.eval_run_id,
+            max_tokens=self.settings.simulation_max_tokens,
+            provider=_simulation_provider(self.settings),
+        )
+        candidate = (
+            ""
+            if response.error
+            else repair_to_contract(repair_output(response.raw, fmt), fmt, contract)
+        )
+        recovered = valid_output(candidate, fmt) and has_content(candidate, fmt)
+        logger.info(
+            "observation_simulation_must_print_retry eval_run_id={} sample_id={} command={!r} "
+            "recovered={}",
+            request.eval_run_id,
+            request.sample_id,
+            command[:80],
+            recovered,
+        )
+        return candidate if recovered else observation
+
     async def simulate(self, request: SimulateObservationRequest) -> str:
         command = first_bash_block(request.assistant_output)
+        fmt = detect_format(request.sample_id, request.messages)
         if not command:
-            fmt = detect_format(request.sample_id, request.messages)
             logger.warning(
                 "observation_simulation_no_command eval_run_id={} sample_id={} fmt={} chars={}",
                 request.eval_run_id,
@@ -689,17 +752,42 @@ class ObservationSimulationService:
                 len(request.assistant_output or ""),
             )
             return missing_command_output(fmt)
-        context_block = None
-        if self.repo_context is not None:
-            context_block = await self.repo_context.context_for(
-                request.sample_id, request.assistant_output
+        absent = absent_tool_output(command)
+        if absent is not None:
+            body, returncode = absent
+            logger.info(
+                "observation_simulation_absent_tool eval_run_id={} sample_id={} command={!r}",
+                request.eval_run_id,
+                request.sample_id,
+                command[:80],
             )
-        transcript = _simulation_transcript(
-            messages=request.messages,
-            prompt=request.prompt,
-            assistant_output=request.assistant_output,
+            return wrap(body, fmt, returncode=returncode)
+        context_block, exact_output, exact_returncode = None, None, None
+        if self.repo_context is not None:
+            context_block, exact_output, exact_returncode = await self.repo_context.context_for(
+                request.sample_id, request.assistant_output, request.messages
+            )
+        computed_git = exact_output is not None and exact_returncode is not None
+        if (exact_output or computed_git) and fmt == RETURNCODE:
+            observation = wrap(exact_output, fmt, returncode=exact_returncode or 0)
+            logger.info(
+                "observation_simulation_exact eval_run_id={} sample_id={} fmt={} chars={}",
+                request.eval_run_id,
+                request.sample_id,
+                fmt,
+                len(observation),
+            )
+            return observation
+        computed = bool(context_block) and context_block.lstrip().startswith(COMPUTED_BLOCK_MARKER)
+        transcript = (
+            f"$ {command}"
+            if computed
+            else _simulation_transcript(
+                messages=request.messages,
+                prompt=request.prompt,
+                assistant_output=request.assistant_output,
+            )
         )
-        fmt = detect_format(request.sample_id, request.messages)
         require_content = requires_output(command)
         contract = command_contract(command)
         primary = self.settings.simulation_model or self.settings.evaluator_model
@@ -805,17 +893,55 @@ class ObservationSimulationService:
                 len(collapsed),
             )
             observation = collapsed
+        if (
+            require_content
+            and exact_output is None
+            and is_file_read(command)
+            and not has_content(observation, fmt)
+        ):
+            observation = await self._retry_for_output(
+                request, command, fmt, context_block, transcript, contract, observation
+            )
         if not valid_output(observation, fmt):
-            fallback = empty_output(fmt)
+            fallback = (
+                wrap(exact_output, fmt, returncode=exact_returncode or 0)
+                if exact_output
+                else empty_output(fmt)
+            )
             logger.warning(
                 "observation_simulation_invalid_format eval_run_id={} sample_id={} fmt={} "
-                "fallback={!r}",
+                "exact={} fallback={!r}",
                 request.eval_run_id,
                 request.sample_id,
                 fmt,
-                fallback,
+                bool(exact_output),
+                fallback[:120],
             )
             return fallback
+        if exact_output is not None:
+            corrected = with_body(observation, fmt, exact_output)
+            if corrected != observation:
+                logger.info(
+                    "observation_simulation_body_corrected eval_run_id={} sample_id={} fmt={} "
+                    "chars={}->{}",
+                    request.eval_run_id,
+                    request.sample_id,
+                    fmt,
+                    len(observation),
+                    len(corrected),
+                )
+            return corrected
+        if output_expectation(command) == NOT_DERIVABLE and not has_content(observation, fmt):
+            body, returncode = no_output_notice(command)
+            logger.info(
+                "observation_simulation_no_output_notice eval_run_id={} sample_id={} rc={} "
+                "command={!r}",
+                request.eval_run_id,
+                request.sample_id,
+                returncode,
+                command[:80],
+            )
+            return wrap(body, fmt, returncode=returncode)
         return observation
 
 
@@ -1121,7 +1247,8 @@ _ROLE_LEAK_RE = re.compile(r"(?:^|\n)\s*(?:THOUGHT:|### (?:assistant|user|system
 
 
 def _role_violation(raw: str) -> bool:
-    return bool(_ROLE_LEAK_RE.search(raw or ""))
+    text = raw or ""
+    return bool(_ROLE_LEAK_RE.search(text)) or text.count("<returncode>") > 1
 
 
 _RANK_INVALID = 0

@@ -6,6 +6,7 @@ from uuid import uuid4
 from albedo_config import JudgeSettings
 from albedo_eval_service.judge_api import ObservationSimulationService, SimulateObservationRequest
 from albedo_eval_service.judge_llm_client import JudgeRawResponse
+from albedo_eval_service.simulator.prompt_simulator import MUST_PRINT_RETRY
 
 
 class StubClient:
@@ -42,7 +43,7 @@ def test_simulation_ladder_tries_each_provider_before_expensive_fallback():
 
     models = [c["model"] for c in client.calls]
     orders = [(c["provider"] or {}).get("order") for c in client.calls]
-    assert models == [
+    assert models[:3] == [
         "deepseek/deepseek-v4-flash-0731",  # rung 1: deepseek provider first
         "deepseek/deepseek-v4-flash-0731",  # rung 2: cloudflare provider first
         settings.evaluator_model,  # rung 3: expensive judge model last
@@ -50,6 +51,10 @@ def test_simulation_ladder_tries_each_provider_before_expensive_fallback():
     assert orders[0][0] == "deepseek"
     assert orders[1][0] == "cloudflare"
     assert orders[2][0] == settings.evaluator_providers.split(",")[0]
+    # `cat` must print, so a silent ladder earns one last directed ask before we give up
+    assert len(client.calls) == 4
+    assert models[3] == "deepseek/deepseek-v4-flash-0731"
+    assert MUST_PRINT_RETRY in client.calls[3]["messages"][-1]["content"]
     # everything failed -> deterministic empty observation, never an exception
     assert "returncode" in observation
 
@@ -61,7 +66,8 @@ def test_simulation_single_model_uses_evaluator_provider():
 
     asyncio.run(service.simulate(_request()))
 
-    assert len(client.calls) == 1
+    # one ladder rung, then the must-print retry for a read that came back silent
+    assert len(client.calls) == 2
     assert client.calls[0]["model"] == settings.evaluator_model
     assert (client.calls[0]["provider"] or {}).get("order") == [
         p.strip() for p in settings.evaluator_providers.split(",")
