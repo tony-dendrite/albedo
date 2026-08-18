@@ -12,7 +12,7 @@ class FakeService:
         self.result = result
         self.prefetched: list[str] | None = None
 
-    def context_for(self, sample_id, assistant_output):
+    def context_for(self, sample_id, assistant_output, messages=None):
         if isinstance(self.result, Exception):
             raise self.result
         return self.result
@@ -41,6 +41,8 @@ def test_repo_context_happy_path():
         "sample_id": "swe-zero/data/train-0.parquet:0:0",
         "context": "BLOCK",
         "kind": "repo",
+        "exact_output": None,
+        "exact_returncode": None,
     }
 
 
@@ -48,7 +50,13 @@ def test_repo_context_returns_none_kind_on_failure():
     client = make_client(RuntimeError("boom"))
     response = client.post("/repo-context", json={"sample_id": "x", "assistant_output": "y"})
     assert response.status_code == 200
-    assert response.json() == {"sample_id": "x", "context": None, "kind": "none"}
+    assert response.json() == {
+        "sample_id": "x",
+        "context": None,
+        "kind": "none",
+        "exact_output": None,
+        "exact_returncode": None,
+    }
 
 
 def test_prefetch_endpoint_accepts_and_runs_in_background():

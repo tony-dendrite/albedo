@@ -15,12 +15,15 @@ from .core import RepoContextService
 class RepoContextRequest(BaseModel):
     sample_id: str
     assistant_output: str = ""
+    messages: list[dict[str, str]] | None = None
 
 
 class RepoContextResponse(BaseModel):
     sample_id: str
     context: str | None
     kind: str
+    exact_output: str | None = None
+    exact_returncode: int | None = None
 
 
 class PrefetchRequest(BaseModel):
@@ -61,7 +64,10 @@ def create_app(
     async def repo_context(request: RepoContextRequest) -> RepoContextResponse:
         try:
             result = await asyncio.to_thread(
-                service.context_for, request.sample_id, request.assistant_output
+                service.context_for,
+                request.sample_id,
+                request.assistant_output,
+                request.messages,
             )
         except Exception as exc:
             logger.warning(
@@ -71,7 +77,11 @@ def create_app(
             )
             return RepoContextResponse(sample_id=request.sample_id, context=None, kind="none")
         return RepoContextResponse(
-            sample_id=request.sample_id, context=result.context, kind=result.kind
+            sample_id=request.sample_id,
+            context=result.context,
+            kind=result.kind,
+            exact_output=result.exact_output,
+            exact_returncode=result.exact_returncode,
         )
 
     return app

@@ -97,6 +97,7 @@ select = ["E", "W", "F", "I"]
 "src/albedo_eval_service/evaluator/behavior/prompt_behavior.py" = ["E501"]
 "src/albedo_eval_service/simulator/prompt_simulator.py" = ["E501"]
 "src/albedo_eval_service/remote/prompt_remote.py" = ["E501"]
+"src/repo_context_service/core.py" = ["E501"]
 # Embedded SQL strings dominate the repository; line length is not meaningful there.
 "src/albedo_eval_service/control/repository.py" = ["E501"]
 "src/sanity_service/db.py" = ["E501"]

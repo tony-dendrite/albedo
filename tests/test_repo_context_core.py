@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import tarfile
 import time
 
@@ -10,6 +11,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from albedo_config import RepoContextSettings
+from repo_context_service.command_search import ParseFailure, parse_search, run_search
 from repo_context_service.core import (
     GroundingContext,
     RepoContextService,
@@ -248,16 +250,246 @@ def test_filter_listing_and_caps(tmp_path, monkeypatch):
     make_snapshot(service, {p: "x" for p in listing}, listing=listing)
     monkeypatch.setattr(service, "_resolve_sha", lambda ref: ("o", "r", FULL_SHA))
     result = service.repo_context_for_instance(
-        "swe-zero", "o__r-1", "```bash\nfind . -name '*.py'\n```"
+        "swe-zero", "o__r-1", "```bash\nfind $(pwd) -name '*.py'\n```"
     )
     assert "... (+2 more matching files)" in result.context
 
     nothing = service.repo_context_for_instance(
-        "swe-zero", "o__r-1", "```bash\nfind . -name '*.zig'\n```"
+        "swe-zero", "o__r-1", "```bash\nfind $(pwd) -name '*.zig'\n```"
     )
     assert nothing.kind == "repo"
     assert "no files in this repository match" in nothing.context
     assert "./pkg/mod_0.py" not in nothing.context
+
+
+def test_a_ranged_view_piped_through_cat_n_is_computable():
+    listing = ["a.py"]
+    read = {"a.py": "l1\nl2\nl3\nl4\nl5\n"}.get
+    out = run_search(parse_search("sed -n '2,4p' a.py | cat -n"), read, listing).output
+    assert out == "     1\tl2\n     2\tl3\n     3\tl4"
+    assert isinstance(parse_search("cat a.py | cat -A"), ParseFailure)
+
+
+def test_a_quoted_pattern_is_not_read_as_shell_syntax():
+    assert not isinstance(parse_search('grep -n "a || b" a.py'), ParseFailure)
+    assert not isinstance(parse_search("grep -n 'x; y' a.py"), ParseFailure)
+    assert isinstance(parse_search("cat a.py; rm -rf /"), ParseFailure)
+
+
+def test_a_long_listing_is_derived_from_the_snapshot():
+    listing = ["a.py", "pkg/b.py"]
+    read = {"a.py": "L1\nL2\n", "pkg/b.py": "X\n"}.get
+    rows = run_search(parse_search("ls -l"), read, listing).output.split("\n")
+    assert rows[0] == "total 8"
+    assert re.fullmatch(r"-rw-r--r-- 1 root root\s+6 \w{3} +\d+ [\d:]+ a\.py", rows[1]), rows[1]
+    assert re.fullmatch(r"drwxr-xr-x 2 root root\s+4096 \w{3} +\d+ [\d:]+ pkg", rows[2]), rows[2]
+    assert run_search(parse_search("ls -l a.py"), read, listing).output.endswith(" a.py")
+    assert isinstance(parse_search("ls -lh"), ParseFailure)
+
+
+_FIND_TREE = [
+    "docs/guide.md",
+    "node_modules/x/y.py",
+    "src/a.py",
+    "src/util/b.py",
+    "src/util/deep/c.py",
+    "tests/t_one.py",
+]
+
+
+def _find(cmd: str) -> list[str]:
+    plan = parse_search(cmd)
+    assert not isinstance(plan, ParseFailure), f"{cmd} -> {plan}"
+    return run_search(plan, {p: "x\n" for p in _FIND_TREE}.get, _FIND_TREE).output.split("\n")
+
+
+def test_find_answers_without_needing_a_grep_downstream():
+    assert _find("find . -name '*.py'") == [
+        "./node_modules/x/y.py",
+        "./src/a.py",
+        "./src/util/b.py",
+        "./src/util/deep/c.py",
+        "./tests/t_one.py",
+    ]
+    assert _find("find . -name '*.py' | head -2") == ["./node_modules/x/y.py", "./src/a.py"]
+    assert _find("find . -name '*.py' | wc -l") == ["5"]
+    assert _find("find . -name '*.py' | grep util") == ["./src/util/b.py", "./src/util/deep/c.py"]
+
+
+def test_find_depth_and_directory_predicates():
+    assert _find("find . -type d") == [
+        ".",
+        "./docs",
+        "./node_modules",
+        "./node_modules/x",
+        "./src",
+        "./src/util",
+        "./src/util/deep",
+        "./tests",
+    ]
+    assert _find("find . -maxdepth 1 -type d") == [
+        ".",
+        "./docs",
+        "./node_modules",
+        "./src",
+        "./tests",
+    ]
+    assert _find("find src -maxdepth 2 -name '*.py'") == ["src/a.py", "src/util/b.py"]
+    assert _find("find . -name 'util' -type d") == ["./src/util"]
+
+
+def test_find_excludes_negated_and_pruned_subtrees():
+    expected = ["./src/a.py", "./src/util/b.py", "./src/util/deep/c.py", "./tests/t_one.py"]
+    assert _find("find . -name '*.py' -not -path '*/node_modules/*'") == expected
+    assert _find("find . -path './node_modules' -prune -o -name '*.py' -print") == expected
+
+
+def test_find_or_is_honoured_only_within_one_predicate():
+    assert _find("find . -name '*.py' -o -name '*.md'") == [
+        "./docs/guide.md",
+        "./node_modules/x/y.py",
+        "./src/a.py",
+        "./src/util/b.py",
+        "./src/util/deep/c.py",
+        "./tests/t_one.py",
+    ]
+    assert isinstance(parse_search("find . -path '*util*' -o -name '*.py'"), ParseFailure)
+
+
+def test_find_exec_ls_renders_one_long_row_per_hit():
+    assert _find("find . -name '*.py' -exec ls -la {} \\;") == [
+        "-rw-r--r-- 1 root root        2 Jan  3 20:00 ./node_modules/x/y.py",
+        "-rw-r--r-- 1 root root        2 Jan  3 20:00 ./src/a.py",
+        "-rw-r--r-- 1 root root        2 Jan  3 20:00 ./src/util/b.py",
+        "-rw-r--r-- 1 root root        2 Jan  3 20:00 ./src/util/deep/c.py",
+        "-rw-r--r-- 1 root root        2 Jan  3 20:00 ./tests/t_one.py",
+    ]
+    assert _find("find src -type f -exec ls {} \\;") == [
+        "src/a.py",
+        "src/util/b.py",
+        "src/util/deep/c.py",
+    ]
+
+
+def test_find_still_refuses_what_it_cannot_stand_behind():
+    for cmd in (
+        "find . -name '*.py' | awk '{print $1}'",
+        "find . -name '*.py' -exec cat {} \\;",
+        "find . -name '*.py' -exec ls -lh {} \\;",
+        "find . -type d -exec ls -la {} \\;",
+        "find $(pwd) -name '*.py'",
+        "find . -newer setup.py",
+    ):
+        assert isinstance(parse_search(cmd), ParseFailure), cmd
+
+
+def test_a_missing_read_target_reports_the_shell_error_it_would_print():
+    listing = ["a.py"]
+    read = {"a.py": "l1\n"}.get
+    expected = {
+        "cat gone.py": "cat: gone.py: No such file or directory",
+        "nl -ba gone.py": "nl: gone.py: No such file or directory",
+        "head -5 gone.py": "head: cannot open 'gone.py' for reading: No such file or directory",
+        "tail -5 gone.py": "tail: cannot open 'gone.py' for reading: No such file or directory",
+        "sed -n '1,3p' gone.py": "sed: can't read gone.py: No such file or directory",
+    }
+    for cmd, message in expected.items():
+        result = run_search(parse_search(cmd), read, listing)
+        assert not isinstance(result, ParseFailure), cmd
+        assert result.output == message
+        assert result.missing == ["gone.py"]
+    assert run_search(parse_search("cat a.py"), read, listing).output == "l1"
+
+
+def test_grep_flags_that_change_nothing_on_text_are_accepted():
+    listing = ["a.py"]
+    read = {"a.py": "alpha\nbeta\n"}.get
+    assert run_search(parse_search("grep -an alpha a.py"), read, listing).output == "1:alpha"
+    assert run_search(parse_search("grep -n alpha a.py | cat"), read, listing).output == "1:alpha"
+    assert isinstance(parse_search("grep -n alpha a.py | cat -v"), ParseFailure)
+
+
+def test_a_pattern_grep_itself_rejects_is_reported_not_refused():
+    listing = ["a.py"]
+    read = {"a.py": "alpha\n"}.get
+    assert (
+        run_search(parse_search('grep -n "self.get\\(" a.py'), read, listing).output
+        == "grep: Unmatched ( or \\("
+    )
+    assert (
+        run_search(parse_search('grep -rn "reverse\\|[::-1]" .'), read, listing).output
+        == "grep: Invalid range end"
+    )
+    quiet = run_search(parse_search('grep -rn "reverse\\|[::-1]" . 2>/dev/null'), read, listing)
+    assert quiet.output == "" and quiet.empty is True
+    assert isinstance(
+        run_search(parse_search('rg -n "self.get\\(" a.py'), read, listing), ParseFailure
+    )
+
+
+def test_paths_built_at_container_setup_are_not_claimed_absent():
+    listing = ["a.py"]
+    read = {"a.py": "l1\n"}.get
+    for cmd in (
+        "cat node_modules/.bin/jest",
+        "head -5 build/build_config.json",
+        "cat faker/providers/ssn.pyc",
+        "head -20 .venv/lib/python3.11/site.py",
+    ):
+        assert isinstance(run_search(parse_search(cmd), read, listing), ParseFailure), cmd
+
+
+def test_echo_prints_its_argument_and_refuses_escapes():
+    assert run_search(parse_search("echo hello world"), {}.get, []).output == "hello world"
+    assert run_search(parse_search('echo "a  b"'), {}.get, []).output == "a  b"
+    assert isinstance(parse_search("echo -e 'a\\nb'"), ParseFailure)
+
+
+def test_output_sent_to_a_file_is_not_reported_as_printed():
+    for cmd in (
+        "cat a.py > out.txt",
+        "ls -l > listing.txt",
+        "grep -n L a.py >> hits.txt",
+        "echo hi > f.txt",
+    ):
+        assert isinstance(parse_search(cmd), ParseFailure), cmd
+    assert not isinstance(parse_search("grep -n L a.py 2>/dev/null"), ParseFailure)
+
+
+def test_renderable_chain_stages_are_attached_as_evidence(tmp_path, monkeypatch):
+    service = make_service(tmp_path)
+    make_snapshot(service, {"a.py": "L1\nL2\nL3\n"})
+    monkeypatch.setattr(service, "_resolve_sha", lambda ref: ("o", "r", FULL_SHA))
+
+    mixed = service.repo_context_for_instance(
+        "swe-zero", "o__r-1", "```bash\nsed -n '1,2p' a.py && python run.py\n```"
+    )
+    assert "CHAIN STAGES ALREADY EXECUTED" in mixed.context
+    assert "$ sed -n '1,2p' a.py\nL1\nL2" in mixed.context
+    assert mixed.exact_output is None
+    assert not mixed.context.lstrip().startswith("COMMAND OUTPUT —")
+
+    nothing = service.repo_context_for_instance(
+        "swe-zero", "o__r-1", "```bash\ncd /testbed && python run.py\n```"
+    )
+    assert "CHAIN STAGES ALREADY EXECUTED" not in nothing.context
+
+
+def test_exact_output_is_offered_only_when_it_can_be_stood_behind(tmp_path, monkeypatch):
+    service = make_service(tmp_path)
+    make_snapshot(service, {"src/app.py": "APP CONTENT\n"})
+    monkeypatch.setattr(service, "_resolve_sha", lambda ref: ("o", "r", FULL_SHA))
+
+    computed = service.repo_context_for_instance(
+        "swe-zero", "o__r-1", "```bash\ncat src/app.py\n```"
+    )
+    assert computed.exact_output == "APP CONTENT"
+
+    listing_only = service.repo_context_for_instance(
+        "swe-zero", "o__r-1", "```bash\npython src/app.py\n```"
+    )
+    assert listing_only.context is not None
+    assert listing_only.exact_output is None
 
 
 def test_contents_survive_huge_listing(tmp_path, monkeypatch):
@@ -268,7 +500,7 @@ def test_contents_survive_huge_listing(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(service, "_resolve_sha", lambda ref: ("o", "r", FULL_SHA))
     block = service.repo_context_for_instance(
-        "swe-zero", "o__r-1", "```bash\ncat src/target.py\n```"
+        "swe-zero", "o__r-1", "```bash\npython src/target.py\n```"
     ).context
     assert len(block) <= 30000 + len("\n... (truncated)")
     assert "TARGET CONTENT" in block
@@ -472,3 +704,77 @@ def test_oversized_snapshot_failure_is_cached(tmp_path, monkeypatch):
     assert service._ensure_snapshot("o", "r", FULL_SHA) is None
     assert service._ensure_snapshot("o", "r", FULL_SHA) is None
     assert len(calls) == 1
+
+
+def test_a_chain_still_grounds_the_stages_after_one_it_cannot_render(tmp_path, monkeypatch):
+    service = make_service(tmp_path)
+    make_snapshot(service, {"a.py": "L1\nL2\nL3\n"})
+    monkeypatch.setattr(service, "_resolve_sha", lambda ref: ("o", "r", FULL_SHA))
+
+    # git first: the whole chain used to be discarded because the loop stopped here
+    after_git = service.repo_context_for_instance(
+        "swe-zero", "o__r-1", "```bash\ngit show HEAD --stat && sed -n '1,2p' a.py\n```"
+    )
+    assert "CHAIN STAGES ALREADY EXECUTED" in after_git.context
+    assert "$ sed -n '1,2p' a.py\nL1\nL2" in after_git.context
+    assert after_git.exact_output is None
+
+    # and a stage between two ungroundable ones is still reported
+    sandwiched = service.repo_context_for_instance(
+        "swe-zero", "o__r-1", "```bash\npwd && sed -n '3p' a.py && python run.py\n```"
+    )
+    assert "$ sed -n '3p' a.py\nL3" in sandwiched.context
+
+
+def test_a_ranged_read_accepts_one_line_and_a_pipe_stage():
+    listing = ["m.py"]
+    src = "def a():\n    x = 1\n    return x\n\ndef b():\n    return 2\n"
+    read = {"m.py": src}.get
+
+    def out(cmd):
+        return run_search(parse_search(cmd), read, listing).output
+
+    assert out("sed -n '3p' m.py") == "    return x"
+    assert out("sed -n '2,3p' m.py") == "    x = 1\n    return x"
+    assert out("nl -ba m.py | sed -n '2,3p'") == "     2\t    x = 1\n     3\t    return x"
+    assert out("cat m.py | sed -n '1,2p'") == "def a():\n    x = 1"
+    # only numeric addresses are modelled: three corpus commands use a regex range,
+    # so resolving pattern addresses is not worth the machinery
+    assert isinstance(parse_search("sed -n '/def a/,/return x/p' m.py"), ParseFailure)
+    assert isinstance(parse_search("cat m.py | sed -n '/a/,/b/p'"), ParseFailure)
+    assert isinstance(parse_search("sed -n '2,3d' m.py"), ParseFailure)
+
+
+def test_a_search_over_an_unreadable_file_is_never_reported_as_no_match(tmp_path, monkeypatch):
+    service = make_service(tmp_path)
+    make_snapshot(service, {"a.py": "    def target():\n        pass\n"})
+    monkeypatch.setattr(service, "_resolve_sha", lambda ref: ("o", "r", FULL_SHA))
+
+    # a sed -i form we deliberately refuse to model, so the path is left dirty
+    edited = [
+        {"role": "assistant", "content": "```bash\nsed -i '/pass/d' a.py\n```"},
+        {"role": "user", "content": "<returncode>0</returncode>\n<output>\n</output>"},
+    ]
+    dirty = service.repo_context_for_instance(
+        "swe-zero", "o__r-1", "```bash\ngrep -n target a.py\n```", edited
+    )
+    assert "matched NOTHING" not in dirty.context
+    assert dirty.exact_output is None
+
+    clean = service.repo_context_for_instance(
+        "swe-zero", "o__r-1", "```bash\ngrep -n target a.py\n```"
+    )
+    assert clean.exact_output == "1:    def target():"
+
+
+def test_posix_classes_and_stderr_redirects_do_not_silence_a_grep():
+    listing = ["m.py"]
+    read = {"m.py": "class A:\n    def go(self):\n        pass\n"}.get
+    hit = run_search(parse_search("grep -n '[[:space:]]*def' m.py"), read, listing)
+    assert hit.output == "2:    def go(self):"
+    assert not hit.empty
+    # 2>&1 is a redirect; the & in it used to be read as a control operator
+    assert not isinstance(parse_search("grep -rn target m.py 2>&1"), ParseFailure)
+    assert not isinstance(parse_search("grep -rn target m.py 2>&1 | head -20"), ParseFailure)
+    # sending stdout elsewhere is still not something we can claim was printed
+    assert isinstance(parse_search("grep -n target m.py 1>&2"), ParseFailure)

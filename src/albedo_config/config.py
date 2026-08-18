@@ -338,7 +338,7 @@ class RepoContextSettings(BaseSettings):
     dataset_root: str = ""
     github_token: str = ""
     max_paths: int = 2000
-    max_files: int = 12
+    max_files: int = 16
     max_file_chars: int = 30000
     max_context_chars: int = 120000
     max_snapshot_mb: int = 500

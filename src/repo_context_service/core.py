@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -13,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
+from urllib.parse import quote
 
 import httpx
 from loguru import logger
@@ -27,11 +29,38 @@ from albedo_eval_service.remote.dataset import (
     _unwrap_column,
 )
 from albedo_eval_service.shared.dataset_manifest import load_manifest_file
+from albedo_eval_service.shared.observation_format import (
+    OPENHANDS_TRUNCATION_NOTICE,
+    detect_format,
+)
 from albedo_eval_service.simulator.prompt_simulator import COMPLETE_MARKER
+
+from .command_search import (
+    ParseFailure,
+    SearchResult,
+    _number_lines,
+    parse_search,
+    run_search,
+    split_chain,
+)
+from .git_sim import (
+    DEFAULT_BRANCH,
+    GitMeta,
+    explain_git,
+    git_evidence,
+    ledger_block,
+    run_git_chain,
+)
+from .overlay import Overlay, build_overlay, strip_sandbox
 
 _API_BASE = "https://api.github.com"
 _DONE_MARKER = ".albedo-repo-context-done"
 _LISTING_NAME = ".albedo-listing.json"
+_REPO_META_NAME = ".albedo-repo-meta.json"
+_HISTORY_NAME = ".albedo-git-log.{key}.json"
+_HISTORY_PAGE = 100
+_PATCH_NAME = ".albedo-commit.{key}.patch"
+_MAX_PATCH_CHARS = 400_000
 _NEGATIVE_TTL_SECONDS = 24 * 3600.0
 _TRANSIENT_TTL_SECONDS = 900.0
 _MAX_MEMBER_BYTES = 2 * 1024 * 1024
@@ -39,7 +68,37 @@ _MAX_MEMBERS = 200_000
 _MAX_MISSING_PATHS = 10
 _RETRIES = 3
 
+_DETACHED_SOURCE = re.compile(r"re[-_]?bench", re.I)
 _COMMAND_BLOCK_RE = re.compile(r"```(?:bash|sh)?[ \t]*\n(.*?)```", re.DOTALL)
+_TAGGED_BLOCK_RE = re.compile(r"```(?:bash|sh)[ \t]*\n(.*?)```", re.DOTALL)
+
+_TRUNCATION_WARNING = (
+    "The output of your last command was too long.\n"
+    "Please try a different command that produces less output.\n"
+    "If you're looking at a file you can try use head, tail or sed to view a smaller number "
+    "of lines selectively.\n"
+    "If you're using grep or find and it produced too much output, you can use a more "
+    "selective search pattern.\n"
+    "If you really need to see something from the full command's output, you can redirect "
+    "output to a file and then search in that file."
+)
+_SCAFFOLD_LIMIT = {"returncode": 10_000, "openhands": 30_000}
+
+
+def _scaffold_truncate(text: str, fmt: str) -> str:
+    limit = _SCAFFOLD_LIMIT.get(fmt)
+    raw = text + "\n"
+    if limit is None or len(raw) <= limit:
+        return text
+    half = limit // 2
+    if fmt == "openhands":
+        return f"{raw[:half]}\n{OPENHANDS_TRUNCATION_NOTICE}\n{raw[-half:]}"
+    return (
+        f"<warning>\n{_TRUNCATION_WARNING}\n</warning><output_head>\n{raw[:half]}\n</output_head>\n"
+        f"<elided_chars>\n{len(raw) - limit} characters elided\n</elided_chars>\n"
+        f"<output_tail>\n{raw[-half:]}\n</output_tail>"
+    )
+
 
 LISTING_HEADER = """REPOSITORY FILE LISTING — tracked files at the current commit relevant to the
 command (paths relative to the repo root, sorted; the filesystem returns files in this order).
@@ -54,12 +113,67 @@ applying the command's filters and pipe limits:
 CONTENTS_HEADER = """FILE CONTENTS — exact current content of files referenced by the command:
 """
 
-NOT_PRESENT_HEADER = """FILES NOT PRESENT — the following paths referenced by the command do NOT
-exist in the repository at this commit. Never invent content for them. Your reply must still
-follow the OUTPUT FORMAT exactly: when the command reports such a path, put the realistic
-terminal error INSIDE the observation (e.g. "cat: <path>: No such file or directory"), and when
-the command produces no output at all, reply with exactly the empty observation the OUTPUT
-FORMAT specifies:
+LINE_NUMBER_NOTE_GREP = """Each content line below is prefixed with its line number as "N:", exactly the form grep -n
+emits. The prefix is an annotation, not part of the file's text: reproduce it for lines the
+command matches, and strip it anywhere the command does not report line numbers.
+"""
+
+LINE_NUMBER_NOTE_COLUMN = """Each content line below is prefixed with its line number, right-aligned then a tab, exactly
+the form cat -n and nl emit. The prefix is an annotation, not part of the file's text:
+reproduce it for lines the command prints, and strip it anywhere line numbers are not reported.
+"""
+
+NOT_PRESENT_HEADER = """FILES NOT PRESENT — ONLY the paths listed immediately below are absent
+from the repository at this commit. Every other path the command names does exist; never claim
+otherwise. Do not invent content for a listed path — report the terminal error shown beside it,
+inside the observation, following the OUTPUT FORMAT exactly. When the command produces no output
+at all, reply with exactly the empty observation the OUTPUT FORMAT specifies:
+"""
+
+COMPUTED_HEADER = """COMMAND OUTPUT — this search was executed against the repository at this commit, so
+the text below is the command's exact output. Reply with it verbatim inside the OUTPUT FORMAT.
+Do not add, reorder, re-sort or omit lines, and do not explain it:
+"""
+
+COMPUTED_EMPTY = """COMMAND OUTPUT — this search was already executed against the repository at this
+commit and matched NOTHING: zero lines of output. That is the verified result, not a gap in what
+you were given — the repository was searched in full and no file matched. Do NOT list any path, do
+NOT guess at plausible matches, and do NOT reason about which files "should" have matched. An empty
+result is a normal outcome for a search. Reply with exactly the empty observation the OUTPUT FORMAT
+specifies:
+"""
+
+COMPUTED_GIT_HEADER = """COMMAND OUTPUT — this git command was executed against the repository at this commit
+with the working-tree changes made earlier in this session applied, so the text below is the
+command's exact output. Reply with it verbatim inside the OUTPUT FORMAT. Do not add, reorder or
+omit lines, and do not explain it:
+"""
+
+COMPUTED_GIT_EMPTY = """COMMAND OUTPUT — this git command was executed against the repository at this commit
+with the working-tree changes made earlier in this session applied, and it printed NOTHING: zero
+lines of output. That is the verified result, not a gap in what you were given. Reply with exactly
+the empty observation the OUTPUT FORMAT specifies:
+"""
+
+GIT_SEMANTICS_HEADER = """GIT SEMANTICS — how this git command behaves in this checkout; both lines are facts about
+the repository state you are simulating, not guidance to repeat in the output:
+"""
+
+CHAIN_EVIDENCE_HEADER = """CHAIN STAGES ALREADY EXECUTED — this command joins several stages with &&. The stages
+below were executed against the repository at this commit, so the text under each one is that
+stage's exact output. Reproduce those parts unchanged in your reply and derive the remaining
+stages yourself; the stages shown are not the whole observation. Each stage was executed on its
+own, so a stage shown here may follow one whose success could not be checked; keep that in mind
+if an earlier stage would have stopped the chain:
+"""
+
+PRE_EDIT_SUFFIX = (
+    "   (as of this commit — the session has since edited this file in a way that could "
+    "not be reproduced, so the text below is the version BEFORE those edits)"
+)
+
+COMPUTED_PARTIAL = """NOTE — the following files are listed in the repository but their contents are not
+available at this commit, so the output above may be missing matches from them:
 """
 
 TRAJECTORY_HEADER = """REFERENCE EXCHANGES — real command -> observation exchanges recorded in this
@@ -84,6 +198,8 @@ class GroundingContext:
     context: str | None
     kind: str
     reason: str | None = None
+    exact_output: str | None = None
+    exact_returncode: int | None = None
 
 
 class _NotFound(Exception):
@@ -126,7 +242,7 @@ def parse_instance(source: str, instance_id: str) -> RepoRef | None:
 
 
 def _first_command(text: str) -> str:
-    match = _COMMAND_BLOCK_RE.search(text or "")
+    match = _TAGGED_BLOCK_RE.search(text or "") or _COMMAND_BLOCK_RE.search(text or "")
     return match.group(1).strip() if match else ""
 
 
@@ -152,23 +268,61 @@ def _filter_listing(paths: list[str], cmd: str) -> tuple[list[str], bool]:
     return kept, True
 
 
+@lru_cache(maxsize=16)
+def _suffix_index(listing: tuple[str, ...]) -> dict[str, str]:
+    owners: dict[str, str | None] = {}
+    for path in listing:
+        segments = path.split("/")
+        for index in range(len(segments)):
+            suffix = "/".join(segments[index:])
+            if suffix in owners:
+                if owners[suffix] != path:
+                    owners[suffix] = None
+            else:
+                owners[suffix] = path
+    return {suffix: path for suffix, path in owners.items() if path is not None}
+
+
+def _resolve_path(token: str, listing_set: set[str], index: dict[str, str]) -> str | None:
+    if token in listing_set:
+        return token
+    segments = token.lstrip("/").split("/")
+    for start in range(len(segments)):
+        resolved = index.get("/".join(segments[start:]))
+        if resolved is not None:
+            return resolved
+    return None
+
+
+_WRITE_TARGET = re.compile(r">>?\s*[^\s|;&()\"'<>]+")
+_WRITE_DEST = re.compile(r"\b(?:cp|mv|install)\s+(?:-\S+\s+)*\S+\s+(\S+)|\btee\s+(?:-\S+\s+)*(\S+)")
+_CD_ONLY = re.compile(r"^cd\s+\S+$")
+
+
 def _referenced_paths(cmd: str, listing: list[str]) -> tuple[list[str], list[str]]:
     listing_set = set(listing)
     top_dirs = {p.split("/", 1)[0] for p in listing_set if "/" in p}
+    index = _suffix_index(tuple(listing))
     present: list[str] = []
     missing: list[str] = []
-    for tok in re.split(r"[\s|;&<>()\"']+", cmd):
+    # a copy/move/tee destination does not exist yet, which is normal rather than an error
+    dests = {m.group(1) or m.group(2) for m in _WRITE_DEST.finditer(cmd)}
+    for tok in re.split(r"[\s|;&<>()\"']+", _WRITE_TARGET.sub(" ", cmd)):
         if not tok or tok.startswith("-"):
             continue
         p = tok[2:] if tok.startswith("./") else tok
-        if p in listing_set:
-            if p not in present:
-                present.append(p)
-            continue
+        if tok.startswith("/"):
+            p = strip_sandbox(tok)
+        if "://" not in tok and not any(ch in tok for ch in "*?[]{}$`="):
+            resolved = _resolve_path(p, listing_set, index)
+            if resolved is not None:
+                if resolved not in present:
+                    present.append(resolved)
+                continue
         if "://" in tok or any(ch in tok for ch in "*?[]{}$`="):
             continue
         norm = p.rstrip("/")
-        if not norm or norm in (".", "..") or norm in missing:
+        if not norm or norm in (".", "..") or norm in missing or tok in dests:
             continue
         if any(x.startswith(norm + "/") for x in listing_set):
             continue
@@ -177,6 +331,17 @@ def _referenced_paths(cmd: str, listing: list[str]) -> tuple[list[str], list[str
         elif _plausible_repo_path(norm, top_dirs):
             missing.append(norm)
     return present, missing[:_MAX_MISSING_PATHS]
+
+
+_SEPARATOR = r"(?:^|\||&&|\|\||;)\s*"
+_WANTS_LINE_NUMBERS = re.compile(
+    _SEPARATOR + r"(?:grep|rg)\b[^|&;]*?\s-\w*n\w*\b"
+    r"|" + _SEPARATOR + r"cat\b[^|&;]*?\s-\w*[nb]\w*\b"
+    r"|" + _SEPARATOR + r"nl\b"
+)
+
+
+_GREP_STYLE = re.compile(_SEPARATOR + r"(?:grep|rg)\b[^|&;]*?\s-\w*n\w*\b")
 
 
 def _plausible_repo_path(path: str, top_dirs: set[str]) -> bool:
@@ -244,9 +409,11 @@ class RepoContextService:
     def close(self) -> None:
         self._client.close()
 
-    def context_for(self, sample_id: str, assistant_output: str) -> GroundingContext:
+    def context_for(
+        self, sample_id: str, assistant_output: str, messages: list[dict[str, str]] | None = None
+    ) -> GroundingContext:
         try:
-            return self._context_for(sample_id, assistant_output)
+            return self._context_for(sample_id, assistant_output, messages)
         except Exception as exc:
             logger.warning(
                 "repo_context_fallback sample_id={} kind=none reason=unexpected error={}",
@@ -297,7 +464,12 @@ class RepoContextService:
         return summary
 
     def repo_context_for_instance(
-        self, source: str, instance_id: str, assistant_output: str
+        self,
+        source: str,
+        instance_id: str,
+        assistant_output: str,
+        messages: list[dict[str, str]] | None = None,
+        fmt: str = "",
     ) -> GroundingContext:
         ref = parse_instance(source, instance_id)
         if ref is None:
@@ -309,11 +481,28 @@ class RepoContextService:
         snapshot = self._ensure_snapshot(owner, repo, sha)
         if snapshot is None:
             return GroundingContext(context=None, kind="none", reason="snapshot_unavailable")
-        listing = list(_load_listing(str(snapshot / _LISTING_NAME)))
-        block = self._build_repo_block(snapshot, listing, _first_command(assistant_output))
-        return GroundingContext(context=block, kind="repo")
+        base = list(_load_listing(str(snapshot / _LISTING_NAME)))
+        overlay = build_overlay(
+            messages,
+            base,
+            _suffix_index(tuple(base)),
+            lambda rel: self._read_snapshot_file(snapshot, rel),
+        )
+        block, exact, returncode = self._build_repo_block(
+            snapshot,
+            overlay.listing(base),
+            _first_command(assistant_output),
+            overlay,
+            fmt,
+            self.git_meta(snapshot, source, owner, repo, sha),
+        )
+        return GroundingContext(
+            context=block, kind="repo", exact_output=exact, exact_returncode=returncode
+        )
 
-    def _context_for(self, sample_id: str, assistant_output: str) -> GroundingContext:
+    def _context_for(
+        self, sample_id: str, assistant_output: str, messages: list[dict[str, str]] | None = None
+    ) -> GroundingContext:
         try:
             shard_name, row_idx, turn_idx = _parse_sample_id(sample_id)
         except ValueError:
@@ -321,7 +510,9 @@ class RepoContextService:
         reason = "iid_unresolved"
         source_iid = self._iid_for(shard_name, row_idx)
         if source_iid is not None:
-            result = self.repo_context_for_instance(*source_iid, assistant_output)
+            result = self.repo_context_for_instance(
+                *source_iid, assistant_output, messages, detect_format(sample_id, messages)
+            )
             if result.context is not None:
                 return result
             reason = result.reason or "repo_unavailable"
@@ -416,6 +607,101 @@ class RepoContextService:
                 return None
             _write_json_atomic(cache_path, {"owner": owner, "repo": repo, "sha": sha})
             return owner, repo, sha
+
+    def git_meta(self, snapshot: Path, source: str, owner: str, repo: str, sha: str) -> GitMeta:
+        return GitMeta(
+            sha=sha,
+            owner=owner,
+            repo=repo,
+            branch=self._default_branch(snapshot, owner, repo),
+            detached=_DETACHED_SOURCE.search(source or "") is not None,
+            history=lambda path: self._commit_history(snapshot, owner, repo, sha, path),
+            commit_patch=lambda rev: self._commit_patch(snapshot, owner, repo, rev),
+        )
+
+    def _commit_patch(self, snapshot: Path, owner: str, repo: str, rev: str) -> str | None:
+        cache_path = snapshot / _PATCH_NAME.format(key=_hashed(rev))
+        if cache_path.exists():
+            text = cache_path.read_text(encoding="utf-8", errors="replace")
+            return text or None
+        try:
+            text = self._github_text(
+                f"/repos/{owner}/{repo}/commits/{quote(rev, safe='')}",
+                "application/vnd.github.patch",
+            )
+        except Exception as exc:
+            logger.info(
+                "repo_context_patch_unavailable repo={}/{} rev={} error={}",
+                owner,
+                repo,
+                rev,
+                f"{type(exc).__name__}: {exc}",
+            )
+            return None
+        if len(text) > _MAX_PATCH_CHARS:
+            return None
+        tmp = cache_path.with_suffix(".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, cache_path)
+        return text or None
+
+    def _commit_history(
+        self, snapshot: Path, owner: str, repo: str, sha: str, path: str | None
+    ) -> dict | None:
+        key = _safe_name(path) if path else "__repo__"
+        cache_path = snapshot / _HISTORY_NAME.format(key=_hashed(key))
+        cached = _read_json(cache_path)
+        if isinstance(cached, dict):
+            return cached if cached.get("commits") is not None else None
+        query = f"/repos/{owner}/{repo}/commits?sha={sha}&per_page={_HISTORY_PAGE}"
+        if path:
+            query += f"&path={quote(path, safe='')}"
+        try:
+            data = self._github_json(query)
+        except Exception as exc:
+            logger.info(
+                "repo_context_history_unavailable repo={}/{} path={} error={}",
+                owner,
+                repo,
+                path or "-",
+                f"{type(exc).__name__}: {exc}",
+            )
+            return None
+        if not isinstance(data, list):
+            return None
+        payload = {
+            "commits": [
+                {
+                    "sha": str(entry.get("sha") or ""),
+                    "subject": str((entry.get("commit") or {}).get("message") or "").split("\n")[0],
+                }
+                for entry in data
+                if entry.get("sha")
+            ],
+            "complete": len(data) < _HISTORY_PAGE,
+        }
+        _write_json_atomic(cache_path, payload)
+        return payload
+
+    def _default_branch(self, snapshot: Path, owner: str, repo: str) -> str:
+        meta_path = snapshot / _REPO_META_NAME
+        cached = _read_json(meta_path)
+        if isinstance(cached, dict) and cached.get("default_branch"):
+            return str(cached["default_branch"])
+        branch = DEFAULT_BRANCH
+        try:
+            data = self._github_json(f"/repos/{owner}/{repo}")
+            branch = str(data.get("default_branch") or DEFAULT_BRANCH)
+        except Exception as exc:
+            logger.info(
+                "repo_context_default_branch_unavailable repo={}/{} error={}",
+                owner,
+                repo,
+                f"{type(exc).__name__}: {exc}",
+            )
+            return branch
+        _write_json_atomic(meta_path, {"default_branch": branch})
+        return branch
 
     def _sha_from_api(self, owner: str, repo: str, ref: RepoRef) -> str:
         if ref.pr is not None:
@@ -552,11 +838,133 @@ class RepoContextService:
 
     _LISTING_MIN_CHARS = 8000
 
-    def _build_repo_block(self, snapshot_dir: Path, listing: list[str], cmd: str) -> str:
+    def _run_command(
+        self, snapshot_dir: Path, listing: list[str], cmd: str, overlay: Overlay
+    ) -> SearchResult | None:
+        plan = parse_search(cmd)
+        if isinstance(plan, ParseFailure):
+            return None
+        result = run_search(
+            plan,
+            lambda rel: self._file_text(snapshot_dir, rel, overlay),
+            listing,
+            size_file=lambda rel: self._file_size(snapshot_dir, rel, overlay),
+        )
+        return None if isinstance(result, ParseFailure) else result
+
+    def _chain_evidence(
+        self, snapshot_dir: Path, listing: list[str], cmd: str, overlay: Overlay
+    ) -> str:
+        stages = split_chain(cmd)
+        if stages is None:
+            return ""
+        fragments: list[str] = []
+        for stage in stages:
+            if _CD_ONLY.match(stage):
+                continue
+            result = self._run_command(snapshot_dir, listing, stage, overlay)
+            if result is None:
+                continue
+            if result.output:
+                fragments.append(
+                    f"$ {stage}\n{_truncate(result.output, self.settings.max_file_chars)}"
+                )
+        if not fragments:
+            return ""
+        return "\n" + CHAIN_EVIDENCE_HEADER + "\n" + "\n\n".join(fragments) + "\n"
+
+    def _run_git_command(
+        self,
+        snapshot_dir: Path,
+        listing: list[str],
+        cmd: str,
+        overlay: Overlay,
+        meta: GitMeta,
+    ):
+        result = run_git_chain(
+            cmd,
+            overlay,
+            lambda rel: self._read_snapshot_file(snapshot_dir, rel),
+            listing,
+            meta,
+            file_text=lambda working, rel: self._file_text(snapshot_dir, rel, working),
+            file_size=lambda working, rel: self._file_size(snapshot_dir, rel, working),
+        )
+        if isinstance(result, ParseFailure) or not result.exact:
+            return None
+        return result
+
+    def _computed_git_block(
+        self,
+        snapshot_dir: Path,
+        listing: list[str],
+        cmd: str,
+        overlay: Overlay,
+        fmt: str,
+        meta: GitMeta,
+    ) -> tuple[str, str | None, int | None] | None:
+        result = self._run_git_command(snapshot_dir, listing, cmd, overlay, meta)
+        if result is None:
+            return None
+        if result.empty:
+            block, exact = COMPUTED_GIT_EMPTY, ""
+        else:
+            exact = _scaffold_truncate(result.output, fmt)
+            block = COMPUTED_GIT_HEADER + "\n" + exact + "\n"
+        return _truncate(block, self.settings.max_context_chars), exact, result.returncode
+
+    def _computed_search_block(
+        self, snapshot_dir: Path, listing: list[str], cmd: str, overlay: Overlay, fmt: str = ""
+    ) -> tuple[str, str | None] | None:
+        result = self._run_command(snapshot_dir, listing, cmd, overlay)
+        if result is None:
+            return None
+        if result.empty and result.incomplete:
+            # nothing matched only because nothing could be read: claiming a verified
+            # empty here would assert the opposite of what the files actually hold
+            return None
+
+        if result.empty:
+            block, exact = COMPUTED_EMPTY, ""
+        else:
+            exact = _scaffold_truncate(result.output, fmt)
+            block = COMPUTED_HEADER + "\n" + exact + "\n"
+        if result.incomplete:
+            block += (
+                "\n"
+                + COMPUTED_PARTIAL
+                + "\n".join(f"- {p}" for p in result.incomplete[:_MAX_MISSING_PATHS])
+                + "\n"
+            )
+            exact = None
+        return _truncate(block, self.settings.max_context_chars), exact
+
+    def _build_repo_block(
+        self,
+        snapshot_dir: Path,
+        listing: list[str],
+        cmd: str,
+        overlay: Overlay,
+        fmt: str = "",
+        meta: GitMeta | None = None,
+    ) -> tuple[str, str | None, int | None]:
+        computed = self._computed_search_block(snapshot_dir, listing, cmd, overlay, fmt)
+        if computed is not None:
+            return computed[0], computed[1], None
+        meta = meta or GitMeta()
+        computed_git = self._computed_git_block(snapshot_dir, listing, cmd, overlay, fmt, meta)
+        if computed_git is not None:
+            return computed_git
+        evidence = self._chain_evidence(snapshot_dir, listing, cmd, overlay) + self._git_hints(
+            snapshot_dir, listing, cmd, overlay, meta
+        )
         listing_paths, _ = _filter_listing(listing, cmd)
         present, missing = _referenced_paths(cmd, listing)
         missing_text = (
-            "\n" + NOT_PRESENT_HEADER + "\n".join(f"- {p}" for p in missing) + "\n"
+            "\n"
+            + NOT_PRESENT_HEADER
+            + "\n".join(f"- {p}   ->   No such file or directory" for p in missing)
+            + "\n"
             if missing
             else ""
         )
@@ -565,21 +973,34 @@ class RepoContextService:
             self.settings.max_context_chars
             - len(LISTING_HEADER)
             - len(missing_text)
+            - len(evidence)
             - self._LISTING_MIN_CHARS
         )
+        wants_numbers = bool(_WANTS_LINE_NUMBERS.search(cmd or ""))
+        grep_style = bool(_GREP_STYLE.search(cmd or ""))
+        note = LINE_NUMBER_NOTE_GREP if grep_style else LINE_NUMBER_NOTE_COLUMN
+        contents_header = CONTENTS_HEADER + (note if wants_numbers else "")
         contents_parts: list[str] = []
-        contents_used = len(CONTENTS_HEADER) + 2
+        contents_used = len(contents_header) + 2
         for path in present[: self.settings.max_files]:
-            text = self._read_snapshot_file(snapshot_dir, path)
+            text = self._file_text(snapshot_dir, path, overlay)
+            stale = False
+            if text is None and overlay.is_dirty(path):
+                # edited by something we cannot model: the pre-edit text still beats nothing
+                text, stale = self._read_snapshot_file(snapshot_dir, path), True
             if text is None:
                 continue
-            part = f"--- ./{path} ---\n{_truncate(text, self.settings.max_file_chars)}\n"
+            body = _truncate(text, self.settings.max_file_chars)
+            if wants_numbers:
+                body = _number_lines(body, grep_style)
+            label = f"./{path}{PRE_EDIT_SUFFIX if stale else ''}"
+            part = f"--- {label} ---\n{body}\n"
             if contents_used + len(part) > contents_budget:
                 break
             contents_parts.append(part)
             contents_used += len(part) + 1
         contents_text = (
-            "\n" + CONTENTS_HEADER + "\n" + "\n".join(contents_parts) if contents_parts else ""
+            "\n" + contents_header + "\n" + "\n".join(contents_parts) if contents_parts else ""
         )
 
         listing_budget = (
@@ -587,6 +1008,7 @@ class RepoContextService:
             - len(LISTING_HEADER)
             - len(contents_text)
             - len(missing_text)
+            - len(evidence)
             - 64
         )
         if not listing_paths:
@@ -609,7 +1031,43 @@ class RepoContextService:
                 listing_text += f"\n... (+{over} more matching files)"
 
         block = LISTING_HEADER + "\n" + listing_text + "\n" + contents_text + missing_text
-        return _truncate(block, self.settings.max_context_chars)
+        return _truncate(evidence + block, self.settings.max_context_chars), None, None
+
+    def _git_hints(
+        self,
+        snapshot_dir: Path,
+        listing: list[str],
+        cmd: str,
+        overlay: Overlay,
+        meta: GitMeta,
+    ) -> str:
+        read_base = lambda rel: self._read_snapshot_file(snapshot_dir, rel)  # noqa: E731
+        note = explain_git(cmd, overlay, listing, read_base, meta)
+        hint = "\n" + GIT_SEMANTICS_HEADER + "\n" + note if note else ""
+        evidence = _truncate(
+            git_evidence(cmd, overlay, read_base, listing, meta), self.settings.max_file_chars
+        )
+        return hint + evidence + ledger_block(overlay.git)
+
+    def _file_text(self, snapshot_dir: Path, rel_path: str, overlay: Overlay) -> str | None:
+        if overlay.is_dirty(rel_path):
+            return None
+        return overlay.read(rel_path) or self._read_snapshot_file(snapshot_dir, rel_path)
+
+    def _file_size(self, snapshot_dir: Path, rel_path: str, overlay: Overlay) -> int | None:
+        if overlay.is_dirty(rel_path):
+            return None
+        held = overlay.read(rel_path)
+        if held is not None:
+            return len(held.encode("utf-8", "replace"))
+        root = snapshot_dir.resolve()
+        try:
+            target = (snapshot_dir / rel_path).resolve()
+            if not target.is_relative_to(root) or not target.is_file():
+                return None
+            return target.stat().st_size
+        except OSError:
+            return None
 
     def _read_snapshot_file(self, snapshot_dir: Path, rel_path: str) -> str | None:
         root = snapshot_dir.resolve()
@@ -676,6 +1134,27 @@ class RepoContextService:
         )
         return {"Authorization": f"Bearer {token}"} if token else {}
 
+    def _github_text(self, path: str, accept: str) -> str:
+        headers = {**self._auth_headers(), "Accept": accept}
+        last_error: Exception | None = None
+        for attempt in range(_RETRIES):
+            try:
+                with self._github_semaphore:
+                    response = self._client.get(_API_BASE + path, headers=headers)
+            except httpx.HTTPError as exc:
+                last_error = exc
+                time.sleep(min(30.0, 1.5 * 2**attempt))
+                continue
+            if response.status_code == 404:
+                raise _NotFound(path)
+            if response.status_code == 429 or response.status_code >= 500:
+                last_error = RuntimeError(f"github {response.status_code} for {path}")
+                time.sleep(min(30.0, 1.5 * 2**attempt))
+                continue
+            response.raise_for_status()
+            return response.text
+        raise RuntimeError(f"github request failed for {path}: {last_error}")
+
     def _github_json(self, path: str) -> dict:
         last_error: Exception | None = None
         for attempt in range(_RETRIES):
@@ -711,6 +1190,10 @@ class RepoContextService:
 
 def _safe_name(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", name)
+
+
+def _hashed(name: str) -> str:
+    return hashlib.sha1(name.encode("utf-8")).hexdigest()[:16]
 
 
 def _read_json(path: Path) -> dict | None:
