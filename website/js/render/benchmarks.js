@@ -345,8 +345,8 @@ function renderTile(model, suite, sorted, baseline, activity, preds) {
   const progress = scored ? null : preds;
   const genesis = baselineComparison(entry, baseline);
   const previous = previousComparison(entry, sorted, model, suite);
-  const running = activity?.running;
-  const queued = activity?.queued || [];
+  const running = scored ? null : activity?.running;
+  const queued = scored ? [] : (activity?.queued || []);
   const href = entry?.run_id && !entry.no_detail ? detailHref(model, entry.run_id) : null;
   const runNote = running
     ? [runningLabel(running, activity.labelByRepo), progressNote(running)].filter(Boolean).join(" · ")
