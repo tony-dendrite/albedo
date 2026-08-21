@@ -31,6 +31,16 @@ TAG_WEIGHTS: dict[str, float] = {
 }
 AMPUTATED_THINKING_MULTIPLIER = 0.5
 
+RESERVED_TOKEN_RE = re.compile(
+    r"<\|im_start\|>|<\|im_end\|>|<\|vision_start\|>|<\|vision_end\|>|<\|image_pad\|>"
+    r"|<\|video_pad\|>|<\|endoftext\|>|</?tool_call>|<function=|</?tool_response>"
+)
+
+
+def reserved_token_leak(document: str) -> str:
+    hit = RESERVED_TOKEN_RE.search(document or "")
+    return hit.group(0) if hit else ""
+
 
 def question_weight(question: dict[str, str]) -> float:
     tag = str(question.get("tag") or "")

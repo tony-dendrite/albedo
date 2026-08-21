@@ -55,6 +55,7 @@ from .judge_core import (
     judge_yes_rate,
     parse_answers,
     question_weight,
+    reserved_token_leak,
     response_score,
 )
 from .judge_llm_client import JudgeLLMClient
@@ -1616,6 +1617,18 @@ async def _score_samples(
 
         async def _side(side: str, response_text: str):
             if is_truncated(response_text):
+                return _corrupted_side(
+                    side=side, questions=questions, judge_models=request.judge_models
+                )
+            leak = reserved_token_leak(response_text)
+            if leak:
+                logger.warning(
+                    "score_batch_side_reserved_token eval_run_id={} sample_id={} side={} token={}",
+                    request.eval_run_id,
+                    sample.sample_id,
+                    side,
+                    leak,
+                )
                 return _corrupted_side(
                     side=side, questions=questions, judge_models=request.judge_models
                 )
