@@ -10,6 +10,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from albedo_config import get_model_validation_settings
 from albedo_eval_service.shared.models import RemoteHost
 
 
@@ -252,6 +253,32 @@ class PreEvalRepository:
     ) -> None:
         attempt_state = "FAILED_RETRYABLE" if retryable else "FAILED_TERMINAL"
         with self._connect() as conn, conn.transaction():
+            if not retryable and fault_class == "MINER_FAULT":
+                fails = (
+                    conn.execute(
+                        """
+                        SELECT count(*) AS fails
+                        FROM model_submissions
+                        WHERE hotkey = (SELECT hotkey FROM model_submissions WHERE id = %s)
+                          AND state = 'TERMINAL_INVALID'
+                          AND fault_class = 'MINER_FAULT'
+                          AND fault_code NOT IN (
+                            'hotkey_sanity_blocked', 'hotkey_duplicate_blocked',
+                            'hotkey_already_validated', 'hotkey_preeval_blocked'
+                          )
+                        """,
+                        (submission_id,),
+                    ).fetchone()["fails"]
+                    + 1
+                )
+                max_fails = get_model_validation_settings().PREEVAL_MAX_FAILS
+                left = max(0, max_fails - fails)
+                if left > 0:
+                    fault_message += f" — hotkey has {left} attempt(s) left before ban"
+                else:
+                    fault_message += (
+                        " — hotkey has 0 attempts left and is now banned from further submissions"
+                    )
             if not retryable:
                 self._write_sanity_result(
                     conn, repo, digest, False, fault_message, responses or [], {}
