@@ -533,3 +533,68 @@ async def _two_models_one_eval():
     finally:
         await client.aclose()
     return hits
+
+
+def test_streaming_response_is_assembled_and_logged():
+    captured: list[dict] = []
+    sse = (
+        b": OPENROUTER PROCESSING\n\n"
+        b'data: {"provider":"Novita",'
+        b'"choices":[{"delta":{"content":"Hel"},"finish_reason":null}]}\n\n'
+        b'data: {"choices":[{"delta":{"content":"lo"},"finish_reason":"stop"}]}\n\n'
+        b'data: {"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"cost":0.01}}\n\n'
+        b"data: [DONE]\n\n"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content.decode()))
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=sse)
+
+    async def run():
+        settings = JudgeSettings(openrouter_api_key="test-key")
+        client = JudgeLLMClient(settings)
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(
+            base_url=settings.openrouter_base_url.rstrip("/"),
+            transport=httpx.MockTransport(handler),
+        )
+        try:
+            return await client.score(
+                model="z-ai/glm-5.2", messages=[{"role": "user", "content": "x"}]
+            )
+        finally:
+            await client.aclose()
+
+    result = asyncio.run(run())
+    assert result.error is None
+    assert result.raw == "Hello"
+    assert captured[0]["stream"] is True
+
+
+def test_stream_dying_without_finish_reason_is_a_transport_error():
+    sse = b'data: {"choices":[{"delta":{"content":"partial"},"finish_reason":null}]}\n\n'
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=sse)
+
+    async def run():
+        settings = JudgeSettings(
+            openrouter_api_key="test-key", retry_count=0, parse_retries=1, retry_backoff_seconds=0
+        )
+        client = JudgeLLMClient(settings)
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(
+            base_url=settings.openrouter_base_url.rstrip("/"),
+            transport=httpx.MockTransport(handler),
+        )
+        try:
+            return await client.score(
+                model="z-ai/glm-5.2", messages=[{"role": "user", "content": "x"}]
+            )
+        finally:
+            await client.aclose()
+
+    result = asyncio.run(run())
+    assert result.error is not None
+    assert "finish_reason" in result.error
+    assert result.raw == ""

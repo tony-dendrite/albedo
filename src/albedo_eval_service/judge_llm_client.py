@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import collections
 import email.utils
+import json
 import random
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -32,10 +34,19 @@ class JudgeLLMClient:
             raise ValueError("ALBEDO_JUDGE_OPENROUTER_API_KEY is required")
         self.settings = settings
         pool = max(64, (len(JUDGE_MODELS) + 1) * settings.max_concurrency_per_model)
+        timeout = (
+            httpx.Timeout(
+                settings.request_timeout_seconds,
+                connect=10.0,
+                read=settings.stream_stall_seconds,
+            )
+            if settings.stream_enabled
+            else httpx.Timeout(settings.request_timeout_seconds)
+        )
         self._client = httpx.AsyncClient(
             base_url=settings.openrouter_base_url.rstrip("/"),
             headers={"Authorization": f"Bearer {settings.openrouter_api_key}"},
-            timeout=httpx.Timeout(settings.request_timeout_seconds),
+            timeout=timeout,
             limits=httpx.Limits(max_connections=pool, max_keepalive_connections=pool),
         )
         self._semaphores: dict[str, asyncio.Semaphore] = {}
@@ -43,7 +54,7 @@ class JudgeLLMClient:
             httpx.AsyncClient(
                 base_url=settings.engy_base_url.rstrip("/"),
                 headers={"Authorization": f"Bearer {settings.engy_api_key}"},
-                timeout=httpx.Timeout(settings.request_timeout_seconds),
+                timeout=timeout,
                 limits=httpx.Limits(max_connections=pool, max_keepalive_connections=pool),
             )
             if settings.engy_api_key
@@ -250,6 +261,43 @@ class JudgeLLMClient:
             model=model, provider=_provider_name(model), raw="", error=last_error
         )
 
+    async def _exchange(self, client: httpx.AsyncClient, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.settings.stream_enabled:
+            response = await client.post("/v1/chat/completions", json=payload)
+            response.raise_for_status()
+            return response.json()
+        content: list[str] = []
+        body: dict[str, Any] = {}
+        finish: str | None = None
+        async with asyncio.timeout(self.settings.request_timeout_seconds):
+            async with client.stream(
+                "POST", "/v1/chat/completions", json={**payload, "stream": True}
+            ) as response:
+                response.raise_for_status()
+                if not response.headers.get("content-type", "").startswith("text/event-stream"):
+                    return json.loads(await response.aread())  # server ignored stream=True
+                async for line in response.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    data = line[len("data: ") :]
+                    if data == "[DONE]":
+                        break
+                    chunk = json.loads(data)
+                    if chunk.get("provider"):
+                        body["provider"] = chunk["provider"]
+                    if chunk.get("usage"):
+                        body["usage"] = chunk["usage"]
+                    for choice in chunk.get("choices") or []:
+                        piece = (choice.get("delta") or {}).get("content")
+                        if piece:
+                            content.append(piece)
+                        finish = choice.get("finish_reason") or finish
+        if finish is None:
+            # a stream that dies mid-generation must never be accepted as a complete answer
+            raise RuntimeError("stream ended without finish_reason")
+        body["choices"] = [{"message": {"content": "".join(content)}}]
+        return body
+
     async def _score_once(
         self,
         *,
@@ -286,9 +334,9 @@ class JudgeLLMClient:
                 "type": "json_schema",
                 "json_schema": {"name": schema_name, "strict": True, "schema": response_schema},
             }
+        started = time.monotonic()
         try:
-            response = await client.post("/v1/chat/completions", json=payload)
-            response.raise_for_status()
+            body = await self._exchange(client, payload)
         except Exception as exc:
             if not on_engy:
                 raise
@@ -301,14 +349,14 @@ class JudgeLLMClient:
             )
             on_engy = False
             payload["model"] = model
-            response = await self._client.post("/v1/chat/completions", json=payload)
-            response.raise_for_status()
-        body = response.json()
+            body = await self._exchange(self._client, payload)
         usage = body.get("usage") or {}
         cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
         reasoning = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens", 0)
+        served_by = "engy" if on_engy else (body.get("provider") or _provider_name(model))
         logger.debug(
-            f"[judge-llm] usage purpose={purpose} model={model} "
+            f"[judge-llm] usage purpose={purpose} model={model} provider={served_by} "
+            f"elapsed={time.monotonic() - started:.1f}s "
             f"prompt_tokens={usage.get('prompt_tokens')} cached_tokens={cached} "
             f"completion_tokens={usage.get('completion_tokens')} "
             f"reasoning_tokens={reasoning} "

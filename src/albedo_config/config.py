@@ -88,6 +88,8 @@ class JudgeSettings(BaseSettings):
     engy_models: str = ENGY_MODELS
     engy_max_errors: int = 25
     request_timeout_seconds: float = 300.0
+    stream_enabled: bool = True
+    stream_stall_seconds: float = 90.0
     retry_count: int = 5
     retry_backoff_seconds: float = 1.5
     parse_retries: int = 3
