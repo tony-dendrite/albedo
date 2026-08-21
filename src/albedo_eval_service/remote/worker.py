@@ -5,7 +5,7 @@ import os
 import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Protocol, TypeVar
 
@@ -28,9 +28,10 @@ from ..shared.observation_format import (
     wrap,
 )
 from ..shared.sampling import multi_source_manifest_sample_ids
+from ..shared.submit_protocol import is_exact_submission
 from ..simulator.prompt_simulator import COMPLETE_MARKER, missing_command_output
 from .artifacts import ArtifactUploader, RunArtifactSpool, build_artifact_uploader
-from .dataset import EvalSample, format_messages, load_manifest_samples
+from .dataset import EvalSample, apply_submit_protocol, format_messages, load_manifest_samples
 from .generation import (
     GenerationResult,
     Generator,
@@ -265,9 +266,16 @@ class RemoteEvalWorker:
                 block_hash=request.dataset.sample_seed,
                 sample_count=request.dataset.sample_count,
             )
-        return load_manifest_samples(
+        samples = load_manifest_samples(
             dataset_root=self.settings.dataset_root,
             sample_ids=sample_ids,
+            tokenizer_path=tokenizer_path,
+            enable_thinking=True,
+        )
+        return apply_submit_protocol(
+            samples,
+            salt=str(request.dataset.sample_seed),
+            keep_original_ratio=self.settings.submit_keep_original_ratio,
             tokenizer_path=tokenizer_path,
             enable_thinking=True,
         )
@@ -427,7 +435,7 @@ class RemoteEvalWorker:
                     observations[key] = ObservationResult(result.sample_id, "", result.error)
                 elif result.truncated:
                     observations[key] = ObservationResult(result.sample_id, "")
-                elif _assistant_submitted(result.text):
+                elif _assistant_submitted(sample, result.text):
                     observations[key] = ObservationResult(
                         result.sample_id, _completion_observation(sample)
                     )
@@ -723,6 +731,9 @@ class RemoteEvalWorker:
                     "eval_run_id": str(request.eval_run_id),
                     "sample_id": sample.sample_id,
                     "prompt": sample.prompt,
+                    "submit_marker": sample.submit_marker,
+                    "submit_command": sample.submit_command,
+                    "rewrite_mode": sample.rewrite_mode,
                     "previous_king_output": king.text if king else "",
                     "challenger_output": challenger.text if challenger else "",
                     "previous_king_turns": king.turns if king else None,
@@ -817,19 +828,18 @@ def _next_turn_samples(
         observation = observations.get((side, sample.sample_id))
         if result is None or result.error or observation is None or observation.error:
             continue
-        if result.truncated or _assistant_submitted(result.text):
+        if result.truncated or _assistant_submitted(sample, result.text):
             continue
         messages = _base_messages(sample) + [
             {"role": "assistant", "content": result.text},
             {"role": "user", "content": observation.observation},
         ]
         out.append(
-            EvalSample(
-                sample_id=sample.sample_id,
+            replace(
+                sample,
                 prompt=format_messages(
                     messages, tokenizer_path=str(_CANONICAL_TOKENIZER_PATH), enable_thinking=True
                 ),
-                target=sample.target,
                 messages=messages,
             )
         )
@@ -889,7 +899,7 @@ def _merge_trajectory_results(
                     "environment_observation": True,
                 }
             )
-            if _assistant_submitted(result.text):
+            if _assistant_submitted(sample, result.text):
                 break
         if error:
             merged.append(GenerationResult(sample.sample_id, "", error))
@@ -917,12 +927,17 @@ def _context_turns(sample: EvalSample) -> list[dict[str, object]]:
     ]
 
 
-def _assistant_submitted(output: str) -> bool:
+def _assistant_submitted(sample: EvalSample, output: str) -> bool:
+    if sample.submit_command:
+        return is_exact_submission(output, sample.submit_command)
     return COMPLETE_MARKER in output
 
 
 def _completion_observation(sample: EvalSample) -> str:
-    return wrap(COMPLETE_MARKER, detect_format(sample.sample_id, sample.messages))
+    return wrap(
+        sample.submit_marker or COMPLETE_MARKER,
+        detect_format(sample.sample_id, sample.messages),
+    )
 
 
 def _missing_command_observation(sample: EvalSample) -> str:

@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 from repo_context_service.command_search import ParseFailure
-from repo_context_service.git_sim import GitMeta, blob_hash, ledger_block, run_git_chain
+from repo_context_service.git_sim import (
+    GitMeta,
+    blob_hash,
+    is_git_command,
+    ledger_block,
+    run_git_chain,
+)
 from repo_context_service.overlay import build_overlay
 
 BASE = {
@@ -146,3 +152,10 @@ def test_a_command_without_a_git_stage_is_left_to_the_search_executor():
     result, _ = _run("grep -rn TODO src", EDIT)
     assert isinstance(result, ParseFailure)
     assert result.reason == "not_git"
+
+
+def test_the_ledger_is_rendered_for_git_commands_only():
+    assert is_git_command("git status")
+    assert is_git_command("cd /testbed && git add app.py")
+    assert not is_git_command("cat README.md")
+    assert not is_git_command("grep -rn digit .")

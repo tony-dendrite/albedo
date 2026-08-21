@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -9,6 +9,14 @@ from typing import Any
 import pyarrow.parquet as pq
 
 from ..shared.sampling import _SHARD_RE
+from ..shared.submit_protocol import (
+    CANONICAL_MARKER,
+    assign_submit,
+    has_native_submission,
+    keep_original_ids,
+    rewrite_messages,
+    stated_command,
+)
 from .prompt_remote import IM_END, IM_START, QWEN3_CHAT_TEMPLATE
 
 
@@ -18,6 +26,9 @@ class EvalSample:
     prompt: str
     target: str | None = None
     messages: list[dict[str, str]] | None = None
+    submit_marker: str = ""
+    submit_command: str = ""
+    rewrite_mode: str = ""
 
 
 def load_manifest_samples(
@@ -55,6 +66,54 @@ def _load_sample(
         enable_thinking=enable_thinking,
     )
     return EvalSample(sample_id=sample_id, prompt=prompt, target=target, messages=messages)
+
+
+def apply_submit_protocol(
+    samples: list[EvalSample],
+    *,
+    salt: str,
+    keep_original_ratio: float = 0.25,
+    tokenizer_path: str | Path | None = None,
+    enable_thinking: bool = True,
+) -> list[EvalSample]:
+    native_ids = [s.sample_id for s in samples if has_native_submission(s.messages or [])]
+    kept = keep_original_ids(native_ids, salt, keep_original_ratio)
+    out: list[EvalSample] = []
+    for sample in samples:
+        messages = sample.messages or [{"role": "user", "content": sample.prompt}]
+        if sample.sample_id in kept:
+            out.append(_original_submit(sample, messages, mode="original"))
+            continue
+        marker, command = assign_submit(sample.sample_id, salt)
+        rewritten, mode = rewrite_messages(messages, command)
+        if mode == "failed":
+            out.append(_original_submit(sample, messages, mode="failed"))
+            continue
+        out.append(
+            replace(
+                sample,
+                prompt=format_messages(
+                    rewritten, tokenizer_path=tokenizer_path, enable_thinking=enable_thinking
+                ),
+                messages=rewritten,
+                submit_marker=marker,
+                submit_command=command,
+                rewrite_mode=mode,
+            )
+        )
+    return out
+
+
+def _original_submit(
+    sample: EvalSample, messages: list[dict[str, str]], *, mode: str
+) -> EvalSample:
+    command = stated_command(messages)
+    return replace(
+        sample,
+        submit_marker=CANONICAL_MARKER if command else "",
+        submit_command=command,
+        rewrite_mode=mode,
+    )
 
 
 def _parse_sample_id(sample_id: str) -> tuple[str, int, int]:

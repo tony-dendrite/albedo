@@ -235,6 +235,9 @@ def test_multiturn_keeps_prompt_messages_on_first_turn(monkeypatch):
     async def _fake_observations(*_args, **_kwargs):
         return None
 
+    async def _fake_inject(_states):
+        return None
+
     request = SanityRunRequest(
         run_id="run",
         model_uri="model",
@@ -252,6 +255,7 @@ def test_multiturn_keeps_prompt_messages_on_first_turn(monkeypatch):
     dispatcher = D.SanityDispatcher(settings=SanitySettings(), repository=_FakeRepo())
     monkeypatch.setattr(dispatcher, "_run_remote_request", _fake_remote)
     monkeypatch.setattr(D, "_append_observations", _fake_observations)
+    monkeypatch.setattr(D, "_inject_microtasks", _fake_inject)
 
     asyncio.run(
         dispatcher._run_multiturn(
@@ -261,7 +265,10 @@ def test_multiturn_keeps_prompt_messages_on_first_turn(monkeypatch):
     )
 
     assert len(seen) == 2
-    assert seen[0].prompt_messages == request.prompt_messages
+    first = seen[0].prompt_messages[0]
+    assert first[0] == {"role": "system", "content": "reply with bash"}
+    assert first[1]["content"].startswith("task")
+    assert "## Submission" in first[1]["content"]
     assert seen[1].prompt_messages is None
 
 

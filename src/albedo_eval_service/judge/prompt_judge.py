@@ -32,10 +32,17 @@ verifies by reading. The task appearing to succeed, confident prose, or an edit 
 NEVER satisfies a verification question — only the visible check does.
 - "reference:action": the edit or command itself is visible in a CANDIDATE OUTPUT block. A THOUGHT \
 describing a change without the command performing it earns 0.
-- "reference:continuity": both milestones the question names must each be visible in a CANDIDATE OUTPUT \
-block, in the stated order (e.g. the site diagnosed is the site later edited; a check runs after \
-the edit it verifies). A milestone that is only planned, implied, or asserted in prose — without \
-the matching visible command and observation — earns 0.
+- "reference:grounding": the question names an action and the thing that action depends on. \
+The action must be visible in a CANDIDATE OUTPUT block. The thing depended on must be visible \
+EARLIER in the same trajectory, in either a CANDIDATE OUTPUT block or an ENVIRONMENT OBSERVATION \
+— a value the environment printed is valid grounding. Earn a 1 when both are present and the \
+depended-on one comes first. Earn a 0 when the action rests on a value, path or symbol appearing \
+nowhere earlier, however plausible it looks. Never require the command to have succeeded.
+- "reference:claims": the question names an assertion the candidate made about the code. \
+Earn a 1 when content displayed earlier in the candidate's own blocks or observations backs that \
+assertion. Earn a 0 when the assertion rests only on confident prose, on the task statement, or \
+on the conversation that preceded the candidate's first turn. Judge whether it is BACKED, never \
+whether it is correct.
 - "reference:economy": judge by the OUTPUT ECONOMY rules below.
 - "behavior:<name>": the named working habit is visible in the candidate's own CANDIDATE \
 OUTPUT blocks; judge strictly by the question text — the tag only names which habit family the \

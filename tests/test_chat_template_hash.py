@@ -66,6 +66,7 @@ def test_process_model_rejects_template_before_full_download(tmp_path, monkeypat
         "list_files",
         lambda ref: [
             "config.json",
+            "generation_config.json",
             "tokenizer_config.json",
             "tokenizer.json",
             "preprocessor_config.json",

@@ -6,7 +6,7 @@ from collections.abc import Callable
 from difflib import SequenceMatcher
 
 from ...shared.json_extract import extract_json
-from ...simulator.prompt_simulator import COMPLETE_MARKER
+from ...shared.submit_protocol import ANY_MARKER_RE
 
 QUESTION_FLOOR_FRACTION = 0.22
 GENERIC_HYGIENE_QUESTION_LIMIT = 3
@@ -17,7 +17,14 @@ def question_floor(n: int) -> int:
     return max(1, round(n * QUESTION_FLOOR_FRACTION))
 
 
-VALID_TAGS = ("explore", "verification", "action", "continuity", "economy")
+VALID_TAGS = (
+    "explore",
+    "verification",
+    "action",
+    "grounding",
+    "claims",
+    "economy",
+)
 
 _FENCE_RE = re.compile(r"```[^\n]*\n(.*?)(?:```|\Z)", re.DOTALL)
 
@@ -100,7 +107,7 @@ def sample_phase(messages: list[dict[str, str]] | None) -> str:
     return "cold" if len(turns) <= 2 else "pre_edit"
 
 
-HORIZON_STRATA = (8, 12, 16)
+HORIZON_STRATA = (12, 16)
 
 
 def assign_horizons(samples) -> dict[str, int]:
@@ -117,9 +124,13 @@ def assign_horizons(samples) -> dict[str, int]:
 # rubric tags carry no requires label; map them so the gate and label caps keep working
 RUBRIC_TAG_REQUIRES = {
     "action": "action",
-    "continuity": "action",
     "verification": "action",
     "explore": "read",
+    # both classes are answerable by a trajectory that never edits, which is most of the
+    # population, so they must not be labelled "action": apply_measurement_gate zeroes action
+    # questions when the candidate made no edit, deleting exactly what these classes supply
+    "grounding": "neutral",
+    "claims": "neutral",
     "economy": "neutral",
 }
 
@@ -132,7 +143,12 @@ _EDIT_COMMAND_RE = re.compile(
     r"|(?<![-=0-9&])>>?\s*(?!/dev/|/tmp/)(?=[\w.~/-]*[./])[\w./~-]"
     r"|tee\s+(?!/dev/|/tmp/)[\w./~-]|cat\s*>>?\s*(?!/dev/|/tmp/)[\w./~-]"
     r"|str_replace|git\s+apply|patch\s+-p|applypatch|>{7}\s*REPLACE"
-    r"|cp\s+[\w./-]+\s+(?!/dev/|/tmp/)[\w./-]+|mv\s+[\w./-]+\s+(?!/dev/|/tmp/)[\w./-]+",
+    r"|cp\s+[\w./-]+\s+(?!/dev/|/tmp/)[\w./-]+|mv\s+[\w./-]+\s+(?!/dev/|/tmp/)[\w./-]+"
+    r"|open\s*\([^)]*['\"][wa]\+?['\"]"
+    r"|\.write_text\s*\(|\.write_bytes\s*\(|\.writelines\s*\("
+    r"|fileinput\.input\([^)]*inplace"
+    r"|shutil\.(?:copy|copyfile|copy2|move)\s*\(|os\.(?:replace|rename)\s*\("
+    r"|(?:perl|ruby)\s+-[a-zA-Z]*i\b",
 )
 
 
@@ -146,7 +162,7 @@ def _edited_in_turn(text: str) -> bool:
     return any(_EDIT_COMMAND_RE.search(cmd) for cmd in _EDIT_BLOCK_RE.findall(text or ""))
 
 
-_SUBMIT_RE = re.compile(re.escape(COMPLETE_MARKER))
+_SUBMIT_RE = ANY_MARKER_RE
 _UNFOLDED_AVOID_RE = re.compile(
     r"^\s*(?:does[^?]{0,60}\bavoid|is[^?]{0,60}\bfree of|does[^?]{0,60}\brefrain)", re.IGNORECASE
 )
@@ -237,22 +253,78 @@ def _is_muted(candidate_turn_texts: list[str]) -> bool:
     return prose < _MUTED_PROSE_WORDS_PER_TURN * len(candidate_turn_texts)
 
 
+GATE_MUTED_NOTE = (
+    "measurement gate: not scored — the candidate produced too little prose for a size-bound "
+    "question to mean anything."
+)
+GATE_NEGATIVE_NOTE = (
+    "measurement gate: not scored — a trajectory that took no action passes an avoidance "
+    "question for free, so it is withdrawn rather than credited."
+)
+GATE_NO_EDIT_NOTE = (
+    "measurement gate: forced to 0 — no repository edit was detected in the candidate's own "
+    "commands while the reference made one, so an action question cannot be credited."
+)
+
+
+def _note(explanations: dict[str, str] | None, qid: str | None, note: str) -> None:
+    """Append the gate's reason to a judge explanation so an overridden verdict stays readable.
+
+    Without this a gated answer is indistinguishable from a judge that contradicted itself: the
+    verdict says 0 while the explanation still argues the case for 1.
+    """
+    if explanations is None or qid is None:
+        return
+    existing = (explanations.get(qid) or "").rstrip()
+    explanations[qid] = f"{existing} [{note}]".strip()
+
+
 def apply_measurement_gate(
     answers: dict[str, str | None],
     questions: list[dict[str, str]],
     *,
     candidate_turn_texts: list[str],
     reference_made_edit: bool,
+    explanations: dict[str, str] | None = None,
 ) -> dict[str, str | None]:
+    """Withdraw or zero answers the trajectory cannot honestly support.
+
+    When explanations is supplied, every answer this changes gets the gate's reason appended to
+    its text, so the record says why a verdict differs from what the judge argued.
+    """
     gated = dict(answers)
     if _is_muted(candidate_turn_texts):
         for question in questions:
             qid = question.get("id")
             if qid in gated and is_measurement_bound_question(question.get("text", "")):
                 gated.pop(qid)
+                _note(explanations, qid, GATE_MUTED_NOTE)
     made_edit = trajectory_made_edit(candidate_turn_texts)
     if made_edit:
         return gated
+    final_is_read = bool(candidate_turn_texts) and not (
+        _edited_in_turn(candidate_turn_texts[-1])
+        or _SUBMIT_RE.search(candidate_turn_texts[-1] or "")
+    )
+    for question in questions:
+        qid = question.get("id")
+        if qid not in gated:
+            continue
+        text = question.get("text", "")
+        if (
+            question.get("requires") == "neutral"
+            and not is_measurement_bound_question(text)
+            and _NEGATIVE_QUESTION_RE.search(text)
+            and _ACTION_VERB_RE.search(text)
+        ):
+            gated.pop(qid)
+            _note(explanations, qid, GATE_NEGATIVE_NOTE)
+            continue
+        if reference_made_edit and final_is_read and (question.get("requires") == "action"):
+            if gated[qid] != "0":
+                _note(explanations, qid, GATE_NO_EDIT_NOTE)
+            gated[qid] = "0"
+    return gated
     final_is_read = bool(candidate_turn_texts) and not (
         _edited_in_turn(candidate_turn_texts[-1])
         or _SUBMIT_RE.search(candidate_turn_texts[-1] or "")

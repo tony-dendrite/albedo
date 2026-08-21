@@ -42,12 +42,17 @@ def test_category_prep_payload_carries_context_for_reference_anchoring():
     assert payload["total_sample_count"] == len(samples)
     horizons = assign_horizons(samples)
     for entry in payload["samples"]:
-        assert set(entry) == {"sample_id", "prompt", "messages", "assistant_turns"}
+        assert set(entry) == {
+            "sample_id",
+            "prompt",
+            "messages",
+            "assistant_turns",
+            "submit_marker",
+            "submit_command",
+        }
         assert entry["assistant_turns"] == horizons[entry["sample_id"]]
         assert entry["assistant_turns"] in HORIZON_STRATA
-    assert Counter(e["assistant_turns"] for e in payload["samples"]) == Counter(
-        {8: 2, 12: 2, 16: 2}
-    )
+    assert Counter(e["assistant_turns"] for e in payload["samples"]) == Counter({12: 3, 16: 3})
 
 
 def test_score_batch_payload_carries_both_outputs_no_index():

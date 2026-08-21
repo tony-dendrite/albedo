@@ -43,6 +43,7 @@ def test_repo_context_happy_path():
         "kind": "repo",
         "exact_output": None,
         "exact_returncode": None,
+        "state": "",
     }
 
 
@@ -56,6 +57,7 @@ def test_repo_context_returns_none_kind_on_failure():
         "kind": "none",
         "exact_output": None,
         "exact_returncode": None,
+        "state": "",
     }
 
 

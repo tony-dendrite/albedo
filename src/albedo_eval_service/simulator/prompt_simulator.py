@@ -111,5 +111,5 @@ def missing_command_output(fmt: str) -> str:
     return wrap(MISSING_COMMAND_MESSAGE, fmt, returncode=2)
 
 
-def reference_completion_observation(fmt: str) -> str:
-    return wrap(COMPLETE_MARKER, fmt)
+def reference_completion_observation(fmt: str, marker: str = "") -> str:
+    return wrap(marker or COMPLETE_MARKER, fmt)

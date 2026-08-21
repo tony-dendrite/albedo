@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass, field
 
@@ -23,14 +24,23 @@ _GREP_N = re.compile(r"^(grep|rg)\b(?=.*\s-\w*n)((?!\|).)*$")
 _SED_RANGE = re.compile(r"^sed\s+-n\s+'?(\d+),(\d+)p'?\s+(\S+)\s*$")
 _SED_INPLACE = re.compile(
     r"^sed\s+(?:-i|--in-place)\s+"
-    r"(?:'(?P<s1>[^']*)'|\"(?P<s2>[^\"]*)\")"
+    r"(?P<scripts>(?:-e\s+)?(?:'[^']*'|\"[^\"]*\")(?:\s+-e\s+(?:'[^']*'|\"[^\"]*\"))*)"
     r"\s+(?P<target>[^\s;&|]+)\s*$"
 )
+_SED_SCRIPT = re.compile(r"'([^']*)'|\"([^\"]*)\"")
 _SED_SUB_HEAD = re.compile(r"^(?:(?P<start>\d+)(?:,(?P<end>\d+))?)?s(?P<delim>[/|])")
 _SED_DELETE = re.compile(r"^(?P<start>\d+)(?:,(?P<end>\d+))?d$")
+_SED_PLACE = re.compile(r"^(?P<line>\d+)(?P<verb>[aic])(?P<rest>.+)$", re.S)
 _SED_BACKREF = re.compile(r"(?<!\\)&|\\[1-9]")
 
 _PATH_TOKEN = re.compile(r"[\w./~-]*[\w-]+\.[A-Za-z0-9_]+")
+_WRITE_TARGETS = (
+    re.compile(r"(?<![0-9])>>?\s*([^\s;&|<>]+)"),
+    re.compile(r"\btee\s+(?:-a\s+)?([^\s;&|]+)"),
+    re.compile(r"\bsed\s+(?:-i|--in-place)\b.*?([^\s;&|]+)\s*$", re.M),
+    re.compile(r"\bpatch\s+-p\d+\s+.*?([^\s;&|]+)"),
+    re.compile(r"open\(\s*['\"]([^'\"]+)['\"]\s*,\s*['\"][wa]"),
+)
 _EDIT_VERB = re.compile(
     r"sed\s+-i|\s>>?\s*[\w./~-]+|\btee\s+\S|apply_patch|\bpatch\s+-p|open\([^)]*['\"][wa]"
 )
@@ -50,7 +60,13 @@ class Overlay:
     content: dict[str, str] = field(default_factory=dict)
     created: set[str] = field(default_factory=set)
     dirty: set[str] = field(default_factory=set)
+    opaque: list[tuple[str | None, str]] = field(default_factory=list)
     git: GitState = field(default_factory=GitState)
+
+    def state(self, block: str, referenced: set[str]) -> str:
+        parts = [block]
+        parts += [cmd for path, cmd in self.opaque if path is None or path in referenced]
+        return hashlib.sha1("\n".join(parts).encode("utf-8", "replace")).hexdigest()
 
     def read(self, rel_path: str) -> str | None:
         return self.content.get(rel_path)
@@ -118,6 +134,13 @@ def _resolve(token: str, listing: set[str], index: dict[str, str]) -> str | None
     return None
 
 
+def _written_paths(body: str, listing: set[str], index: dict[str, str]) -> list[str] | None:
+    operands = [match.group(1) for pattern in _WRITE_TARGETS for match in pattern.finditer(body)]
+    if not operands:
+        return None
+    return [hit for token in operands if (hit := _resolve(token, listing, index)) is not None]
+
+
 def _target(command: str, listing: set[str], index: dict[str, str]) -> str | None:
     body = _CD_PREFIX.sub("", command.strip())
     for token in reversed([t for t in _PATH_TOKEN.findall(body) if "." in t]):
@@ -182,7 +205,10 @@ def _learn(
     command = _command_of(assistant_text)
     if not command:
         return
+    described = not overlay.git.unknown
     if apply_git(overlay, command, observation, sorted(listing), read_base, turn):
+        if described and overlay.git.unknown:
+            overlay.opaque.append((None, command))
         return
     if is_scaffold_truncated(observation):
         return
@@ -286,9 +312,19 @@ def _mark_opaque_edit(
     command = _command_of(text)
     if not command or not _EDIT_VERB.search(command):
         return
-    path = _target(command, listing, index)
-    if path is not None and path != skip:
-        overlay.forget(path)
+    written = _written_paths(_CD_PREFIX.sub("", command.strip()), listing, index)
+    if written is None:
+        paths = [path] if (path := _target(command, listing, index)) is not None else [None]
+    elif not written:
+        return
+    else:
+        paths = list(dict.fromkeys(written))
+    for path in paths:
+        if path == skip:
+            continue
+        if path is not None:
+            overlay.forget(path)
+        overlay.opaque.append((path, command))
 
 
 def _sed_unescape(text: str) -> str:
@@ -356,14 +392,12 @@ def _sed_apply(script: str, text: str) -> str | None:
         except re.error:
             return None
         body = _sed_unescape(replacement)
-        changed = False
         for number in range(bounds[0], bounds[1] + 1):
-            line = lines[number - 1]
             # a lambda so re never reinterprets backslashes in the replacement
-            fresh = regex.sub(lambda _: body, line, count=0 if flags == "g" else 1)
-            if fresh != line:
-                lines[number - 1], changed = fresh, True
-        return "\n".join(lines) + tail if changed else None
+            lines[number - 1] = regex.sub(
+                lambda _: body, lines[number - 1], count=0 if flags == "g" else 1
+            )
+        return "\n".join(lines) + tail
 
     if deleted := _SED_DELETE.match(script):
         bounds = _sed_bounds(deleted.group("start"), deleted.group("end"), len(lines))
@@ -372,7 +406,44 @@ def _sed_apply(script: str, text: str) -> str | None:
         del lines[bounds[0] - 1 : bounds[1]]
         return "\n".join(lines) + tail
 
+    if placed := _SED_PLACE.match(script):
+        bounds = _sed_bounds(placed.group("line"), None, len(lines))
+        if bounds is None:
+            return None
+        rest = placed.group("rest")
+        raw = rest[1:] if rest.startswith("\\") else rest.lstrip(" \t")
+        added = _sed_unescape(raw).split("\n")
+        verb, at = placed.group("verb"), bounds[0]
+        if verb == "a":
+            lines[at:at] = added
+        elif verb == "i":
+            lines[at - 1 : at - 1] = added
+        else:
+            lines[at - 1 : at] = added
+        return "\n".join(lines) + tail
+
     return None
+
+
+def _sed_scripts(script: str) -> list[str]:
+    return [piece.strip() for piece in script.split(";") if piece.strip()]
+
+
+def _sed_apply_all(scripts: list[str], text: str) -> str | None:
+    for script in scripts:
+        stepped = _sed_apply(script, text)
+        if stepped is None:
+            pieces = _sed_scripts(script)
+            if len(pieces) < 2:
+                return None
+            for piece in pieces:
+                stepped = _sed_apply(piece, text)
+                if stepped is None:
+                    return None
+                text = stepped
+            continue
+        text = stepped
+    return text
 
 
 def _apply_sed_edit(
@@ -391,10 +462,8 @@ def _apply_sed_edit(
         current = read_base(path)
     if current is None:
         return None
-    script = match.group("s1")
-    if script is None:
-        script = match.group("s2")
-    edited = _sed_apply(script, current)
+    scripts = [found[0] or found[1] for found in _SED_SCRIPT.findall(match.group("scripts"))]
+    edited = _sed_apply_all(scripts, current) if scripts else None
     if edited is None:
         return None
     overlay.know(path, edited or "\n")

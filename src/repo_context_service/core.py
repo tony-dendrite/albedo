@@ -33,7 +33,7 @@ from albedo_eval_service.shared.observation_format import (
     OPENHANDS_TRUNCATION_NOTICE,
     detect_format,
 )
-from albedo_eval_service.simulator.prompt_simulator import COMPLETE_MARKER
+from albedo_eval_service.shared.submit_protocol import ANY_MARKER_RE
 
 from .command_search import (
     ParseFailure,
@@ -48,6 +48,7 @@ from .git_sim import (
     GitMeta,
     explain_git,
     git_evidence,
+    is_git_command,
     ledger_block,
     run_git_chain,
 )
@@ -200,6 +201,7 @@ class GroundingContext:
     reason: str | None = None
     exact_output: str | None = None
     exact_returncode: int | None = None
+    state: str = ""
 
 
 class _NotFound(Exception):
@@ -488,16 +490,23 @@ class RepoContextService:
             _suffix_index(tuple(base)),
             lambda rel: self._read_snapshot_file(snapshot, rel),
         )
+        listing = overlay.listing(base)
+        command = _first_command(assistant_output)
         block, exact, returncode = self._build_repo_block(
             snapshot,
-            overlay.listing(base),
-            _first_command(assistant_output),
+            listing,
+            command,
             overlay,
             fmt,
             self.git_meta(snapshot, source, owner, repo, sha),
         )
+        present, missing = _referenced_paths(command, listing)
         return GroundingContext(
-            context=block, kind="repo", exact_output=exact, exact_returncode=returncode
+            context=block,
+            kind="repo",
+            exact_output=exact,
+            exact_returncode=returncode,
+            state=overlay.state(block, set(present) | set(missing)),
         )
 
     def _context_for(
@@ -521,7 +530,12 @@ class RepoContextService:
             logger.info(
                 "repo_context_fallback sample_id={} kind=trajectory reason={}", sample_id, reason
             )
-            return GroundingContext(context=block, kind="trajectory", reason=reason)
+            return GroundingContext(
+                context=block,
+                kind="trajectory",
+                reason=reason,
+                state=hashlib.sha1(block.encode("utf-8", "replace")).hexdigest(),
+            )
         logger.warning("repo_context_fallback sample_id={} kind=none reason={}", sample_id, reason)
         return GroundingContext(context=None, kind="none", reason=reason)
 
@@ -1047,7 +1061,8 @@ class RepoContextService:
         evidence = _truncate(
             git_evidence(cmd, overlay, read_base, listing, meta), self.settings.max_file_chars
         )
-        return hint + evidence + ledger_block(overlay.git)
+        ledger = ledger_block(overlay.git) if is_git_command(cmd) else ""
+        return hint + evidence + ledger
 
     def _file_text(self, snapshot_dir: Path, rel_path: str, overlay: Overlay) -> str | None:
         if overlay.is_dirty(rel_path):
@@ -1110,7 +1125,7 @@ class RepoContextService:
             observation = _content(turns[position + 1]).strip()
             if not observation:
                 continue
-            if COMPLETE_MARKER in command or COMPLETE_MARKER in observation:
+            if ANY_MARKER_RE.search(command) or ANY_MARKER_RE.search(observation):
                 continue
             pairs.append((command, observation))
             if len(pairs) >= self.settings.max_trajectory_pairs:

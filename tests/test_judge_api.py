@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
 from albedo_config import JudgeSettings
 from albedo_config.models import JUDGE_MODELS
+from albedo_eval_service.evaluator.reference.prompt_reference_split import (
+    REFERENCE_SPECIALISTS,
+)
 from albedo_eval_service.judge_api import (
+    Grounding,
     JudgeSample,
     ObservationSimulationService,
     QuestionPrepStore,
@@ -21,6 +28,7 @@ from albedo_eval_service.judge_api import (
     _role_violation,
     _score_samples,
     _simulation_transcript,
+    create_app,
 )
 from albedo_eval_service.judge_llm_client import JudgeLLMClient, JudgeRawResponse
 from albedo_eval_service.shared.observation_format import (
@@ -565,7 +573,11 @@ def test_scoring_regenerates_questions_when_async_prep_failed():
     records = asyncio.run(run())
 
     assert records[0]["scored"] is True
-    assert fake.complete_calls == 4
+    # the failed prep call, then a full regeneration: one reference trajectory, one call per
+    # reference specialist the reference supports, and one judge call. The fake reference edits
+    # nothing, so the edit-dependent classes are not called.
+    called = [s for s in REFERENCE_SPECIALISTS if not s.requires_reference_edit]
+    assert fake.complete_calls == 1 + 1 + len(called) + 1
 
 
 class _AnchorFakeClient:
@@ -641,27 +653,13 @@ def test_prepare_anchors_on_reference_and_filters_leaks():
     assert result.source["reference_model"] == "z-ai/glm-5.2"
     assert "REFERENCE STEP" in result.source["reference_trajectory"]
     assert all("the reference" not in q["text"].casefold() for q in result.questions)
-    behavior_tags = {
-        q["tag"]
-        for q in result.questions
-        if q["requires"] == "action" and q["tag"].startswith("behavior:")
-    }
-    assert behavior_tags == {
-        "behavior:precision_reads",
-        "behavior:issue_anchored_narrowing",
-        "behavior:convergence_and_orientation",
-    }
+    # zero-weight behavior tags are dropped at prep (question rebalance);
+    # only tags with a positive TAG_WEIGHTS entry may survive
+    from albedo_eval_service.judge_core import question_weight
 
-    behavior_tags = {
-        q["tag"]
-        for q in result.questions
-        if q["requires"] == "action" and q["tag"].startswith("behavior:")
-    }
-    assert behavior_tags == {
-        "behavior:precision_reads",
-        "behavior:issue_anchored_narrowing",
-        "behavior:convergence_and_orientation",
-    }
+    behavior_tags = {q["tag"] for q in result.questions if q["tag"].startswith("behavior:")}
+    assert behavior_tags <= {"behavior:anchored_edit"}
+    assert all(question_weight(q) > 0 for q in result.questions)
 
 
 def test_prepare_raises_when_reference_generation_and_reroll_both_fail():
@@ -754,7 +752,7 @@ def test_observation_simulation_uses_repo_context_when_available():
 
         async def context_for(self, sample_id, assistant_output, messages=None):
             self.calls.append((sample_id, assistant_output))
-            return self.block, None, None
+            return Grounding(self.block, None, None, "state")
 
     async def run(repo_context):
         client = SimClient()
@@ -956,7 +954,7 @@ def test_same_prompt_used_for_primary_and_fallback():
 
     class Ctx:
         async def context_for(self, sample_id, assistant_output, messages=None):
-            return "GROUNDING BLOCK", None, None
+            return Grounding("GROUNDING BLOCK", None, None, "state")
 
     client = Recorder()
     settings = JudgeSettings(
@@ -991,7 +989,7 @@ def test_repo_context_client_degrades_to_none_on_error():
     client = RepoContextClient(settings)
     try:
         result = asyncio.run(client.context_for("swe-zero/x:0:0", "```bash\nls\n```"))
-        assert result == (None, None, None)
+        assert result == Grounding(None, None, None, "")
     finally:
         asyncio.run(client.aclose())
 
@@ -1054,7 +1052,7 @@ def test_a_verified_empty_search_overrides_invented_matches():
 
     class EmptyRepoContext:
         async def context_for(self, sample_id, assistant_output, messages=None):
-            return "COMMAND OUTPUT — matched NOTHING", "", None
+            return Grounding("COMMAND OUTPUT — matched NOTHING", "", None, "state")
 
     service = ObservationSimulationService(
         JudgeSettings(simulation_model=""), InventsMatches(), EmptyRepoContext()
@@ -1072,3 +1070,198 @@ def test_a_verified_empty_search_overrides_invented_matches():
     )
     # the verified empty wins, and grep's own exit code survives the correction
     assert observation == "<returncode>1</returncode>\n<output>\n</output>"
+
+
+class _CountingSimulator:
+    def __init__(self, states: list[str]):
+        self.states = list(states)
+        self.calls = 0
+
+    async def complete(self, **kwargs):
+        self.calls += 1
+        return JudgeRawResponse(
+            model=kwargs["model"],
+            provider="fake",
+            raw=f"<returncode>0</returncode>\n<output>\ninvention {self.calls}\n</output>",
+        )
+
+
+class _StatefulRepoContext:
+    def __init__(self, states: list[str]):
+        self.states = list(states)
+
+    async def context_for(self, sample_id, assistant_output, messages=None):
+        return Grounding("BLOCK", None, None, self.states.pop(0))
+
+
+def _observe(service, command: str) -> str:
+    return asyncio.run(
+        service.simulate(
+            SimulateObservationRequest(
+                eval_run_id="run",
+                sample_id="mini-coder/x:0:0",
+                prompt="task",
+                messages=[{"role": "user", "content": "task"}],
+                assistant_output=f"```bash\n{command}\n```",
+            )
+        )
+    )
+
+
+def test_an_invented_observation_is_reused_while_the_repo_state_holds():
+    client = _CountingSimulator([])
+    service = ObservationSimulationService(
+        JudgeSettings(simulation_model=""), client, _StatefulRepoContext(["s0", "s0", "s0"])
+    )
+    first = _observe(service, "cat -A app.py")
+    second = _observe(service, "cat -A app.py")
+    third = _observe(service, "wc -l app.py")
+    assert first == second
+    assert third != first
+    assert client.calls == 2
+
+
+def test_an_edit_to_the_file_under_the_command_retires_the_memo():
+    client = _CountingSimulator([])
+    service = ObservationSimulationService(
+        JudgeSettings(simulation_model=""), client, _StatefulRepoContext(["s0", "s1"])
+    )
+    before = _observe(service, "cat -A app.py")
+    after = _observe(service, "cat -A app.py")
+    assert before != after
+    assert client.calls == 2
+
+
+def test_concurrent_askers_of_one_command_share_a_single_simulation():
+    client = _CountingSimulator([])
+    service = ObservationSimulationService(
+        JudgeSettings(simulation_model=""), client, _StatefulRepoContext(["s0", "s0", "s0"])
+    )
+
+    async def race():
+        return await asyncio.gather(
+            *[
+                service.simulate(
+                    SimulateObservationRequest(
+                        eval_run_id="run",
+                        sample_id="mini-coder/x:0:0",
+                        prompt="task",
+                        messages=[{"role": "user", "content": "task"}],
+                        assistant_output="```bash\ncat -A app.py\n```",
+                    )
+                )
+                for _ in range(3)
+            ]
+        )
+
+    observations = asyncio.run(race())
+    assert len(set(observations)) == 1
+    assert client.calls == 1
+
+
+def test_an_ungrounded_sample_is_never_memoised():
+    class NoRepoContext:
+        async def context_for(self, sample_id, assistant_output, messages=None):
+            return Grounding(None, None, None, "")
+
+    client = _CountingSimulator([])
+    service = ObservationSimulationService(
+        JudgeSettings(simulation_model=""), client, NoRepoContext()
+    )
+    assert _observe(service, "cat -A app.py") != _observe(service, "cat -A app.py")
+    assert client.calls == 2
+
+
+def test_the_judge_api_is_never_started_with_more_than_one_worker():
+    root = Path(__file__).resolve().parents[1]
+    tree = ast.parse((root / "src/albedo_eval_service/judge_api.py").read_text())
+    runs = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and ast.unparse(node.func).endswith("uvicorn.run")
+    ]
+    assert runs
+    for node in runs:
+        assert not any(keyword.arg == "workers" for keyword in node.keywords)
+    pm2 = (root / "pm2/ecosystem.judge-api.config.js").read_text()
+    for forbidden in ("instances", "exec_mode", "--workers"):
+        assert forbidden not in pm2
+
+
+def test_sota_king_and_challenger_share_one_observation_simulator():
+    app = create_app(JudgeSettings(_env_file=None, openrouter_api_key="k"))
+    with TestClient(app):
+        assert (
+            app.state.question_service.reference_service.simulator is app.state.observation_service
+        )
+
+
+def test_the_lazy_fallback_never_replaces_a_live_observation_simulator():
+    app = create_app(JudgeSettings(_env_file=None, openrouter_api_key="k"))
+    with TestClient(app) as client:
+        service = app.state.observation_service
+        client.get("/health")
+        assert app.state.observation_service is service
+
+
+def test_a_git_command_the_snapshot_can_compute_never_reaches_the_memo():
+    class ComputedGit:
+        async def context_for(self, sample_id, assistant_output, messages=None):
+            return Grounding("BLOCK", "M app.py", 0, "s0")
+
+    client = _CountingSimulator([])
+    service = ObservationSimulationService(
+        JudgeSettings(simulation_model=""), client, ComputedGit()
+    )
+    first = _observe(service, "git status --short")
+    second = _observe(service, "git status --short")
+    assert first == second == "<returncode>0</returncode>\n<output>\nM app.py\n</output>"
+    assert client.calls == 0
+    assert service._memo == {}
+
+
+def test_edit_dependent_specialists_are_called_only_when_the_reference_edited():
+    """The action class costs one evaluator call per sample; skip it on a read-only reference."""
+
+    class RecordingClient(FakeClient):
+        def __init__(self):
+            super().__init__(n_questions=8)
+            self.prompts: list[str] = []
+
+        async def complete(self, **kwargs):
+            self.prompts.append(kwargs["messages"][-1]["content"])
+            return await super().complete(**kwargs)
+
+    def classes_called(reference_made_edit: bool) -> set[str]:
+        settings = JudgeSettings(num_questions=3, sota_trajectory_turns=1)
+        fake = RecordingClient()
+        service = _reference_backed_service(settings, fake)
+        sample = JudgeSample(
+            sample_id="s1",
+            prompt="task",
+            previous_king_output="",
+            challenger_output="",
+            messages=_MESSAGES,
+        )
+        asyncio.run(
+            service._prepare_once(
+                sample,
+                "REFERENCE STEP 1:\nwork\n",
+                "ref-model",
+                reference_made_edit,
+            )
+        )
+        # each specialist prompt ends with its own class block, which names the class
+        return {
+            s.tag
+            for s in REFERENCE_SPECIALISTS
+            for prompt in fake.prompts
+            if f"YOUR CLASS: {s.name}" in prompt
+        }
+
+    edit_dependent = {s.tag for s in REFERENCE_SPECIALISTS if s.requires_reference_edit}
+    always = {s.tag for s in REFERENCE_SPECIALISTS} - edit_dependent
+    assert edit_dependent, "the skip has nothing to act on"
+
+    assert classes_called(True) == always | edit_dependent
+    assert classes_called(False) == always

@@ -2,21 +2,15 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
 from typing import Any
 
-from ..shared.budgets import (
-    RUBRIC_ECONOMY_CAP,
-    RUBRIC_LENGTH_BOUNDS,
-    RUBRIC_MAX_QUESTIONS,
-    RUBRIC_MIN_QUESTIONS,
-    RUBRIC_NEGATIVE_CAP,
-    RUBRIC_REFERENCE_TARGET,
-)
-from ..shared.questions import _FENCE_RE, VALID_TAGS, is_measurement_bound_question
-from .prompt_reference import (
-    REFERENCE_QUESTION_SYSTEM,
-    REFERENCE_QUESTION_USER,
+from ..shared.questions import _FENCE_RE, is_measurement_bound_question
+from .prompt_reference_split import (
     REFERENCE_SCORED_WINDOW_BLOCK,
+    REFERENCE_SKELETON,
+    SPECIALIST_BLOCK,
+    ReferenceSpecialist,
 )
 
 _WORKFLOW_HEAD_RE = re.compile(
@@ -152,101 +146,6 @@ def duplicate_economy_bounds(
     return duplicates
 
 
-def reference_question_schema() -> dict[str, Any]:
-    step = {
-        "type": "object",
-        "properties": {
-            "step": {"type": "integer"},
-            "text": {"type": "string"},
-            "already_done_in_conversation": {"type": "boolean"},
-            "demonstrated_by_reference": {"type": "boolean"},
-            "verdict": {"type": "string", "enum": ["demonstrated", "not_demonstrated"]},
-        },
-        "required": [
-            "step",
-            "text",
-            "already_done_in_conversation",
-            "demonstrated_by_reference",
-            "verdict",
-        ],
-        "additionalProperties": False,
-    }
-    question = {
-        "type": "object",
-        "properties": {
-            "step": {"type": "integer"},
-            "evidence": {"type": "string"},
-            "text": {"type": "string"},
-            "example_bad": {"type": "string"},
-            "tag": {"type": "string", "enum": list(VALID_TAGS)},
-        },
-        "required": ["step", "evidence", "text", "example_bad", "tag"],
-        "additionalProperties": False,
-    }
-    return {
-        "type": "object",
-        "properties": {
-            "ledger": {
-                "type": "object",
-                "properties": {
-                    "steps": {"type": "array", "items": step},
-                    "frontier_step": {"type": "integer"},
-                    "reference_finished": {"type": "boolean"},
-                    "focus": {"type": "string"},
-                },
-                "required": ["steps", "frontier_step", "reference_finished", "focus"],
-                "additionalProperties": False,
-            },
-            "questions": {
-                # the prompt itself allows 8-14 when the reference only diagnosed
-                "type": "array",
-                "minItems": 8,
-                "maxItems": RUBRIC_MAX_QUESTIONS,
-                "items": question,
-            },
-        },
-        "required": ["ledger", "questions"],
-        "additionalProperties": False,
-    }
-
-
-def build_reference_question_messages(
-    *,
-    task: str,
-    reference: str,
-    fmt: str,
-    prefix_turns: int,
-    candidate_turns: int,
-) -> list[dict[str, str]]:
-    system = REFERENCE_QUESTION_SYSTEM.format(
-        target=RUBRIC_REFERENCE_TARGET,
-        min_n=RUBRIC_MIN_QUESTIONS,
-        max_n=RUBRIC_MAX_QUESTIONS,
-        negative_cap=RUBRIC_NEGATIVE_CAP,
-        economy_cap=RUBRIC_ECONOMY_CAP,
-        bound_n=RUBRIC_LENGTH_BOUNDS,
-    )
-    window = REFERENCE_SCORED_WINDOW_BLOCK.format(
-        workflow_text=_workflow_text(task),
-        prefix_turns=prefix_turns,
-        candidate_turns=candidate_turns,
-        observation_format=fmt,
-        success_marker=_OBSERVATION_SUCCESS_MARKERS.get(
-            fmt, _OBSERVATION_SUCCESS_MARKERS["returncode"]
-        ),
-    )
-    user = REFERENCE_QUESTION_USER.format(
-        task=task.rstrip(),
-        reference=reference.rstrip(),
-        min_n=RUBRIC_MIN_QUESTIONS,
-        max_n=RUBRIC_MAX_QUESTIONS,
-        reference_measurements=_reference_measurements(reference),
-        scored_window=window,
-        bound_n=RUBRIC_LENGTH_BOUNDS,
-    )
-    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
-
-
 def format_reference_trajectory(turns: list[dict[str, Any]]) -> str:
     parts: list[str] = []
     step = 0
@@ -278,3 +177,173 @@ def filter_reference_leaks(
         else:
             kept.append(q)
     return kept
+
+
+SPAN_MIN_CHARS = 12
+SPAN_MAX_HITS = 3
+SPAN_DISTINCT_CHARS = 24
+
+_SMART = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"', "–": "-", "—": "-"})
+_SPAN_TRIM = re.compile(r"^[\s'\"`]+|[\s'\"`]*(?:\.{3}|…)?[\s'\"`]*$")
+
+
+def normalise_span(text: str) -> str:
+    """Fold the differences a model introduces when copying, and nothing else.
+
+    Whitespace runs collapse because the reference is rendered with indentation and models
+    reflow what they quote; smart quotes and dashes revert because models typographically
+    "improve" it. Case is preserved: code is case-sensitive, and folding it would let a
+    near-miss match.
+    """
+    return " ".join(unicodedata.normalize("NFKC", text).translate(_SMART).split())
+
+
+def span_of(question: dict[str, str]) -> str:
+    """The quoted part of an evidence field, without its class prefix or decoration."""
+    _, sep, span = (question.get("evidence") or "").partition(": ")
+    return normalise_span(_SPAN_TRIM.sub("", span)) if sep else ""
+
+
+def span_verdict(question: dict[str, str], reference: str, task: str) -> tuple[bool, str]:
+    """Whether a question's evidence really cites the reference, and why not when it does not."""
+    span = span_of(question)
+    if not span:
+        return False, "no_span"
+    if len(span) < SPAN_MIN_CHARS:
+        return False, "span_too_short"
+    if span in normalise_span(task):
+        return False, "span_from_task"
+    hits = normalise_span(reference).count(span)
+    if hits == 0:
+        return False, "span_not_in_reference"
+    if hits == 1 or (hits <= SPAN_MAX_HITS and len(span) >= SPAN_DISTINCT_CHARS):
+        return True, "ok"
+    return False, "span_not_distinctive"
+
+
+def verify_spans(
+    questions: list[dict[str, str]],
+    reference: str,
+    task: str,
+    *,
+    enforce: bool,
+    discards: list[dict[str, str]] | None = None,
+) -> tuple[list[dict[str, str]], dict[str, int]]:
+    """Check every question's evidence against the reference it claims to quote.
+
+    With enforce=False nothing is dropped and only the tally is returned, which is how the
+    thresholds above get calibrated on real batches before they start deleting questions.
+    """
+    kept: list[dict[str, str]] = []
+    counts: dict[str, int] = {}
+    for question in questions:
+        ok, reason = span_verdict(question, reference, task)
+        counts[reason] = counts.get(reason, 0) + 1
+        if ok or not enforce:
+            kept.append(question)
+            continue
+        if discards is not None:
+            discards.append(
+                {
+                    "stage": "verify_spans",
+                    "reason": reason,
+                    "text": question.get("text", ""),
+                    "origin": "content",
+                    "detail": f"evidence span not usable: {span_of(question)[:120]!r}",
+                }
+            )
+    return kept, counts
+
+
+# ---------------------------------------------------------------- split rubric assembly
+
+
+def build_reference_specialist_messages(
+    *,
+    specialist: ReferenceSpecialist,
+    task: str,
+    reference: str,
+    fmt: str,
+    prefix_turns: int,
+    candidate_turns: int,
+) -> list[dict[str, str]]:
+    """One specialist's call, laid out so the costly part of the prompt can be cached.
+
+    The skeleton, the task and the reference are identical across every specialist, and the
+    class block is appended last, so all calls share a long common prefix.
+    """
+    window = REFERENCE_SCORED_WINDOW_BLOCK.format(
+        workflow_text=_workflow_text(task),
+        prefix_turns=prefix_turns,
+        candidate_turns=candidate_turns,
+        observation_format=fmt,
+        success_marker=_OBSERVATION_SUCCESS_MARKERS.get(
+            fmt, _OBSERVATION_SUCCESS_MARKERS["returncode"]
+        ),
+    )
+    user = (
+        "TASK — the system prompt the agent operates under, and the conversation so far. Read for "
+        "comprehension; it is not a source of facts about the solution:\n"
+        f"------\n{task.rstrip()}\n------\n\n"
+        "REFERENCE TRAJECTORY — one strong agent's continuation from the same point under the same "
+        "turn limit. It evidences what is achievable; its route is not a standard:\n"
+        f"------\n{reference.rstrip()}\n------\n\n"
+        f"{window}\n\n"
+        + SPECIALIST_BLOCK.format(
+            name=specialist.name,
+            tag=specialist.tag,
+            extract=specialist.extract,
+            subject=specialist.subject,
+            predicate=specialist.predicate,
+            exclude=specialist.exclude,
+            lo=specialist.lo,
+            hi=specialist.hi,
+        )
+    )
+    return [
+        {"role": "system", "content": REFERENCE_SKELETON},
+        {"role": "user", "content": user},
+    ]
+
+
+def reference_specialist_schema(specialist: ReferenceSpecialist) -> dict[str, Any]:
+    """Force one specialist's output shape: its own tag, and no more than its own ceiling."""
+    fact = {
+        "type": "object",
+        "properties": {
+            "statement": {"type": "string"},
+            "span": {"type": "string"},
+            "established": {"type": "boolean"},
+            "in_prefix": {"type": "boolean"},
+        },
+        "required": ["statement", "span", "established", "in_prefix"],
+        "additionalProperties": False,
+    }
+    question = {
+        "type": "object",
+        "properties": {
+            "step": {"type": "integer"},
+            "evidence": {"type": "string"},
+            "text": {"type": "string"},
+            "example_bad": {"type": "string"},
+            "tag": {"type": "string", "enum": [specialist.tag]},
+        },
+        "required": ["step", "evidence", "text", "example_bad", "tag"],
+        "additionalProperties": False,
+    }
+    return {
+        "type": "object",
+        "properties": {
+            "facts": {"type": "array", "items": fact},
+            # every class may legitimately find nothing, so the floor is zero here and the
+            # checklist-wide floor is applied after the specialists are merged
+            "questions": {
+                "type": "array",
+                "minItems": 0,
+                "maxItems": specialist.hi,
+                "items": question,
+            },
+        },
+        "required": ["facts", "questions"],
+        "additionalProperties": False,
+    }

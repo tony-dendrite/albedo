@@ -24,6 +24,7 @@ class RepoContextResponse(BaseModel):
     kind: str
     exact_output: str | None = None
     exact_returncode: int | None = None
+    state: str = ""
 
 
 class PrefetchRequest(BaseModel):
@@ -82,6 +83,7 @@ def create_app(
             kind=result.kind,
             exact_output=result.exact_output,
             exact_returncode=result.exact_returncode,
+            state=result.state,
         )
 
     return app

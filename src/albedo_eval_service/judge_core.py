@@ -19,6 +19,35 @@ from .shared.observation_format import (
 
 CHALLENGER_WIN_MARGIN = 0.025
 
+# per-question weights by tag; zero-weight behavior tags are dropped at question prep
+TAG_WEIGHTS: dict[str, float] = {
+    "reference:explore": 2.0,
+    "reference:action": 2.0,
+    "reference:claims": 1.5,
+    "reference:economy": 1.0,
+    "reference:grounding": 0.5,
+    "reference:verification": 0.5,
+    "behavior:anchored_edit": 0.25,
+}
+AMPUTATED_THINKING_MULTIPLIER = 0.5
+
+
+def question_weight(question: dict[str, str]) -> float:
+    tag = str(question.get("tag") or "")
+    # reference-anchored questions are the trusted family: unlisted ones keep a
+    # conservative weight; anything else (behavior/style) is dropped unless listed
+    default = 0.5 if tag.startswith("reference:") else 0.0
+    return TAG_WEIGHTS.get(tag, default)
+
+
+def amputated_thinking(document: str) -> bool:
+    """True when most candidate turns open with an empty </think> (the overfit fingerprint)."""
+    blocks = [m.group(1) for m in _CANDIDATE_BLOCK_RE.finditer(document or "")]
+    if not blocks:
+        return False
+    return sum(b.lstrip().startswith("</think>") for b in blocks) / len(blocks) > 0.5
+
+
 NO_VISIBLE_OUTPUT = "[no visible output]"
 _COMMAND_FENCE_RE = re.compile(r"```(?:bash|sh|shell)[ \t]*\n", re.IGNORECASE)
 
@@ -144,6 +173,16 @@ def parse_answers(
 def judge_yes_rate(
     answers: dict[str, str | None], questions: list[dict[str, str]] | None = None
 ) -> float | None:
+    if questions:
+        weights = {q["id"]: question_weight(q) for q in questions}
+        num = sum(
+            weights.get(qid, 0.0) * _ANSWER_TO_BIT[v]
+            for qid, v in answers.items()
+            if v in _ANSWER_TO_BIT
+        )
+        den = sum(weights.get(qid, 0.0) for qid, v in answers.items() if v in _ANSWER_TO_BIT)
+        if den:
+            return round(num / den, 6)
     bits = [_ANSWER_TO_BIT[v] for v in answers.values() if v in _ANSWER_TO_BIT]
     return round(mean(bits), 6) if bits else None
 

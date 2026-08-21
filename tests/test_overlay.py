@@ -102,13 +102,94 @@ def test_an_in_place_sed_is_applied_rather_than_forgotten():
 
 def test_an_in_place_sed_we_cannot_model_still_marks_the_file_dirty():
     for command in (
-        f"sed -i -e 's/SIZE = 1/SIZE = 2/' -e 's/TAIL = 2/TAIL = 3/' {PATH}",  # two expressions
-        f"sed -i 's/SIZE = 1/SIZE = 2/;s/TAIL = 2/TAIL = 3/' {PATH}",  # two expressions, one arg
         f"sed -i '/SIZE/d' {PATH}",  # pattern address
         f"sed -i 's/SIZE = 1/&& extra/' {PATH}",  # backreference in the replacement
-        f"sed -i 's/absent from the file/x/' {PATH}",  # our copy disagrees with the agent's
         f"sed -i 's/SIZE = 1/SIZE = 2/' {PATH} && sed -i '3d' {PATH}",  # two edits, one path
     ):
         overlay = _sed(command)
         assert overlay.is_dirty(PATH), command
         assert overlay.read(PATH) is None, command
+
+
+def test_several_expressions_in_one_sed_are_applied_in_order():
+    both = SOURCE.replace("SIZE = 1", "SIZE = 2").replace("TAIL = 2", "TAIL = 3")
+    for command in (
+        f"sed -i -e 's/SIZE = 1/SIZE = 2/' -e 's/TAIL = 2/TAIL = 3/' {PATH}",
+        f"sed -i 's/SIZE = 1/SIZE = 2/;s/TAIL = 2/TAIL = 3/' {PATH}",
+    ):
+        overlay = _sed(command)
+        assert not overlay.is_dirty(PATH), command
+        assert overlay.read(PATH) == both, command
+
+
+def test_a_sed_that_matches_nothing_leaves_the_file_known_and_unchanged():
+    overlay = _sed(f"sed -i 's/absent from the file/x/' {PATH}")
+    assert not overlay.is_dirty(PATH)
+    assert overlay.read(PATH) == SOURCE
+
+
+def test_sed_can_append_insert_and_change_a_line():
+    appended = _sed(f"sed -i '2a\\    return None' {PATH}")
+    assert appended.read(PATH) == SOURCE.replace(
+        "    return tuple(x for x in o)\n", "    return tuple(x for x in o)\n    return None\n"
+    )
+
+    inserted = _sed(f"sed -i '1i\\import os' {PATH}")
+    assert inserted.read(PATH) == "import os\n" + SOURCE
+
+    changed = _sed(f"sed -i '3c\\SIZE = 7' {PATH}")
+    assert changed.read(PATH) == SOURCE.replace("SIZE = 1", "SIZE = 7")
+
+
+def test_a_write_that_lands_outside_the_repo_keeps_the_file_it_reads_grounded():
+    overlay = _sed(f"head -n 2 {PATH} > /tmp/part1.py")
+    assert not overlay.is_dirty(PATH)
+    assert overlay.opaque == []
+
+    redirected = _sed(f"grep SIZE {PATH} > report.txt")
+    assert not redirected.is_dirty(PATH)
+
+
+def test_a_git_read_redirected_out_of_the_repo_keeps_its_source_grounded():
+    outward = _sed(f"git diff {PATH} > /tmp/d.txt")
+    assert not outward.is_dirty(PATH)
+    assert outward.opaque == []
+
+    inward = _sed(f"git show HEAD:{PATH} > {PATH}")
+    assert inward.is_dirty(PATH)
+
+
+def test_git_checkout_takes_back_a_sed_the_overlay_had_applied():
+    done = "<returncode>0</returncode>\n<output>\n</output>"
+    messages = [
+        {"role": "assistant", "content": f"```bash\nsed -i 's/SIZE = 1/SIZE = 9/' {PATH}\n```"},
+        {"role": "user", "content": done},
+        {"role": "assistant", "content": f"```bash\ngit checkout -- {PATH}\n```"},
+        {"role": "user", "content": done},
+    ]
+    overlay = build_overlay(messages, [PATH], {"big.py": PATH}, lambda rel: SOURCE)
+    assert overlay.read(PATH) == SOURCE
+    assert not overlay.is_dirty(PATH)
+
+
+def _git(*commands):
+    done = "<returncode>0</returncode>\n<output>\n</output>"
+    messages = []
+    for command in commands:
+        messages.append({"role": "assistant", "content": f"```bash\n{command}\n```"})
+        messages.append({"role": "user", "content": done})
+    return build_overlay(messages, [PATH], {"big.py": PATH}, lambda rel: SOURCE)
+
+
+def test_a_git_command_we_cannot_model_retires_every_key():
+    clean = _git(f"cat {PATH}").state("BLOCK", {PATH})
+    for command in ("git rm big.py", "git clean -fd", "git apply fix.patch", "git merge feature"):
+        overlay = _git(command)
+        assert overlay.git.unknown, command
+        assert overlay.opaque == [(None, command)], command
+        assert overlay.state("BLOCK", {PATH}) != clean, command
+
+
+def test_an_unmodelled_git_command_is_recorded_once_not_on_every_later_step():
+    overlay = _git("git rm big.py", f"cat {PATH}", "git status")
+    assert overlay.opaque == [(None, "git rm big.py")]

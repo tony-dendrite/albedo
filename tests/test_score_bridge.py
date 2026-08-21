@@ -98,9 +98,9 @@ def test_websocket_scorer_starts_category_prep_over_bridge(monkeypatch):
             "sample_id": "data/train-00000.parquet:0:0",
             "prompt": "Prompt",
             "messages": None,
-            "assistant_turns": RemoteSettings(
-                scoring_backend="websocket"
-            ).trajectory_assistant_turns,
+            "assistant_turns": 12,
+            "submit_marker": "",
+            "submit_command": "",
         }
     ]
 

@@ -21,11 +21,36 @@ from albedo_eval_service.shared.observation_format import (
     valid_output,
     wrap,
 )
+from albedo_eval_service.shared.submit_protocol import (
+    assign_submit,
+    command_for,
+    is_exact_submission,
+    rewrite_messages,
+)
 from albedo_eval_service.simulator.prompt_simulator import (
     COMPLETE_MARKER,
     simulation_system_prompt,
 )
 from sanity_remote.models import SanityRunRequest
+from sanity_service.chain import (
+    _EDIT_RE as _CHAIN_EDIT_RE,
+)
+from sanity_service.chain import (
+    SUBMIT_NUDGE,
+    amputated_thinking,
+    empty_submit_count,
+    followup_instruction,
+    generate_followup,
+    generate_microtask,
+    generate_nudge,
+    generate_rejection,
+    malformed_structure,
+    micro_instruction,
+    micro_target_touched,
+    segment_has_edit,
+    should_reject,
+    unread_edited_files,
+)
 from sanity_service.dataset import sample_prompts
 from sanity_service.db import ClaimedPreEval, PreEvalRepository
 from sanity_service.judge_panel import make_client
@@ -49,6 +74,14 @@ class _TrajectoryState:
     stopped: bool = False
     error: str = ""
     heuristic_reason: str = ""
+    segment: str = "context"
+    segment_index: int = 0
+    submit_clause: str = ""
+    submit_marker: str = ""
+    rewrite_mode: str = ""
+    micro: dict[str, str] | None = None
+    nudged_at: int = 0
+    submits: list[dict[str, Any]] = dataclasses.field(default_factory=list)
 
 
 class SanityDispatcher:
@@ -194,6 +227,7 @@ class SanityDispatcher:
         request = claimed.request
         turn_count = max(1, int(request.assistant_turns))
         states = _trajectory_states(request)
+        await _inject_microtasks(states)
         kept_warm = False
         try:
             for turn_index in range(turn_count):
@@ -231,6 +265,9 @@ class SanityDispatcher:
                 if turn_index == turn_count - 1:
                     break
                 await _append_observations(active, str(claimed.attempt_id), turn_index + 1)
+                if turn_index >= turn_count - 8 and (turn_count - turn_index) % 4 == 0:
+                    await _inject_submit_nudges(active)
+            _run_chain_checks(states, turn_count)
             await run_tail_check(states)
             return _trajectory_result(str(claimed.attempt_id), states, turn_count)
         finally:
@@ -529,18 +566,122 @@ def _trajectory_states(request: SanityRunRequest) -> list[_TrajectoryState]:
             }
             for message in messages
         ]
+        sample_id = sample_ids[i] if i < len(sample_ids) else f"sanity-sample:{i}"
+        marker, command = assign_submit(sample_id, salt=str(request.run_id))
+        rewritten, rewrite_mode = rewrite_messages(clean_messages, command)
+        if rewrite_mode == "failed":
+            logger.warning(
+                "[sanity-dispatch] submit rewrite failed sample={} command={}", sample_id, command
+            )
+            marker = COMPLETE_MARKER
+            command = command_for(COMPLETE_MARKER, "gitdiff")
         states.append(
             _TrajectoryState(
-                sample_id=sample_ids[i] if i < len(sample_ids) else f"sanity-sample:{i}",
+                sample_id=sample_id,
                 prompt=prompt,
-                messages=clean_messages,
+                messages=rewritten,
                 turns=[
                     {"role": message["role"], "content": message["content"]}
-                    for message in clean_messages
+                    for message in rewritten
                 ],
+                submit_clause=command,
+                submit_marker=marker,
+                rewrite_mode=rewrite_mode,
             )
         )
     return states
+
+
+async def _inject_microtasks(states: list[_TrajectoryState]) -> None:
+    settings = get_judge_settings()
+    client = make_client(settings)
+    try:
+        for state in states:
+            clause = state.submit_clause
+            try:
+                state.micro = await generate_microtask(client, settings, state, clause)
+            except Exception as exc:
+                state.error = f"microtask_generation_failed: {exc}"
+                continue
+            instruction = micro_instruction(state.micro, clause)
+            state.segment = "micro"
+            state.messages.append({"role": "user", "content": instruction})
+            state.turns.append(
+                {"role": "user", "content": instruction, "segment": "micro", "injected": True}
+            )
+            state.prompt = format_messages(
+                state.messages,
+                tokenizer_path=str(_CANONICAL_TOKENIZER_PATH),
+                enable_thinking=True,
+            )
+            logger.info(
+                "[sanity-dispatch] microtask sample={} marker={} rewrite={} target={}:{}",
+                state.sample_id,
+                state.submit_marker,
+                state.rewrite_mode,
+                state.micro.get("file"),
+                state.micro.get("function"),
+            )
+    finally:
+        await client.aclose()
+
+
+async def _inject_submit_nudges(states: list[_TrajectoryState]) -> None:
+    pending = [s for s in states if not (s.error or s.heuristic_reason or s.submits)]
+    if not pending:
+        return
+    settings = get_judge_settings()
+    client = make_client(settings)
+    try:
+        nudges = await asyncio.gather(
+            *[generate_nudge(client, settings, s.submit_clause) for s in pending],
+            return_exceptions=True,
+        )
+    finally:
+        await client.aclose()
+    for state, nudge in zip(pending, nudges, strict=False):
+        if isinstance(nudge, Exception):
+            nudge = SUBMIT_NUDGE.format(clause=state.submit_clause)
+        state.messages.append({"role": "user", "content": nudge})
+        state.turns.append(
+            {"role": "user", "content": nudge, "segment": state.segment, "injected": True}
+        )
+        state.prompt = format_messages(
+            state.messages, tokenizer_path=str(_CANONICAL_TOKENIZER_PATH), enable_thinking=True
+        )
+        state.nudged_at = state.nudged_at or len([t for t in state.turns if t.get("score_target")])
+        logger.info("[sanity-dispatch] submit nudge injected sample={}", state.sample_id)
+
+
+def _run_chain_checks(states: list[_TrajectoryState], turn_count: int) -> None:
+    healthy = [s for s in states if not s.error]
+    if healthy and not any(not sub.get("post_nudge") for s in healthy for sub in s.submits):
+        for state in healthy:
+            state.heuristic_reason = "chain: no unprompted submission on any sample"
+        logger.warning("[sanity-dispatch] no unprompted submission across chain samples")
+    for state in states:
+        if state.error or state.heuristic_reason:
+            continue
+        if not state.submits and not any(
+            _CHAIN_EDIT_RE.search(str(t.get("content") or ""))
+            for t in state.turns
+            if t.get("role") == "assistant"
+        ):
+            state.heuristic_reason = f"chain: no submission and no edits in {turn_count} turns"
+        elif state.micro and not micro_target_touched(state, state.micro):
+            state.heuristic_reason = (
+                f"chain: micro-task submitted without touching {state.micro.get('file')}"
+            )
+        elif empty_submit_count(state, state.submit_marker) >= 2:
+            state.heuristic_reason = "chain: repeated submissions without doing any work"
+        elif amputated_thinking(state):
+            state.heuristic_reason = "chain: reasoning absent on majority of turns"
+        elif unread := unread_edited_files(state):
+            state.heuristic_reason = f"chain: files edited without being read first: {unread[:3]}"
+        elif malformed_structure(state):
+            state.heuristic_reason = f"chain: {malformed_structure(state)}"
+        if state.heuristic_reason:
+            logger.warning("[sanity-dispatch] {} {}", state.sample_id, state.heuristic_reason)
 
 
 def _apply_turn_result(states: list[_TrajectoryState], result: dict[str, Any]) -> None:
@@ -551,7 +692,14 @@ def _apply_turn_result(states: list[_TrajectoryState], result: dict[str, Any]) -
             state.error = "missing_generation_response"
             continue
         response = str(responses[i] or "")
-        state.turns.append({"role": "assistant", "content": response, "score_target": True})
+        state.turns.append(
+            {
+                "role": "assistant",
+                "content": response,
+                "score_target": True,
+                "segment": state.segment,
+            }
+        )
         if i < len(heuristics) and not bool(heuristics[i].get("passed", True)):
             reason = str(heuristics[i].get("reason") or "heuristic failed")
             if not _has_bash_command(response):
@@ -562,21 +710,20 @@ async def _append_observations(
     states: list[_TrajectoryState], eval_run_id: str, turn_index: int
 ) -> None:
     active = []
+    submitted = []
     for state in states:
         if state.error or state.stopped:
             continue
         assistant_output = str(state.turns[-1].get("content") or "")
-        if _assistant_submitted(assistant_output):
-            observation = _completion_observation(state.sample_id, state.messages)
-            _append_observation(state, observation)
-            state.stopped = True
+        if is_exact_submission(assistant_output, state.submit_clause):
+            submitted.append((state, assistant_output))
         elif not _has_bash_command(assistant_output):
             _append_observation(
                 state, _missing_command_observation(state.sample_id, state.messages)
             )
         else:
             active.append((state, assistant_output))
-    if not active:
+    if not active and not submitted:
         return
 
     settings = get_judge_settings()
@@ -597,6 +744,16 @@ async def _append_observations(
             ],
             return_exceptions=True,
         )
+        rejected = {id(s) for s, _ in submitted if should_reject(s)}
+        followups = await asyncio.gather(
+            *[
+                (generate_rejection if id(state) in rejected else generate_followup)(
+                    client, settings, state, assistant_output
+                )
+                for state, assistant_output in submitted
+            ],
+            return_exceptions=True,
+        )
     finally:
         await client.aclose()
 
@@ -610,10 +767,63 @@ async def _append_observations(
             tokenizer_path=str(_CANONICAL_TOKENIZER_PATH),
             enable_thinking=True,
         )
+    for (state, assistant_output), followup in zip(submitted, followups, strict=False):
+        text = "" if isinstance(followup, Exception) else str(followup)
+        if id(state) in rejected and text:
+            _reject_submission(state, assistant_output, text, turn_index=turn_index)
+        else:
+            _advance_segment(state, assistant_output, text, turn_index=turn_index)
     logger.info(
-        "[sanity-dispatch] simulated observations turn={} samples={}",
+        "[sanity-dispatch] simulated observations turn={} samples={} submits={}",
         turn_index,
         len(active),
+        len(submitted),
+    )
+
+
+def _reject_submission(
+    state: _TrajectoryState, assistant_output: str, rejection: str, *, turn_index: int
+) -> None:
+    state.submits.append(
+        {
+            "turn": turn_index,
+            "segment": state.segment,
+            "rejected": True,
+            "format_ok": state.submit_clause.split("&&")[0].strip() in assistant_output,
+            "has_edit": segment_has_edit(state, state.segment),
+        }
+    )
+    _append_observation(state, rejection)
+    state.turns[-1].update(injected=True)
+    state.turns[-1].pop("environment_observation", None)
+    state.prompt = format_messages(
+        state.messages, tokenizer_path=str(_CANONICAL_TOKENIZER_PATH), enable_thinking=True
+    )
+
+
+def _advance_segment(
+    state: _TrajectoryState, assistant_output: str, followup: str, *, turn_index: int
+) -> None:
+    state.submits.append(
+        {
+            "turn": turn_index,
+            "segment": state.segment,
+            "format_ok": state.submit_clause.split("&&")[0].strip() in assistant_output,
+            "post_nudge": bool(state.nudged_at) and turn_index > state.nudged_at,
+            "has_edit": segment_has_edit(state, state.segment),
+        }
+    )
+    first = state.segment == "micro"
+    state.segment_index += not first
+    state.segment = "real" if first else f"followup_{state.segment_index}"
+    instruction = followup_instruction(followup, state.submit_clause, first=first)
+    _append_observation(state, instruction)
+    state.turns[-1].update(segment=state.segment, injected=True)
+    state.turns[-1].pop("environment_observation", None)
+    state.prompt = format_messages(
+        state.messages,
+        tokenizer_path=str(_CANONICAL_TOKENIZER_PATH),
+        enable_thinking=True,
     )
 
 
@@ -754,10 +964,6 @@ def _evaluator_provider(settings: JudgeSettings) -> dict[str, Any]:
         block["order"] = order
         block["allow_fallbacks"] = False
     return block
-
-
-def _assistant_submitted(output: str) -> bool:
-    return COMPLETE_MARKER in output
 
 
 def _has_bash_command(output: str) -> bool:

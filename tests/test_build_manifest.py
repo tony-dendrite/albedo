@@ -103,7 +103,7 @@ def test_build_meta_dict_strips_rows_meta_and_aggregates(tmp_path):
         "languages": {"python": 3},
     }
     assert meta["unique_instances"] == 3
-    assert [p[0] for p in meta["sampling"]["phases"]] == ["pre_edit", "at_edit", "cold"]
+    assert [p[0] for p in meta["sampling"]["phases"]] == ["cold", "pre_edit", "at_edit"]
     assert [f[0] for f in meta["sampling"]["families"]] == ["pr", "lm", "combine", "mechanical"]
 
 

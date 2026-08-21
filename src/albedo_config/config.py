@@ -111,6 +111,7 @@ class JudgeSettings(BaseSettings):
     repo_context_url: str = ""
     repo_context_timeout_seconds: float = 20.0
     slack_error_webhook_url: str = ""
+    reference_enforce_spans: bool = False
 
 
 @lru_cache
@@ -182,6 +183,7 @@ class RemoteSettings(BaseSettings):
     max_new_tokens: int = 16384
     generation_result_timeout_seconds: float = 900.0
     trajectory_assistant_turns: int = 8
+    submit_keep_original_ratio: float = 0.25
     temperature: float = 0.0
     top_p: float = 1.0
     max_model_len: int | None = None
@@ -438,6 +440,7 @@ class ModelValidationSettings(BaseSettings):
     LEASE_SECONDS: int = Field(600, validation_alias=AliasChoices("ALBEDO_HV_LEASE_S"))
     HEARTBEAT_S: float = Field(30.0, validation_alias=AliasChoices("ALBEDO_HV_HEARTBEAT_S"))
     MAX_ATTEMPTS: int = Field(5, validation_alias=AliasChoices("ALBEDO_HV_MAX_ATTEMPTS"))
+    PREEVAL_MAX_FAILS: int = Field(3, validation_alias=AliasChoices("ALBEDO_HV_MAX_FAILS"))
 
     REQUIRED_FILES: ClassVar[tuple[str, ...]] = (
         "config.json",

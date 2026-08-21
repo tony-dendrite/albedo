@@ -417,6 +417,30 @@ async def model_hash_holder(
         )
 
 
+_STRIKE_EXCLUDED_CODES = (
+    "hotkey_sanity_blocked",
+    "hotkey_duplicate_blocked",
+    "hotkey_already_validated",
+    "hotkey_preeval_blocked",
+)
+
+
+async def hotkey_preeval_fail_count(pool: asyncpg.Pool, hotkey: str) -> int:
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            """
+            SELECT count(*)
+            FROM model_submissions
+            WHERE hotkey = $1
+              AND state = 'TERMINAL_INVALID'
+              AND fault_class = 'MINER_FAULT'
+              AND fault_code <> ALL($2::text[])
+            """,
+            hotkey,
+            list(_STRIKE_EXCLUDED_CODES),
+        )
+
+
 async def hotkey_duplicate_block_reason(pool: asyncpg.Pool, hotkey: str) -> str | None:
     async with pool.acquire() as conn:
         return await conn.fetchval(

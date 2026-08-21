@@ -56,6 +56,13 @@ def _infra(code: str, msg: str) -> Outcome:
     return Outcome("failed", "INFRA_FAULT", code, msg, True, {})
 
 
+def _ban_suffix(fails: int, max_fails: int) -> str:
+    left = max(0, max_fails - fails)
+    if left > 0:
+        return f" — hotkey has {left} attempt(s) left before ban"
+    return " — hotkey has 0 attempts left and is now banned from further submissions"
+
+
 _NOT_FOUND_MARKERS = (
     "not found",
     "404",
@@ -258,6 +265,9 @@ async def _finalize(pool, attempt, outcome: Outcome) -> None:
         )
         log.warning("infra fault [{}] {} → {}", outcome.fault_code, attempt["model_uri"], new_state)
     else:
+        if outcome.fault_code != "duplicate":
+            fails = await db.hotkey_preeval_fail_count(pool, attempt["hotkey"]) + 1
+            outcome.fault_message += _ban_suffix(fails, config.PREEVAL_MAX_FAILS)
         digest = attempt["model_uri"].partition("@")[2]
         fault_doc = {
             "model_uri": attempt["model_uri"],
@@ -337,6 +347,24 @@ async def run() -> None:
                     result_summary={"hotkey": attempt["hotkey"], "duplicate_reason": dup_reason},
                 )
                 log.info("skip — hotkey duplicate-blocked: {}", attempt["hotkey"][:10])
+                continue
+
+            fails = await db.hotkey_preeval_fail_count(pool, attempt["hotkey"])
+            if fails >= config.PREEVAL_MAX_FAILS:
+                await db.mark_failed(
+                    pool,
+                    attempt["id"],
+                    fault_class="MINER_FAULT",
+                    fault_code="hotkey_preeval_blocked",
+                    fault_message=(
+                        f"hotkey is blocked — failed preeval validation {fails} times "
+                        f"(limit {config.PREEVAL_MAX_FAILS})"
+                    ),
+                    result_summary={"hotkey": attempt["hotkey"], "preeval_fail_count": fails},
+                )
+                log.info(
+                    "skip — hotkey preeval-blocked ({} fails): {}", fails, attempt["hotkey"][:10]
+                )
                 continue
 
             if await db.hotkey_validated(pool, attempt["hotkey"]):

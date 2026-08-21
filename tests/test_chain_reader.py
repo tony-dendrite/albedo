@@ -22,7 +22,7 @@ def _reveal(payload: str) -> str:
 
 
 class FakeSubtensor:
-    def query_map(self, module, name, params):
+    def query_map(self, module, name, params, **kwargs):
         assert (module, name) == ("Commitments", "RevealedCommitments")
         return [
             ("hk-good", [(_reveal("v7|alice/model|sha256:" + "a" * 64), 100)]),

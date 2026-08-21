@@ -284,6 +284,8 @@ def _category_prep_payload(
                 "prompt": sample.prompt,
                 "messages": sample.messages,
                 "assistant_turns": horizons.get(sample.sample_id, assistant_turns),
+                "submit_marker": sample.submit_marker,
+                "submit_command": sample.submit_command,
             }
             for sample in samples
         ],

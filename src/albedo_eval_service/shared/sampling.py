@@ -10,7 +10,7 @@ _SHARD_RE = re.compile(r"^(?:[A-Za-z0-9_][A-Za-z0-9_.-]*/)?data/train-[A-Za-z0-9
 
 SAMPLING_ALGO = "multi-source-manifest-sample-v1"
 
-STEP_TRIM: list[tuple[str, int]] = [("pre_edit", 45), ("at_edit", 35), ("cold", 20)]
+STEP_TRIM: list[tuple[str, int]] = [("cold", 65), ("pre_edit", 15), ("at_edit", 20)]
 FAMILY_MIX: list[tuple[str, int]] = [("pr", 50), ("lm", 15), ("combine", 10), ("mechanical", 25)]
 REPO_CAP = 2
 MAX_PREFIX_CHARS = 54_000

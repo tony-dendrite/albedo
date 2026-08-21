@@ -44,6 +44,7 @@ def test_fetch_skips_complete_files(tmp_path, monkeypatch):
     payload = b"weights"
     spec = _spec("model.safetensors", payload)
     _install(tmp_path, spec, payload)
+    monkeypatch.setattr(_fastdl, "_resolve_signed_url", lambda url, headers: url)
     monkeypatch.setattr(_fastdl, "plan_shards", lambda *a, **k: [spec])
 
     def boom(*a, **k):
@@ -57,6 +58,7 @@ def test_fetch_redownloads_wrong_size_or_bad_sidecar(tmp_path, monkeypatch):
     payload = b"weights"
     spec = _spec("model.safetensors", payload)
     (tmp_path / spec.name).write_bytes(b"trunc")
+    monkeypatch.setattr(_fastdl, "_resolve_signed_url", lambda url, headers: url)
     monkeypatch.setattr(_fastdl, "plan_shards", lambda *a, **k: [spec])
     fetched = []
 
@@ -74,6 +76,7 @@ def test_fetch_redownloads_wrong_size_or_bad_sidecar(tmp_path, monkeypatch):
 def test_fetch_retries_then_succeeds_on_sha_mismatch(tmp_path, monkeypatch):
     payload = b"weights"
     spec = _spec("model.safetensors", payload)
+    monkeypatch.setattr(_fastdl, "_resolve_signed_url", lambda url, headers: url)
     monkeypatch.setattr(_fastdl, "plan_shards", lambda *a, **k: [spec])
     monkeypatch.setattr(_fastdl, "RETRY_BACKOFF_S", 0.0)
     calls = []
@@ -92,6 +95,7 @@ def test_fetch_retries_then_succeeds_on_sha_mismatch(tmp_path, monkeypatch):
 def test_fetch_raises_after_file_retries(tmp_path, monkeypatch):
     payload = b"weights"
     spec = _spec("model.safetensors", payload)
+    monkeypatch.setattr(_fastdl, "_resolve_signed_url", lambda url, headers: url)
     monkeypatch.setattr(_fastdl, "plan_shards", lambda *a, **k: [spec])
     monkeypatch.setattr(_fastdl, "FILE_RETRIES", 2)
     monkeypatch.setattr(_fastdl, "RETRY_BACKOFF_S", 0.0)

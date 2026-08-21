@@ -115,6 +115,12 @@ def _split_args(plan: GitPlan, value_flags: frozenset[str] = frozenset()) -> Non
 
 _RETURNCODE = re.compile(r"<returncode>\s*(-?\d+)\s*</returncode>")
 _GIT_HEAD = re.compile(r"(?:^|[;&|(]\s*|&&\s*)(?:\w+=\S+\s+)*(?:sudo\s+|env\s+)?git\s")
+
+
+def is_git_command(command: str) -> bool:
+    return bool(_GIT_HEAD.search(command or ""))
+
+
 _CD_ONLY = re.compile(r"^cd\s+[^\s&;|]+$")
 _GIT_SUB = re.compile(
     r"\bgit\s+(?:(?:-C|-c|--git-dir|--work-tree)\s+\S+\s+|--no-pager\s+)*([a-z][a-z-]*)"

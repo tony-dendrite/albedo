@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import random
 import re
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NamedTuple
 from uuid import uuid4
 
 import httpx
@@ -24,12 +27,13 @@ from .evaluator.behavior.questions import (
     build_behavior_messages,
     filter_behavior_questions,
 )
+from .evaluator.reference.prompt_reference_split import REFERENCE_SPECIALISTS
 from .evaluator.reference.questions import (
-    build_reference_question_messages,
-    duplicate_economy_bounds,
+    build_reference_specialist_messages,
     filter_reference_leaks,
     format_reference_trajectory,
-    reference_question_schema,
+    reference_specialist_schema,
+    verify_spans,
 )
 from .evaluator.shared.budgets import RUBRIC_MAX_QUESTIONS
 from .evaluator.shared.questions import (
@@ -43,11 +47,14 @@ from .evaluator.shared.questions import (
     trajectory_made_edit,
 )
 from .judge_core import (
+    AMPUTATED_THINKING_MULTIPLIER,
     aggregate_scores,
+    amputated_thinking,
     answer_schema,
     build_judge_messages,
     judge_yes_rate,
     parse_answers,
+    question_weight,
     response_score,
 )
 from .judge_llm_client import JudgeLLMClient
@@ -75,6 +82,7 @@ from .shared.observation_format import (
     with_body,
     wrap,
 )
+from .shared.submit_protocol import is_exact_submission
 from .simulator.prompt_simulator import (
     COMPLETE_MARKER,
     COMPUTED_BLOCK_MARKER,
@@ -91,6 +99,14 @@ class QuestionPrepSample(BaseModel):
     sample_index: int = 0
     messages: list[dict[str, str]] | None = None
     assistant_turns: int = 0
+    submit_marker: str = ""
+    submit_command: str = ""
+
+
+def _sample_submitted(sample: QuestionPrepSample, text: str) -> bool:
+    if sample.submit_command:
+        return is_exact_submission(text, sample.submit_command)
+    return COMPLETE_MARKER in text
 
 
 class QuestionPrepRequest(BaseModel):
@@ -114,6 +130,8 @@ class JudgeSample(BaseModel):
     sample_index: int = 0
     messages: list[dict[str, str]] | None = None
     assistant_turns: int = 0
+    submit_marker: str = ""
+    submit_command: str = ""
 
 
 class ScoreBatchRequest(BaseModel):
@@ -184,6 +202,7 @@ def _simulation_provider(settings: JudgeSettings) -> dict[str, Any] | None:
 
 
 _REROLL_WINDOW_TURNS = 5
+_MEMO_MAX_ENTRIES = 8192
 
 
 class ReferenceTrajectoryService:
@@ -275,12 +294,12 @@ class ReferenceTrajectoryService:
             text = response.raw.strip()
             turns.append({"role": "assistant", "content": text, "score_target": True})
             last = turn_index == turn_count - 1
-            if COMPLETE_MARKER in text:
+            if _sample_submitted(sample, text):
                 if not last:
                     turns.append(
                         {
                             "role": "user",
-                            "content": reference_completion_observation(fmt),
+                            "content": reference_completion_observation(fmt, sample.submit_marker),
                             "environment_observation": True,
                         }
                     )
@@ -447,42 +466,6 @@ class QuestionService:
                 for question in survivors
             )
 
-        def _reference_call():
-            _rejected = _reject_logger("content_batch_rejected", "content")
-
-            def _reference_accept(raw: str) -> bool:
-                attempt_discards: list[dict[str, str]] = []
-                questions, _ok = parse_questions(
-                    raw, n_generic, discards=attempt_discards, origin="content"
-                )
-                questions = filter_reference_leaks(questions, discards=attempt_discards)
-                accepted = len(questions) >= generic_floor
-                if not accepted and _rejected(
-                    f"{len(questions)} well-formed questions parsed, needed >= {generic_floor}"
-                ):
-                    _record_rejected_attempt(attempt_discards, questions, "content")
-                return accepted
-
-            messages = build_reference_question_messages(
-                task=sample.prompt,
-                reference=reference,
-                fmt=detect_format(sample.sample_id, prefix),
-                prefix_turns=sum(1 for m in prefix or [] if m.get("role") == "assistant"),
-                candidate_turns=getattr(sample, "assistant_turns", 0)
-                or self.settings.sota_trajectory_turns,
-            )
-
-            return self.client.complete(
-                purpose="questions",
-                model=self.settings.evaluator_model,
-                messages=messages,
-                temperature=self.settings.temperature,
-                max_tokens=self.settings.question_max_tokens,
-                provider=_evaluator_provider(self.settings),
-                response_schema=reference_question_schema(),
-                accept=_reference_accept,
-            )
-
         def _behavior_call(index: int):
             _rejected = _reject_logger("behavior_batch_rejected", "behavior")
 
@@ -517,15 +500,92 @@ class QuestionService:
                 accept=_behavior_accept,
             )
 
-        calls = [_reference_call()] + ([_behavior_call(i) for i in range(3)] if do_behavior else [])
+        weighted_parts = [
+            i
+            for i, part in enumerate(BEHAVIOR_PHASES[phase].parts)
+            if question_weight({"tag": f"behavior:{part.name}"}) > 0
+        ]
+        behavior_calls = [_behavior_call(i) for i in weighted_parts] if do_behavior else []
+
+        def _specialist_call(specialist):
+            _rejected = _reject_logger("content_batch_rejected", f"content:{specialist.name}")
+
+            def _accept(raw: str) -> bool:
+                # a class with no established, required facts is entitled to return nothing, so
+                # the only failure worth a retry is output this cannot be read at all
+                try:
+                    parse_questions(raw, specialist.hi, origin=f"content:{specialist.name}")
+                except Exception as exc:
+                    _rejected(f"{specialist.name}: unreadable output: {exc}")
+                    return False
+                return True
+
+            return self.client.complete(
+                purpose="questions",
+                model=self.settings.evaluator_model,
+                messages=build_reference_specialist_messages(
+                    specialist=specialist,
+                    task=sample.prompt,
+                    reference=reference,
+                    fmt=detect_format(sample.sample_id, prefix),
+                    prefix_turns=sum(1 for m in prefix or [] if m.get("role") == "assistant"),
+                    candidate_turns=getattr(sample, "assistant_turns", 0)
+                    or self.settings.sota_trajectory_turns,
+                ),
+                temperature=self.settings.temperature,
+                max_tokens=self.settings.question_max_tokens,
+                provider=_evaluator_provider(self.settings),
+                response_schema=reference_specialist_schema(specialist),
+                accept=_accept,
+            )
+
+        # a class that only has facts to work from once the reference edited something is not
+        # called against a read-only reference: its own rules would have it emit nothing, and
+        # anything it did emit could not be answered YES by the reference itself
+        specialists = [
+            s for s in REFERENCE_SPECIALISTS if reference_made_edit or not s.requires_reference_edit
+        ]
+        reference_calls = [_specialist_call(s) for s in specialists]
+        calls = reference_calls + behavior_calls
         responses = await asyncio.gather(*calls)
-        response = responses[0]
         for r in responses:
             if r.error:
                 raise QuestionScoringUnavailable(r.error)
+        # every specialist runs against the same evaluator and provider pin, so any of them
+        # names the source of the checklist as a whole
+        first_reference_response = responses[0]
 
+        # each class is parsed on its own so a question's tag names the writer that produced it,
+        # but the per-call caps in parse_questions must not apply five times over — the merged
+        # list is put back through the same parser once, which dedupes and caps across the union
+        merged: list[dict[str, str]] = []
+        per_class: dict[str, int] = {}
+        for specialist, raw in zip(specialists, responses[: len(reference_calls)]):
+            qs, _ = parse_questions(
+                raw.raw,
+                specialist.hi,
+                discards=discarded,
+                origin=f"content:{specialist.name}",
+            )
+            per_class[specialist.tag] = len(qs)
+            merged.extend(qs)
+        logger.info(
+            "reference_specialists sample_id={} per_class={} skipped={} merged={}",
+            sample.sample_id,
+            per_class,
+            [s.tag for s in REFERENCE_SPECIALISTS if s not in specialists],
+            len(merged),
+        )
         reference_qs, _ok = parse_questions(
-            responses[0].raw, n_generic, discards=discarded, origin="content"
+            json.dumps({"questions": merged}), n_generic, discards=discarded, origin="content"
+        )
+
+        reference_qs, span_counts = verify_spans(
+            reference_qs,
+            reference,
+            sample.prompt or "",
+            enforce=self.settings.reference_enforce_spans,
+            discards=discarded,
         )
 
         for q in reference_qs:
@@ -569,26 +629,21 @@ class QuestionService:
             reference_qs = kept_qs
             discarded.extend(dropped_qs)
         behavior_qs: list[dict[str, str]] = []
-        for index, r in enumerate(responses[1:]):
+        for index, r in enumerate(responses[len(reference_calls) :]):
             qs, _ = parse_questions(r.raw, BEHAVIOR_K, discards=discarded, origin="behavior")
-            part_name = BEHAVIOR_PHASES[phase].parts[index].name
+            part_name = BEHAVIOR_PHASES[phase].parts[weighted_parts[index]].name
             for q in qs:
                 q["tag"] = f"behavior:{part_name}"
             behavior_qs.extend(qs)
         behavior_qs = filter_behavior_questions(behavior_qs, context_text, discards=discarded)
         for q in behavior_qs:
             q["requires"] = "action"
+        behavior_qs = [q for q in behavior_qs if question_weight(q) > 0]
         questions = behavior_qs + reference_qs
-        economy_duplicates: list[dict[str, str]] = []
-        try:
-            economy_duplicates = duplicate_economy_bounds(questions, reference)
-            questions = questions + economy_duplicates
-        except Exception:
-            economy_duplicates = []
         for position, question in enumerate(questions, start=1):
             question["id"] = f"q_{position:02d}"
         source: dict[str, object] = {
-            "provider": response.provider,
+            "provider": first_reference_response.provider,
             "model": self.settings.evaluator_model,
             "n_questions": len(questions),
             "question_mode": "sota_anchored",
@@ -596,8 +651,8 @@ class QuestionService:
             "behavior_questions_kept": len(behavior_qs),
             "reference_made_edit": reference_made_edit,
             "enforcement_drops": drops,
+            "span_check": span_counts,
             "reference_trajectory": reference,
-            "economy_duplicate_bounds_added": len(economy_duplicates),
             "discarded_questions": discarded,
         }
         if reference_model:
@@ -645,6 +700,13 @@ class QuestionService:
         return kept, dropped, record.get("yes_rate")
 
 
+class Grounding(NamedTuple):
+    context: str | None
+    exact_output: str | None
+    exact_returncode: int | None
+    state: str
+
+
 class RepoContextClient:
     def __init__(self, settings: JudgeSettings):
         self._client = httpx.AsyncClient(
@@ -655,7 +717,7 @@ class RepoContextClient:
 
     async def context_for(
         self, sample_id: str, assistant_output: str, messages: list[dict[str, str]] | None = None
-    ) -> tuple[str | None, str | None, int | None]:
+    ) -> Grounding:
         try:
             response = await self._client.post(
                 "/repo-context",
@@ -670,10 +732,12 @@ class RepoContextClient:
             context = body.get("context")
             exact = body.get("exact_output")
             returncode = body.get("exact_returncode")
-            return (
+            state = body.get("state")
+            return Grounding(
                 context if isinstance(context, str) and context else None,
                 exact if isinstance(exact, str) else None,
                 returncode if isinstance(returncode, int) else None,
+                state if isinstance(state, str) else "",
             )
         except Exception as exc:
             now = time.monotonic()
@@ -684,7 +748,7 @@ class RepoContextClient:
                     sample_id,
                     f"{type(exc).__name__}: {exc}",
                 )
-            return None, None, None
+            return Grounding(None, None, None, "")
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -700,6 +764,36 @@ class ObservationSimulationService:
         self.settings = settings
         self.client = client
         self.repo_context = repo_context
+        self._memo: dict[str, str] = {}
+        self._inflight: dict[str, asyncio.Task[str]] = {}
+
+    def _remember(self, key: str, observation: str) -> None:
+        self._memo[key] = observation
+        while len(self._memo) > _MEMO_MAX_ENTRIES:
+            self._memo.pop(next(iter(self._memo)))
+
+    async def _observe(
+        self,
+        key: str,
+        produce: Callable[[], Awaitable[str]],
+    ) -> str:
+        """Answer from the per-state store, or produce once and share that one answer.
+
+        Concurrent callers on the same key await the same task rather than each asking the
+        model: the check and the insert happen without an await between them, so one event
+        loop needs no lock. `shield` keeps a cancelled waiter from killing the shared task.
+        """
+        stored = self._memo.get(key)
+        if stored is not None:
+            return stored
+        task = self._inflight.get(key)
+        if task is None:
+            task = asyncio.create_task(produce())
+            self._inflight[key] = task
+            task.add_done_callback(lambda _: self._inflight.pop(key, None))
+        observation = await asyncio.shield(task)
+        self._remember(key, observation)
+        return observation
 
     async def _retry_for_output(
         self,
@@ -742,6 +836,7 @@ class ObservationSimulationService:
         return candidate if recovered else observation
 
     async def simulate(self, request: SimulateObservationRequest) -> str:
+        """Produce the environment's answer to the assistant's command."""
         command = first_bash_block(request.assistant_output)
         fmt = detect_format(request.sample_id, request.messages)
         if not command:
@@ -763,11 +858,15 @@ class ObservationSimulationService:
                 command[:80],
             )
             return wrap(body, fmt, returncode=returncode)
-        context_block, exact_output, exact_returncode = None, None, None
+        resolved = Grounding(None, None, None, "")
         if self.repo_context is not None:
-            context_block, exact_output, exact_returncode = await self.repo_context.context_for(
+            resolved = await self.repo_context.context_for(
                 request.sample_id, request.assistant_output, request.messages
             )
+        context_block = resolved.context
+        exact_output = resolved.exact_output
+        exact_returncode = resolved.exact_returncode
+        state = resolved.state
         computed_git = exact_output is not None and exact_returncode is not None
         if (exact_output or computed_git) and fmt == RETURNCODE:
             observation = wrap(exact_output, fmt, returncode=exact_returncode or 0)
@@ -779,6 +878,29 @@ class ObservationSimulationService:
                 len(observation),
             )
             return observation
+        if not state:
+            return await self._simulate_uncached(
+                request, command, fmt, context_block, exact_output, exact_returncode
+            )
+        key = hashlib.sha1(
+            "\0".join((request.sample_id, fmt, state, command)).encode("utf-8", "replace")
+        ).hexdigest()
+        return await self._observe(
+            key,
+            lambda: self._simulate_uncached(
+                request, command, fmt, context_block, exact_output, exact_returncode
+            ),
+        )
+
+    async def _simulate_uncached(
+        self,
+        request: SimulateObservationRequest,
+        command: str,
+        fmt: str,
+        context_block: str | None,
+        exact_output: str | None,
+        exact_returncode: int | None = None,
+    ) -> str:
         computed = bool(context_block) and context_block.lstrip().startswith(COMPUTED_BLOCK_MARKER)
         transcript = (
             f"$ {command}"
@@ -1533,6 +1655,12 @@ async def _score_samples(
         )
         king_score = response_score(king_answers, questions)
         chal_score = response_score(chal_answers, questions)
+        king_amputated = amputated_thinking(sample.previous_king_output)
+        chal_amputated = amputated_thinking(sample.challenger_output)
+        if king_amputated and king_score is not None:
+            king_score = round(king_score * AMPUTATED_THINKING_MULTIPLIER, 6)
+        if chal_amputated and chal_score is not None:
+            chal_score = round(chal_score * AMPUTATED_THINKING_MULTIPLIER, 6)
         king_ok = all(r["parse_ok"] for r in king_recs) and king_score is not None
         chal_ok = all(r["parse_ok"] for r in chal_recs) and chal_score is not None
         scored = king_ok and chal_ok
@@ -1554,6 +1682,8 @@ async def _score_samples(
         return {
             "sample_id": sample.sample_id,
             "questions": questions,
+            "king_amputated_thinking": king_amputated,
+            "chal_amputated_thinking": chal_amputated,
             "king_score": king_score,
             "challenger_score": chal_score,
             "judge_results": king_recs + chal_recs,
