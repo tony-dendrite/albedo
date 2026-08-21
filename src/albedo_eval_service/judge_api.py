@@ -1444,6 +1444,7 @@ def _corrupted_side(
     side: str,
     questions: list[dict[str, str]],
     judge_models: list[str],
+    reason: str,
 ) -> tuple[dict[str, dict[str, str | None]], list[dict[str, Any]]]:
     per_judge_answers: dict[str, dict[str, str | None]] = {
         model: {q["id"]: "0" for q in questions} for model in judge_models
@@ -1454,11 +1455,12 @@ def _corrupted_side(
             "judge_model": model,
             "provider": None,
             "answers": per_judge_answers[model],
-            "explanations": {},
+            "explanations": {q["id"]: reason for q in questions},
             "yes_rate": judge_yes_rate(per_judge_answers[model], questions),
             "parse_ok": True,
             "error": None,
             "corrupted": True,
+            "corruption_reason": reason,
         }
         for model in judge_models
     ]
@@ -1618,7 +1620,10 @@ async def _score_samples(
         async def _side(side: str, response_text: str):
             if is_truncated(response_text):
                 return _corrupted_side(
-                    side=side, questions=questions, judge_models=request.judge_models
+                    side=side,
+                    questions=questions,
+                    judge_models=request.judge_models,
+                    reason="output truncated mid-generation",
                 )
             leak = reserved_token_leak(response_text)
             if leak:
@@ -1630,7 +1635,10 @@ async def _score_samples(
                     leak,
                 )
                 return _corrupted_side(
-                    side=side, questions=questions, judge_models=request.judge_models
+                    side=side,
+                    questions=questions,
+                    judge_models=request.judge_models,
+                    reason=f"reserved template token in output: {leak}",
                 )
             looping = loop_verdict_for_document(response_text)
             if looping.looped:
