@@ -61,7 +61,7 @@ class RecordingGenerator:
         return [
             GenerationResult(
                 sample_id=sample.sample_id,
-                text=f"{sample.prompt}{suffix}\n```bash\nls\n```",
+                text=f"{sample.sample_id}{suffix}\n```bash\nls\n```",
             )
             for sample in samples
         ]
@@ -208,11 +208,11 @@ def test_remote_worker_loads_parquet_and_runs_paired_generation(tmp_path, monkey
     assert [event["batch_id"] for event in scoring_events] == ["score-0001", "score-0002"]
     assert {call["side"] for call in calls if "gpu_ids" in call} == {"previous_king", "challenger"}
     generate_calls = [call for call in calls if "sample_ids" in call]
-    assert [call["side"] for call in generate_calls].count("previous_king") == 12
-    assert [call["side"] for call in generate_calls].count("challenger") == 12
+    assert [call["side"] for call in generate_calls].count("previous_king") == 16
+    assert [call["side"] for call in generate_calls].count("challenger") == 16
     king_calls = [call for call in generate_calls if call["side"] == "previous_king"]
-    assert all(len(call["sample_ids"]) == 2 for call in king_calls[:8])
-    assert all(len(call["sample_ids"]) == 1 for call in king_calls[8:])
+    assert all(len(call["sample_ids"]) == 2 for call in king_calls[:12])
+    assert all(len(call["sample_ids"]) == 1 for call in king_calls[12:])
     assert [call["side"] for call in calls if call.get("closed")].count("previous_king") == 1
     assert [call["side"] for call in calls if call.get("closed")].count("challenger") == 1
 
@@ -309,6 +309,8 @@ def test_submit_echo_stops_future_trajectory_turns(monkeypatch):
         prompt="Task",
         target=None,
         messages=[{"role": "user", "content": "Task"}],
+        submit_marker="",
+        submit_command="",
     )
     observation = ObservationResult(
         "sample-1", "Observation: COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
@@ -497,6 +499,8 @@ def test_submit_echo_bypasses_observation_simulator(tmp_path):
         prompt="Task",
         target=None,
         messages=[{"role": "user", "content": "Task"}],
+        submit_marker="",
+        submit_command="",
     )
     result = GenerationResult(
         sample.sample_id, "```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n```"
@@ -655,6 +659,8 @@ def test_missing_bash_command_bypasses_observation_simulator(tmp_path):
 
     sample = types.SimpleNamespace(
         sample_id="mini-coder-rs/data/train-00000.parquet:1156:2",
+        submit_marker="",
+        submit_command="",
         prompt="Task",
         target=None,
         messages=[{"role": "user", "content": "Task"}],
