@@ -357,6 +357,7 @@ class SanityDispatcher:
                 if i < len(heuristics)
                 else True,
                 heuristic_reason=heuristics[i].get("reason", "") if i < len(heuristics) else "",
+                heuristic_infra=bool(heuristics[i].get("infra")) if i < len(heuristics) else False,
             )
             for i in range(len(responses))
         ]
@@ -898,6 +899,8 @@ def _trajectory_result(
         {
             "passed": not state.error and not state.heuristic_reason,
             "reason": state.error or state.heuristic_reason,
+            # state.error is a chain-infra failure (evaluator/simulator), never model behavior
+            "infra": bool(state.error),
         }
         for state in states
     ]

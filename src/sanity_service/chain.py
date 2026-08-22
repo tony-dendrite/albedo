@@ -87,6 +87,11 @@ def followup_instruction(followup: str, submit_clause: str, *, first: bool) -> s
     return f"{followup}\n\nSubmit the same way when done: {submit_clause}"
 
 
+def _microtask_parsable(raw: str) -> bool:
+    obj = extract_json(raw or "", prefer_keys=("request",))
+    return isinstance(obj, dict) and bool(obj.get("request"))
+
+
 async def generate_microtask(
     client: Any, settings: Any, state: Any, clause: str = ""
 ) -> dict[str, str]:
@@ -102,6 +107,7 @@ async def generate_microtask(
             }
         ],
         temperature=0.7,
+        accept=_microtask_parsable,
     )
     obj = extract_json(result.raw or "", prefer_keys=("request",))
     if not isinstance(obj, dict) or not obj.get("request"):

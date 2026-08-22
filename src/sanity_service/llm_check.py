@@ -81,6 +81,7 @@ class SampleInput:
     response: str
     heuristic_passed: bool = True
     heuristic_reason: str = ""
+    heuristic_infra: bool = False
 
 
 @dataclass
@@ -249,7 +250,7 @@ def _aggregate(verdicts: list[SampleVerdict], mode: str) -> GateResult:
     if any(v.infra for v in verdicts):
         return GateResult(
             False,
-            "judges unavailable",
+            next(v.reason for v in verdicts if v.infra),
             infra_fault=True,
             llm_gate=LLMGate.SKIPPED,
             decision_mode=mode,
@@ -297,7 +298,12 @@ async def run_gate(
         for s in samples:
             excerpt = (s.prompt or "")[:60]
             if not s.heuristic_passed:
-                sv = SampleVerdict(excerpt, passed=False, reason=f"heuristic: {s.heuristic_reason}")
+                sv = SampleVerdict(
+                    excerpt,
+                    passed=False,
+                    reason=f"heuristic: {s.heuristic_reason}",
+                    infra=s.heuristic_infra,
+                )
             else:
                 sv = SampleVerdict(
                     excerpt, passed=True, reason="skipped: another sample already failed heuristics"

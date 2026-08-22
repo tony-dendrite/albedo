@@ -378,3 +378,59 @@ def test_vllm_cmd_includes_generation_config_vllm(tmp_path):
     asyncio.run(_run())
     idx = captured.index("--generation-config")
     assert captured[idx + 1] == "vllm"
+
+
+def test_chain_infra_error_is_infra_fault_not_miner_fault():
+    """A microtask/simulator failure on our side must not burn the miner's attempt budget."""
+    samples = [
+        SampleInput(
+            prompt="p1",
+            response="",
+            heuristic_passed=False,
+            heuristic_reason="microtask_generation_failed: microtask generation unparsable",
+            heuristic_infra=True,
+        ),
+        SampleInput(prompt="p2", response="ok output"),
+    ]
+    gate = asyncio.run(run_gate(samples, client=None))
+    assert gate.infra_fault is True
+    assert gate.llm_gate is LLMGate.SKIPPED
+    assert "microtask_generation_failed" in gate.reason
+
+
+def test_behavioral_heuristic_fail_stays_miner_fault():
+    samples = [
+        SampleInput(
+            prompt="p1",
+            response="doc",
+            heuristic_passed=False,
+            heuristic_reason="chain: repeated submissions without doing any work",
+        ),
+    ]
+    gate = asyncio.run(run_gate(samples, client=None))
+    assert gate.infra_fault is False
+    assert gate.llm_gate is LLMGate.FAILED
+    assert "repeated submissions" in gate.reason
+
+
+def test_microtask_generation_retries_unparsable_via_accept():
+    """generate_microtask must hand the client an accept callback so the client's
+    parse-retry ladder re-asks on garbage instead of failing the sample first try."""
+    from sanity_service.chain import generate_microtask
+
+    captured = {}
+
+    class FakeClient:
+        async def complete(self, **kwargs):
+            captured.update(kwargs)
+            raw = '{"file": "a.py", "function": "f", "request": "do x", "message": "m"}'
+            return JudgeRawResponse(model="m", provider="p", raw=raw)
+
+    state = SimpleNamespace(sample_id="s1", messages=[{"role": "user", "content": "ctx"}])
+    settings = SimpleNamespace(evaluator_model="m")
+    micro = asyncio.run(generate_microtask(FakeClient(), settings, state, "echo X"))
+    assert micro["request"] == "do x"
+    accept = captured.get("accept")
+    assert accept is not None
+    assert accept("not json at all") is False
+    assert accept('{"request": "fix the bug", "file": "a.py"}') is True
