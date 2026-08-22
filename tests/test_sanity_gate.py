@@ -434,3 +434,49 @@ def test_microtask_generation_retries_unparsable_via_accept():
     assert accept is not None
     assert accept("not json at all") is False
     assert accept('{"request": "fix the bug", "file": "a.py"}') is True
+
+
+def test_veto_chain_stops_early_once_a_sample_fails(monkeypatch):
+    """One failed sample decides a veto gate, so remaining turns are not generated."""
+    calls: list[SanityRunRequest] = []
+
+    async def _fake_remote(_client, request, _claimed):
+        calls.append(request)
+        return {
+            "state": "succeeded",
+            "responses": ["way too long" * 10],
+            "heuristics": [
+                {"passed": False, "reason": "response exceeded the model response token limit"}
+            ],
+        }
+
+    async def _fake_observations(*_args, **_kwargs):
+        return None
+
+    async def _fake_inject(_states):
+        return None
+
+    request = SanityRunRequest(
+        run_id="run",
+        model_uri="model",
+        digest="digest",
+        prompts=["raw prompt"],
+        sample_ids=["sample-1"],
+        prompt_messages=[[{"role": "user", "content": "task"}]],
+        assistant_turns=8,
+    )
+    dispatcher = D.SanityDispatcher(settings=SanitySettings(), repository=_FakeRepo())
+    monkeypatch.setattr(dispatcher, "_run_remote_request", _fake_remote)
+    monkeypatch.setattr(D, "_append_observations", _fake_observations)
+    monkeypatch.setattr(D, "_inject_microtasks", _fake_inject)
+
+    result = asyncio.run(
+        dispatcher._run_multiturn(
+            SimpleNamespace(),
+            SimpleNamespace(request=request, attempt_id=uuid4(), submission_id=uuid4()),
+        )
+    )
+
+    assert len(calls) == 1
+    assert "token limit" in result["heuristics"][0]["reason"]
+    assert "no submission" not in result["heuristics"][0]["reason"]

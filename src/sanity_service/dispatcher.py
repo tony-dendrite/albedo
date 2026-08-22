@@ -229,6 +229,7 @@ class SanityDispatcher:
         states = _trajectory_states(request)
         await _inject_microtasks(states)
         kept_warm = False
+        decided_early = False
         try:
             for turn_index in range(turn_count):
                 active = [
@@ -237,6 +238,9 @@ class SanityDispatcher:
                     if not state.stopped and not state.error and not state.heuristic_reason
                 ]
 
+                if not self.settings.consensus and any(s.heuristic_reason for s in states):
+                    decided_early = True
+                    break
                 if not active:
                     break
 
@@ -267,8 +271,9 @@ class SanityDispatcher:
                 await _append_observations(active, str(claimed.attempt_id), turn_index + 1)
                 if turn_index >= turn_count - 8 and (turn_count - turn_index) % 4 == 0:
                     await _inject_submit_nudges(active)
-            _run_chain_checks(states, turn_count)
-            await run_tail_check(states)
+            if not decided_early:
+                _run_chain_checks(states, turn_count)
+                await run_tail_check(states)
             return _trajectory_result(str(claimed.attempt_id), states, turn_count)
         finally:
             if kept_warm:
@@ -658,7 +663,9 @@ def _run_chain_checks(states: list[_TrajectoryState], turn_count: int) -> None:
     healthy = [s for s in states if not s.error]
     if healthy and not any(not sub.get("post_nudge") for s in healthy for sub in s.submits):
         for state in healthy:
-            state.heuristic_reason = "chain: no unprompted submission on any sample"
+            state.heuristic_reason = state.heuristic_reason or (
+                "chain: no unprompted submission on any sample"
+            )
         logger.warning("[sanity-dispatch] no unprompted submission across chain samples")
     for state in states:
         if state.error or state.heuristic_reason:
