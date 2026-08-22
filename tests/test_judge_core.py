@@ -23,11 +23,14 @@ from albedo_eval_service.judge_core import (
 )
 
 
-def test_judge_panel_allows_any_fp8_provider():
+def test_judge_panel_prefers_cheap_fp8_providers_with_fallback():
     assert JUDGE_MODELS == ("z-ai/glm-5.2",)
     for model in JUDGE_MODELS:
-        assert JUDGE_PROVIDER_PINS[model] == {"allow_fallbacks": True, "quantizations": ["fp8"]}
-        assert "order" not in JUDGE_PROVIDER_PINS[model]
+        assert JUDGE_PROVIDER_PINS[model] == {
+            "allow_fallbacks": True,
+            "quantizations": ["fp8"],
+            "order": ["baidu", "streamlake"],
+        }
 
 
 def test_judge_prompt_scores_only_candidate_outputs():

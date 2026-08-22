@@ -927,7 +927,7 @@ class ObservationSimulationService:
                 (primary, self.settings.simulation_loop_reruns + 1, rung, index > 0)
                 for index, rung in enumerate(rungs)
             ]
-            attempts.append((fallback_model, 1, _evaluator_provider(self.settings), False))
+            attempts.append((fallback_model, 1, _evaluator_provider(self.settings), True))
         else:
             attempts = [
                 (

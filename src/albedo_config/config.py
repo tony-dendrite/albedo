@@ -86,7 +86,7 @@ class JudgeSettings(BaseSettings):
     engy_api_key: str = Field("", validation_alias=AliasChoices("ALBEDO_JUDGE_ENGY_API_KEY"))
     engy_base_url: str = "https://api.engy.ai"
     engy_models: str = ENGY_MODELS
-    engy_max_errors: int = 25
+    engy_max_errors: int = 150
     request_timeout_seconds: float = 300.0
     stream_enabled: bool = True
     stream_stall_seconds: float = 90.0
