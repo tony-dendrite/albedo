@@ -1702,7 +1702,7 @@ async def _score_samples(
             )
         return {
             "sample_id": sample.sample_id,
-            "questions": questions,
+            "questions": [{**q, "weight": question_weight(q)} for q in questions],
             "king_amputated_thinking": king_amputated,
             "chal_amputated_thinking": chal_amputated,
             "king_score": king_score,

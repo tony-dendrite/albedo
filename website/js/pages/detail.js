@@ -26,7 +26,6 @@ const judgeLabel = m => {
 };
 const scoreCls = n => n == null ? "" : Number(n) >= 0.5 ? "ok" : "bad";
 
-const TAG_NAMESPACE_ORDER = ["reference", "behavior"];
 
 function parseJsonl(text) {
   return text.split(/\n+/).map(line => {
@@ -56,77 +55,133 @@ function pivotBinary(record) {
   return { judges, king: bySide.previous_king || {}, chal: bySide.challenger || {} };
 }
 
-const namespaceOf = tag => (tag && tag.includes(":") ? tag.slice(0, tag.indexOf(":")) : "");
 
-// king vs challenger yes-rate, grouped by keyFn(question) across all scored samples/judges
-function marginsByKey(records, keyFn) {
+const LEGACY_TAG_WEIGHTS = {
+  "reference:explore": 2.0,
+  "reference:action": 2.0,
+  "reference:claims": 1.5,
+  "reference:economy": 1.0,
+  "reference:grounding": 0.5,
+  "reference:verification": 0.5,
+  "behavior:anchored_edit": 0.25,
+};
+const legacyWeightOf = tag =>
+  LEGACY_TAG_WEIGHTS[tag] ?? (tag && tag.startsWith("reference:") ? 0.5 : 0);
+// pick the weight rule that provably applied to this record: stamped weights when present,
+// otherwise whichever of {v3 legacy map, uniform (pre-v3)} reproduces the stored score
+function weightFnFor(record) {
+  const qs = record.questions || [];
+  if (qs.some(q => typeof q.weight === "number")) {
+    return q => (typeof q.weight === "number" ? q.weight : 0);
+  }
+  const legacy = q => legacyWeightOf(q.tag);
+  const uniform = () => 1;
+  const jr = (record.judge_results || []).find(j => j.side === "challenger" && j.parse_ok);
+  const stored = record.challenger_score;
+  if (stored == null || !jr) return legacy;
+  const recompute = wf => {
+    let num = 0, den = 0;
+    for (const q of qs) {
+      const w = wf(q);
+      if (!w) continue;
+      const a = jr.answers?.[q.id];
+      if (a === "0" || a === "1") { den += w; if (a === "1") num += w; }
+    }
+    let s = den ? num / den : null;
+    if (s != null && record.chal_amputated_thinking) s *= 0.5;
+    return s;
+  };
+  for (const wf of [legacy, uniform]) {
+    const s = recompute(wf);
+    if (s != null && Math.abs(s - stored) < 1e-4) return wf;
+  }
+  return legacy;
+}
+
+function scoreShares(records, keyFn) {
   const acc = {};
+  let n = 0;
   for (const record of records.filter(x => x.scored)) {
     const p = pivotBinary(record);
-    for (const q of record.questions || []) {
-      const key = keyFn(q);
-      const bucket = (acc[key] ||= { kingYes: 0, kingN: 0, chalYes: 0, chalN: 0 });
-      for (const m of p.judges) {
-        const kj = p.king[m], cj = p.chal[m];
-        const ka = kj?.parse_ok ? kj.answers?.[q.id] : null;
-        if (ka === "1" || ka === "0") { bucket.kingYes += ka === "1" ? 1 : 0; bucket.kingN++; }
-        const ca = cj?.parse_ok ? cj.answers?.[q.id] : null;
-        if (ca === "1" || ca === "0") { bucket.chalYes += ca === "1" ? 1 : 0; bucket.chalN++; }
+    const wf = weightFnFor(record);
+    const kMul = record.king_amputated_thinking ? 0.5 : 1;
+    const cMul = record.chal_amputated_thinking ? 0.5 : 1;
+    for (const m of p.judges) {
+      const kj = p.king[m], cj = p.chal[m];
+      if (!kj?.parse_ok || !cj?.parse_ok) continue;
+      n++;
+      let kden = 0, cden = 0;
+      const nums = {};
+      for (const q of record.questions || []) {
+        const w = wf(q);
+        if (!w) continue;
+        const ka = kj.answers?.[q.id], ca = cj.answers?.[q.id];
+        if (ka === "0" || ka === "1") kden += w;
+        if (ca === "0" || ca === "1") cden += w;
+        const t = (nums[keyFn(q)] ||= { k: 0, c: 0, wk: 0, wc: 0, cells: 0, w });
+        t.cells++;
+        if (ka === "0" || ka === "1") t.wk += w;
+        if (ca === "0" || ca === "1") t.wc += w;
+        if (ka === "1") t.k += w;
+        if (ca === "1") t.c += w;
+      }
+      for (const [key, t] of Object.entries(nums)) {
+        const b = (acc[key] ||= { king: 0, chal: 0, max: 0, cells: 0, weight: t.w });
+        b.king += kden ? kMul * t.k / kden : 0;
+        b.chal += cden ? cMul * t.c / cden : 0;
+        // ceiling: what a perfect (unpenalized) model would earn from this tag
+        b.max += ((kden ? t.wk / kden : 0) + (cden ? t.wc / cden : 0)) / 2;
+        b.cells += t.cells;
       }
     }
   }
-  return Object.entries(acc).map(([key, b]) => {
-    const kingRate = b.kingN ? b.kingYes / b.kingN : null;
-    const chalRate = b.chalN ? b.chalYes / b.chalN : null;
-    return {
-      key, kingRate, chalRate, n: Math.max(b.kingN, b.chalN),
-      margin: kingRate != null && chalRate != null ? chalRate - kingRate : null,
-    };
-  });
+  return Object.entries(acc)
+    .map(([key, b]) => ({
+      key,
+      n: b.cells,
+      weight: b.weight,
+      max: n ? b.max / n : null,
+      king: n ? b.king / n : null,
+      chal: n ? b.chal / n : null,
+      diff: n ? (b.chal - b.king) / n : null,
+    }))
+    .sort((a, b) => Math.abs(b.diff || 0) - Math.abs(a.diff || 0));
 }
 
-// per-tag breakdown (not enumerated — see TAG_NAMESPACE_ORDER above)
-function tagMargins(records) {
-  return marginsByKey(records, q => q.tag || "untagged").sort((a, b) => {
-    const ra = TAG_NAMESPACE_ORDER.indexOf(namespaceOf(a.key));
-    const rb = TAG_NAMESPACE_ORDER.indexOf(namespaceOf(b.key));
-    const oa = ra === -1 ? TAG_NAMESPACE_ORDER.length : ra;
-    const ob = rb === -1 ? TAG_NAMESPACE_ORDER.length : rb;
-    return oa !== ob ? oa - ob : a.key.localeCompare(b.key);
-  });
-}
-
-// per-namespace breakdown: reference:* vs behavior:* (untagged/unnamespaced tags -> "other")
-function typeMargins(records) {
-  return marginsByKey(records, q => namespaceOf(q.tag) || "other").sort((a, b) => {
-    const ra = TAG_NAMESPACE_ORDER.indexOf(a.key);
-    const rb = TAG_NAMESPACE_ORDER.indexOf(b.key);
-    const oa = ra === -1 ? TAG_NAMESPACE_ORDER.length : ra;
-    const ob = rb === -1 ? TAG_NAMESPACE_ORDER.length : rb;
-    return oa !== ob ? oa - ob : a.key.localeCompare(b.key);
-  });
-}
-
-function marginTable(rows, keyHeader) {
-  const scoreAgainst = (s1, s2) => (s1 == null || s2 == null) ? "" : Number(s1) > Number(s2) ? "ok" : "bad";
-
+function shareTable(rows, keyHeader, showWeight) {
+  const signed = v => v == null ? "\u2014" : `${v >= 0 ? "+" : ""}${(v * 100).toFixed(2)}`;
+  const signedCls = v => v > 0 ? "ok" : v < 0 ? "bad" : "";
+  const share = v => v == null ? "\u2014" : (v * 100).toFixed(1);
   if (!rows.length) return el("div", { class: "empty" }, "no tagged questions.");
+  const tot = rows.reduce(
+    (s, r) => ({ max: s.max + (r.max || 0), king: s.king + (r.king || 0), chal: s.chal + (r.chal || 0), diff: s.diff + (r.diff || 0) }),
+    { max: 0, king: 0, chal: 0, diff: 0 });
   return el("table", { class: "data-table sample-judge-table" },
     el("thead", {}, el("tr", {},
       el("th", {}, keyHeader), el("th", { class: "r" }, "questions"),
-      el("th", { class: "r" }, "king"), el("th", { class: "r" }, "challenger"),
-      el("th", { class: "r" }, "margin"))),
-    el("tbody", {}, rows.map(row => el("tr", {},
-      el("td", {}, row.key),
-      el("td", { class: "r" }, String(row.n)),
-      el("td", { class: `r ${scoreAgainst(row.kingRate, row.chalRate)}` }, pct(row.kingRate)),
-      el("td", { class: `r ${scoreAgainst(row.chalRate, row.kingRate)}` }, pct(row.chalRate)),
-      el("td", { class: `r ${row.margin > 0 ? "ok" : row.margin < 0 ? "bad" : ""}` },
-        row.margin == null ? "—" : `${row.margin >= 0 ? "+" : ""}${(row.margin * 100).toFixed(2)}`)))));
+      showWeight ? el("th", { class: "r" }, "weight") : false,
+      el("th", { class: "r", title: "score available from this tag for a perfect model" }, "max"),
+      el("th", { class: "r", title: "this tag's share of the king final score" }, "king"),
+      el("th", { class: "r", title: "this tag's share of the challenger final score" }, "challenger"),
+      el("th", { class: "r", title: "challenger share minus king share" }, "\u0394"))),
+    el("tbody", {},
+      rows.map(row => el("tr", {},
+        el("td", {}, row.key),
+        el("td", { class: "r" }, String(row.n)),
+        showWeight ? el("td", { class: "r muted-dash" }, row.weight ? `\u00d7${row.weight}` : "0") : false,
+        el("td", { class: "r muted-dash" }, share(row.max)),
+        el("td", { class: "r" }, share(row.king)),
+        el("td", { class: "r" }, share(row.chal)),
+        el("td", { class: `r ${signedCls(row.diff)}` }, signed(row.diff)))),
+      el("tr", { class: "total-row" },
+        el("td", { colspan: showWeight ? "3" : "2" }, el("b", {}, "final score")),
+        el("td", { class: "r muted-dash" }, el("b", {}, share(tot.max))),
+        el("td", { class: "r" }, el("b", {}, share(tot.king))),
+        el("td", { class: "r" }, el("b", {}, share(tot.chal))),
+        el("td", { class: `r ${signedCls(tot.diff)}` }, el("b", {}, signed(tot.diff))))));
 }
 
-const tagMarginTable = records => marginTable(tagMargins(records), "tag");
-const typeMarginTable = records => marginTable(typeMargins(records), "type");
+const tagMarginTable = records => shareTable(scoreShares(records, q => q.tag || "untagged"), "tag", true);
 
 function lazyDetails(props, summaryChildren, buildBody, bodyClass) {
   const body = el("div", { class: bodyClass });
@@ -238,6 +293,11 @@ function binarySampleCard(record, i) {
     : jr.length
       ? el("span", { class: "sample-flag warn", title: record.error || "partial judge failure" }, "partial")
       : el("span", { class: "sample-flag bad", title: record.error || "" }, "unscored");
+  const zeroed = jr.filter(j => j.looped || j.corrupted).map(j =>
+    el("span", {
+      class: "sample-flag warn",
+      title: j.corruption_reason || (j.loop_reasons || []).join("; ") || "",
+    }, `${j.side === "previous_king" ? "king" : "chal"} ${j.looped ? "looped" : "truncated"}`));
 
   return lazyDetails({ class: "sample-card binary" },
     [
@@ -249,7 +309,7 @@ function binarySampleCard(record, i) {
         delta != null ? el("span", { class: "delta " + (delta > 0 ? "ok" : delta < 0 ? "bad" : "") },
           ` ${delta >= 0 ? "+" : ""}${(delta * 100).toFixed(2)}`) : false),
       el("span", { class: "sample-meta" },
-        `${(record.questions || []).length} q · ${okN}/${jr.length} judges `, flag),
+        `${(record.questions || []).length} q · ${okN}/${jr.length} judges `, flag, ...zeroed),
     ],
     () => binarySampleBody(record, p),
     "sample-body");
@@ -398,13 +458,11 @@ function renderEval(r, netuid, passes = [r]) {
 
   const king = r.king || {};
   const tao = taoMinerUrl(netuid, king.hotkey);
-  const typeSection = binary ? el("div", { class: "detail-section" }) : null;
   const tagSection = binary ? el("div", { class: "detail-section" }) : null;
   const samplesSection = el("div", { class: "detail-section" });
 
   mount($("d-body"),
     grid,
-    typeSection,
     tagSection,
     metrics ? el("div", { class: "detail-section" }, el("h2", {}, metricTitle), metrics) : false,
     samplesSection,
@@ -414,13 +472,10 @@ function renderEval(r, netuid, passes = [r]) {
         kv("king model", modelName(king)),
         kv("king uid", tao ? link(tao, String(king.uid ?? "—")) : (king.uid ?? "—")))));
 
-  if (typeSection) {
-    mount(typeSection, el("h2", {}, "margin by origin"), el("div", { class: "note" }, "Loading…"));
-    recordsP.then(records => mount(typeSection, el("h2", {}, "margin by origin"), typeMarginTable(records)));
-  }
   if (tagSection) {
-    mount(tagSection, el("h2", {}, "margin by tag"), el("div", { class: "note" }, "Loading…"));
-    recordsP.then(records => mount(tagSection, el("h2", {}, "margin by tag"), tagMarginTable(records)));
+    mount(tagSection, el("h2", {}, "score by tag"), el("div", { class: "note" }, "Loading…"));
+    recordsP.then(records => mount(tagSection, el("h2", {}, "score by tag"),
+      tagMarginTable(records)));
   }
   renderSampleScores(r, samplesSection, recordsP);
   renderArtifacts(r.artifacts, `eval-${r.eval_run_id}`);
