@@ -25,7 +25,7 @@ class JudgeRawResponse:
     error: str | None = None
 
 
-ENGY_PURPOSES = frozenset({"reference", "simulate"})
+ENGY_PURPOSES = frozenset({"reference"})
 
 
 class JudgeLLMClient:

@@ -175,9 +175,9 @@ def test_decode_bound_purposes_stay_on_openrouter():
     assert asyncio.run(_route("questions")) == [("openrouter", "z-ai/glm-5.2")]
 
 
-def test_simulate_routes_only_the_primary_simulation_model_to_engy():
+def test_simulate_stays_on_openrouter():
     assert asyncio.run(_route("simulate", model="deepseek/deepseek-v4-flash-0731")) == [
-        ("engy", "deepseek-v4-flash-0731")
+        ("openrouter", "deepseek/deepseek-v4-flash-0731")
     ]
     assert asyncio.run(_route("simulate")) == [("openrouter", "z-ai/glm-5.2")]
 
@@ -201,7 +201,7 @@ async def _rescued_call():
         result = await client.complete(
             model="deepseek/deepseek-v4-flash-0731",
             messages=[{"role": "user", "content": "x"}],
-            purpose="simulate",
+            purpose="reference",
             eval_run_id="eval-1",
         )
     finally:
@@ -384,7 +384,7 @@ async def _content_failure(engy_body, accept=None):
         result = await client.complete(
             model="deepseek/deepseek-v4-flash-0731",
             messages=[{"role": "user", "content": "x"}],
-            purpose="simulate",
+            purpose="reference",
             eval_run_id="eval-1",
             accept=accept,
         )
@@ -415,7 +415,7 @@ async def _empty_responses_exhaust():
             await client.complete(
                 model="deepseek/deepseek-v4-flash-0731",
                 messages=[{"role": "user", "content": "x"}],
-                purpose="simulate",
+                purpose="reference",
                 eval_run_id="eval-1",
             )
     finally:
@@ -440,7 +440,7 @@ async def _rejections_never_exhaust():
             await client.complete(
                 model="deepseek/deepseek-v4-flash-0731",
                 messages=[{"role": "user", "content": "x"}],
-                purpose="simulate",
+                purpose="reference",
                 eval_run_id="eval-1",
                 accept=lambda raw: raw == "ok",
             )
@@ -487,7 +487,7 @@ async def _rejection_across_parse_attempts():
         await client.complete(
             model="deepseek/deepseek-v4-flash-0731",
             messages=[{"role": "user", "content": "x"}],
-            purpose="simulate",
+            purpose="reference",
             eval_run_id="eval-1",
             provider={"order": ["deepseek", "cloudflare"], "allow_fallbacks": False},
             parse_retries=2,
@@ -498,8 +498,8 @@ async def _rejection_across_parse_attempts():
     return hits
 
 
-def test_reference_and_simulate_budgets_are_independent():
-    """glm reference failures must not disable deepseek for simulate, or vice versa."""
+def test_engy_budgets_are_independent_per_model():
+    """glm failures must not disable deepseek's engy budget, or vice versa."""
     hits = asyncio.run(_two_models_one_eval())
     # glm burns its own budget of 1, deepseek still gets its first engy try afterwards
     assert hits == [
@@ -527,7 +527,7 @@ async def _two_models_one_eval():
         await client.complete(
             model="deepseek/deepseek-v4-flash-0731",
             messages=[{"role": "user", "content": "x"}],
-            purpose="simulate",
+            purpose="reference",
             eval_run_id="eval-1",
         )
     finally:
