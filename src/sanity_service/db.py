@@ -67,9 +67,7 @@ class PreEvalRepository:
                   AND ms.retry_count < %s
                   AND cc.block_hash IS NOT NULL
                 ORDER BY
-                  CASE WHEN ms.state = 'HIPPIUS_VALIDATED' THEN 0 ELSE 1 END ASC,
                   ms.priority ASC,
-                  ms.retry_count ASC,
                   ms.created_at ASC
                 FOR UPDATE OF ms SKIP LOCKED
                 LIMIT 1
