@@ -149,11 +149,6 @@ async def generate_microtask(
     return {k: str(obj.get(k) or "") for k in ("file", "function", "request", "message")}
 
 
-_REJECTION_FALLBACK: str = (
-    "Not quite there yet: please double-check the change against the surrounding call "
-    "sites and handle any case you may have missed, then submit again."
-)
-
 META_LEAK_RE = re.compile(
     r"\bas an AI\b"
     r"|\bAI (?:assistant|language model)\b"
@@ -377,7 +372,7 @@ async def generate_rejection(client: Any, settings: Any, state: Any, submission:
             tail=chain_context(state),
             submission=submission[-2000:],
         ),
-        fallback=_REJECTION_FALLBACK,
+        fallback="",
         kind="rejection",
     )
 
