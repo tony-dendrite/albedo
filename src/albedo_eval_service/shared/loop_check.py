@@ -4,13 +4,14 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 
+from .observation_format import action_blocks
+
 DUP_CMD_THRESHOLD = 0.5
 MAX_RUN_THRESHOLD = 4
 
 MAX_LISTED_COMMANDS = 5
 MAX_COMMAND_CHARS = 120
 
-_BASH_RE = re.compile(r"```(?:bash|sh)?\s*\n(.*?)```", re.DOTALL)
 _CANDIDATE_RE = re.compile(
     r"^CANDIDATE OUTPUT(?: \d+)?:\n------\n(.*?)\n------"
     r"(?=\n+(?:CANDIDATE OUTPUT|ENVIRONMENT OBSERVATION|CONTEXT )[^\n]*:\n------|\Z)",
@@ -45,7 +46,7 @@ def candidate_turns(document: str) -> list[str]:
 def commands_of(turns: list[str]) -> list[str]:
     cmds: list[str] = []
     for turn in turns:
-        cmds += [" ".join(block.split()) for block in _BASH_RE.findall(turn)]
+        cmds += action_blocks(turn)
     return cmds
 
 

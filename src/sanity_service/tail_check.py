@@ -1,19 +1,17 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 
 from loguru import logger
 
 from albedo_eval_service.shared.json_extract import extract_json
+from albedo_eval_service.shared.observation_format import action_blocks
 from sanity_service.judge_panel import make_client, query_panel
 from sanity_service.rubricisity import (
     TAIL_JUDGE_QUESTIONS,
     TAIL_JUDGE_SYSTEM,
     TAIL_JUDGE_USER,
 )
-
-_BASH_RE = re.compile(r"```(?:bash|sh)?\s*\n(.*?)```", re.DOTALL)
 
 DUP_CMD_THRESHOLD = 0.5
 MAX_RUN_THRESHOLD = 4
@@ -26,7 +24,7 @@ TAIL_JUDGE_MIN_FAILED_SAMPLES = 2
 def loop_stats(assistant_turns: list[str]) -> dict:
     cmds: list[str] = []
     for turn in assistant_turns:
-        cmds += [" ".join(block.split()) for block in _BASH_RE.findall(turn)]
+        cmds += action_blocks(turn)
     max_run = run = 1
     for prev, cur in zip(cmds, cmds[1:]):
         run = run + 1 if cur == prev else 1

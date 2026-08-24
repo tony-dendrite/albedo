@@ -160,6 +160,19 @@ ls -la
 If you have completed your assignment, consult the first message about how to submit."""
 
 
+_ACTION_BLOCK_RE = re.compile(
+    r"```(?:bash|sh|shell)?[ \t]*\n(.*?)```|<([a-z_]*bash[a-z_]*)>(.*?)</\2>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def action_blocks(text: str) -> list[str]:
+    return [
+        " ".join((m.group(1) if m.group(1) is not None else m.group(3)).split())
+        for m in _ACTION_BLOCK_RE.finditer(text or "")
+    ]
+
+
 def unusable_turn(text: str, *, truncated: bool = False) -> str:
     """Why this turn carries no usable action, or '' when it is fine.
 

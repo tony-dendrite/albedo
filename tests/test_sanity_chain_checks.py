@@ -22,6 +22,10 @@ MARKER = "COMPLETE_TASK_AND_SUBMIT_FINAL_ANSWER"
 CLAUSE = f"echo {MARKER} && git add -A && git diff --cached"
 
 
+def _asked(text: str) -> dict:
+    return {"role": "user", "content": text, "injected": True}
+
+
 def _bash(command: str) -> str:
     return f"THOUGHT: doing the thing\n\n```bash\n{command}\n```"
 
@@ -339,3 +343,38 @@ def test_character_break_does_not_fire_on_real_repo_content():
     ]
     for text in legit:
         assert "breaks character" not in (ungrounded_reason(text, ctx) or "")
+
+
+def test_python_heredoc_edit_counts_as_work():
+    real_edit = _bash(
+        "python - <<'PY'\n"
+        "from pathlib import Path\n"
+        "path = Path('pennylane/ops/qubit/non_parametric_ops.py')\n"
+        "path.write_text(source)\n"
+        "PY\n"
+        f"python -m pytest -q && echo {MARKER} && cat patch.txt"
+    )
+    turns = [
+        {"role": "assistant", "content": real_edit, "score_target": True},
+        _asked("The Barrier and WireCut overrides still ignore wire_order."),
+        {"role": "assistant", "content": real_edit, "score_target": True},
+    ]
+    assert empty_submit_count(_state(turns), MARKER) == 0
+
+
+def test_edit_regex_covers_the_common_writers():
+    from sanity_service.chain import _EDIT_RE
+
+    for cmd in [
+        "sed -i 's/a/b/' f.py",
+        "cat > f.py",
+        "tee f.py",
+        "git apply p.diff",
+        "patch -p1 < p.diff",
+        "python - <<'PY'\npath.write_text(x)\nPY",
+        "cat <<'SCRIPT' > run.sh",
+        "python -c \"open('f.py','w').write(x)\"",
+    ]:
+        assert _EDIT_RE.search(cmd), cmd
+    for cmd in ["ls -la", "grep -n foo f.py", "cat f.py", "pwd", "python -m pytest -q"]:
+        assert not _EDIT_RE.search(cmd), cmd

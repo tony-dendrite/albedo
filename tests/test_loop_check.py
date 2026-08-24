@@ -141,3 +141,17 @@ def test_explanation_truncates_a_very_long_command():
     text = loop_explanation(verdict)
     assert "…" in text
     assert len(text) < 400
+
+
+def test_loop_check_sees_both_harness_syntaxes():
+    from albedo_eval_service.shared.loop_check import loop_stats
+
+    fenced = ["THOUGHT: x\n\n```bash\nls -la\n```"] * 10
+    tagged = ["THOUGHT: x\n\n<mswea_bash_command>ls -la</mswea_bash_command>"] * 10
+
+    assert loop_stats(fenced) == loop_stats(tagged)
+    assert loop_stats(tagged)["n_cmds"] == 10
+    assert loop_stats(tagged)["max_cmd_run"] == 10
+
+    mixed = fenced[:5] + tagged[:5]
+    assert loop_stats(mixed)["max_cmd_run"] == 10
