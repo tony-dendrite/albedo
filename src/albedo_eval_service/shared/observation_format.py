@@ -125,6 +125,65 @@ def has_unclosed_think_block(text: str) -> bool:
     return UNCLOSED_THINK_BLOCK_SENTINEL in (text or "")
 
 
+# The benchmark harness does not end a run on a malformed turn: it drops the turn, tells the
+# model what went wrong and asks again, giving up only after this many consecutive failures
+# (mini-swe-agent max_consecutive_format_errors=3). Pre-eval and scoring both mirror it.
+MAX_CONSECUTIVE_BAD_TURNS = 3
+
+# both harness syntaxes: our ```bash fence and the benchmark's <mswea_bash_command>
+_ACTION_RE = re.compile(
+    r"```(?:bash|sh|shell)\s*\n.*?```|<([a-z_]*bash[a-z_]*)>.*?</\1>", re.IGNORECASE | re.DOTALL
+)
+
+TURN_LIMIT_FEEDBACK = (
+    "Your previous response reached the output token limit before you produced a complete "
+    "action, so it was cut off. Respond more concisely and provide exactly one action in the "
+    "required format. If you need to think more, do so briefly."
+)
+
+TURN_FORMAT_FEEDBACK = """Format error:
+
+<error>
+{reason}
+</error>
+
+Please always provide EXACTLY ONE action in a ```bash code block, as shown in <example>.
+
+<example>
+THOUGHT: Here are some thoughts about why you want to perform the action.
+
+```bash
+ls -la
+```
+</example>
+
+If you have completed your assignment, consult the first message about how to submit."""
+
+
+def unusable_turn(text: str, *, truncated: bool = False) -> str:
+    """Why this turn carries no usable action, or '' when it is fine.
+
+    Covers the four ways a turn comes back unusable: cut off at the token limit, an unclosed
+    think block, nothing at all, or prose with no command in it.
+    """
+    if truncated or is_truncated(text):
+        return "response exceeded the model response token limit"
+    if has_unclosed_think_block(text):
+        return "response contains an unclosed think block"
+    if not (text or "").strip():
+        return "empty response"
+    if not _ACTION_RE.search(text):
+        return "no bash command found in the response"
+    return ""
+
+
+def retry_feedback(reason: str) -> str:
+    """What to tell the model so its next attempt is usable."""
+    if "token limit" in reason:
+        return TURN_LIMIT_FEEDBACK
+    return TURN_FORMAT_FEEDBACK.format(reason=reason)
+
+
 THINK_PAIR_RE = re.compile(r"<\s*think\s*>.*?<\s*/\s*think\s*>", re.DOTALL | re.IGNORECASE)
 THINK_OPEN_RE = re.compile(r"<\s*think\s*>", re.IGNORECASE)
 THINK_CLOSE_RE = re.compile(r"<\s*/\s*think\s*>", re.IGNORECASE)

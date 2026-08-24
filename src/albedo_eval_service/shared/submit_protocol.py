@@ -142,8 +142,17 @@ def _norm(command: str) -> str:
 
 
 def first_bash_command(text: str) -> str:
-    match = _BASH_FENCE_RE.search(text or "")
-    return _norm(match.group(1)) if match else ""
+    fence = _BASH_FENCE_RE.search(text or "")
+    tag = _TAGGED_RE.search(text or "")
+    if fence and tag:
+        return _norm(
+            (fence if fence.start() <= tag.start() else tag).group(
+                1 if fence.start() <= tag.start() else 2
+            )
+        )
+    if fence:
+        return _norm(fence.group(1))
+    return _norm(tag.group(2)) if tag else ""
 
 
 def is_exact_submission(text: str, command: str) -> bool:

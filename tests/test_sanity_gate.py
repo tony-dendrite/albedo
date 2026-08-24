@@ -423,21 +423,28 @@ def test_microtask_generation_retries_unparsable_via_accept():
     class FakeClient:
         async def complete(self, **kwargs):
             captured.update(kwargs)
-            raw = '{"file": "a.py", "function": "f", "request": "do x", "message": "m"}'
+            raw = '{"file": "a.py", "function": "f", "request": "do x", "message": "edit a.py"}'
             return JudgeRawResponse(model="m", provider="p", raw=raw)
 
-    state = SimpleNamespace(sample_id="s1", messages=[{"role": "user", "content": "ctx"}])
+    state = SimpleNamespace(
+        sample_id="s1", messages=[{"role": "user", "content": "ctx: a.py holds f()"}]
+    )
     settings = SimpleNamespace(evaluator_model="m")
     micro = asyncio.run(generate_microtask(FakeClient(), settings, state, "echo X"))
     assert micro["request"] == "do x"
     accept = captured.get("accept")
     assert accept is not None
     assert accept("not json at all") is False
-    assert accept('{"request": "fix the bug", "file": "a.py"}') is True
+    assert accept('{"request": "fix the bug", "file": "a.py", "message": "fix f in a.py"}') is True
 
 
 def test_veto_chain_stops_early_once_a_sample_fails(monkeypatch):
-    """One failed sample decides a veto gate, so remaining turns are not generated."""
+    """A sample that keeps producing unusable turns is re-asked, then decides the veto gate.
+
+    The benchmark re-asks a malformed turn up to 3 consecutive times before abandoning the
+    instance, so pre-eval spends the same budget before failing — and no further turn is
+    generated once it is spent.
+    """
     calls: list[SanityRunRequest] = []
 
     async def _fake_remote(_client, request, _claimed):
@@ -477,6 +484,8 @@ def test_veto_chain_stops_early_once_a_sample_fails(monkeypatch):
         )
     )
 
-    assert len(calls) == 1
+    assert len(calls) == D.MAX_CONSECUTIVE_BAD_TURNS
+    assert all(c.run_id.startswith("run") is False for c in calls[1:])
     assert "token limit" in result["heuristics"][0]["reason"]
+    assert "3 consecutive turns" in result["heuristics"][0]["reason"]
     assert "no submission" not in result["heuristics"][0]["reason"]

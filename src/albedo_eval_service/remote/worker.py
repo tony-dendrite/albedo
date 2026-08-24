@@ -22,9 +22,12 @@ from ..scoring.scoring_client import Scorer, build_scorer
 from ..shared.dataset_manifest import load_manifest_file
 from ..shared.models import EvalRequest
 from ..shared.observation_format import (
+    MAX_CONSECUTIVE_BAD_TURNS,
     detect_format,
     first_bash_block,
+    retry_feedback,
     truncation_notice,
+    unusable_turn,
     wrap,
 )
 from ..shared.sampling import multi_source_manifest_sample_ids
@@ -349,7 +352,9 @@ class RemoteEvalWorker:
             for turn_index in range(turn_count):
                 with ThreadPoolExecutor(max_workers=2) as executor:
                     futures = {
-                        side: executor.submit(generators[side].generate, side_samples)
+                        side: executor.submit(
+                            _generate_retrying_bad_turns, generators[side], side_samples
+                        )
                         for side, side_samples in current_samples.items()
                     }
                     turn_results = {side: future.result() for side, future in futures.items()}
@@ -811,6 +816,43 @@ def _valid_generated_pair_count(
         and sample.sample_id in challenger_by_id
         and not king_by_id[sample.sample_id].error
         and not challenger_by_id[sample.sample_id].error
+    )
+
+
+def _generate_retrying_bad_turns(
+    generator: Generator, samples: list[EvalSample]
+) -> list[GenerationResult]:
+    """Generate one turn, re-asking any sample whose turn carries no usable action.
+
+    The benchmark drops such a turn, says what went wrong and asks again, abandoning the
+    instance only after MAX_CONSECUTIVE_BAD_TURNS in a row. Scoring must not be harsher: a
+    single cut-off turn should not truncate a whole trajectory the judge then scores.
+    """
+    results = generator.generate(samples)
+    by_id = {sample.sample_id: sample for sample in samples}
+    for _ in range(MAX_CONSECUTIVE_BAD_TURNS - 1):
+        redo = [
+            (by_id[r.sample_id], unusable_turn(r.text, truncated=r.truncated))
+            for r in results
+            if not r.error and r.sample_id in by_id and unusable_turn(r.text, truncated=r.truncated)
+        ]
+        if not redo:
+            break
+        retry_samples = [_with_retry_feedback(s, reason) for s, reason in redo]
+        fresh = {r.sample_id: r for r in generator.generate(retry_samples)}
+        results = [fresh.get(r.sample_id, r) for r in results]
+    return results
+
+
+def _with_retry_feedback(sample: EvalSample, reason: str) -> EvalSample:
+    """The same sample, with the turn dropped and the model told why."""
+    messages = _base_messages(sample) + [{"role": "user", "content": retry_feedback(reason)}]
+    return replace(
+        sample,
+        prompt=format_messages(
+            messages, tokenizer_path=str(_CANONICAL_TOKENIZER_PATH), enable_thinking=True
+        ),
+        messages=messages,
     )
 
 

@@ -182,7 +182,7 @@ class RemoteSettings(BaseSettings):
     challenger_model: str | None = None
     previous_king_gpu_ids: str = "0,1,2,3"
     challenger_gpu_ids: str = "4,5,6,7"
-    max_new_tokens: int = 16384
+    max_new_tokens: int = 4096
     generation_result_timeout_seconds: float = 900.0
     trajectory_assistant_turns: int = 8
     submit_keep_original_ratio: float = 0.25
@@ -267,7 +267,7 @@ class SanitySettings(BaseSettings):
     dataset_root: str = ""
     sample_count: int = 3
     trajectory_assistant_turns: int = 32
-    gen_max_tokens: int = 16384
+    gen_max_tokens: int = 4096
 
     skip_viability: bool = True
 
@@ -317,6 +317,7 @@ class SanityRemoteSettings(BaseSettings):
     gen_top_k: int = 20
     gen_min_p: float = 0.0
     gen_read_timeout_s: float = 900.0
+    gen_bad_turn_attempts: int = 3
 
     mock_auto_result: bool = False
     skip_heuristics: bool = False
@@ -436,7 +437,7 @@ class ModelValidationSettings(BaseSettings):
     ARCH_SPEC_PATH: str = Field(
         _MV_ARCH_SPEC_PATH, validation_alias=AliasChoices("ALBEDO_ARCH_SPEC")
     )
-    SIM_THRESHOLD: float = 0.95
+    SIM_THRESHOLD: float = 0.98
     KNN_CANDIDATES: int = 20
     POLL_INTERVAL_S: float = Field(5.0, validation_alias=AliasChoices("ALBEDO_HV_POLL_S"))
     LEASE_SECONDS: int = Field(600, validation_alias=AliasChoices("ALBEDO_HV_LEASE_S"))

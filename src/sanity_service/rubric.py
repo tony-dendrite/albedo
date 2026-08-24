@@ -24,9 +24,13 @@ def _context_and_reply(prompt: str, reply: str) -> str:
     )
 
 
-def build_injection_user(prompt: str, reply: str) -> str:
+def build_injection_user(prompt: str, reply: str, submit_command: str = "") -> str:
     return json.dumps(
-        {"conversation": (prompt or "").rstrip(), "candidate_reply": (reply or "").rstrip()},
+        {
+            "conversation": (prompt or "").rstrip(),
+            "candidate_reply": (reply or "").rstrip(),
+            "task_submit_command": (submit_command or "").strip(),
+        },
         ensure_ascii=False,
     )
 

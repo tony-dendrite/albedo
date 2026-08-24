@@ -685,3 +685,106 @@ def test_missing_bash_command_bypasses_observation_simulator(tmp_path):
     assert observation == _missing_command_observation(sample)
     assert "No bash command found" in observation
     assert "<returncode>2</returncode>" in observation
+
+
+def test_eval_reasks_a_bad_turn_instead_of_ending_the_trajectory():
+    """Scoring mirrors the benchmark: a cut-off or malformed turn is re-asked, not fatal."""
+    from albedo_eval_service.remote import worker as W
+    from albedo_eval_service.remote.dataset import EvalSample
+    from albedo_eval_service.remote.generation import GenerationResult
+    from albedo_eval_service.shared.observation_format import truncation_notice
+
+    good = "THOUGHT: look\n\n```bash\nls -la\n```"
+    bad_by_attempt = [
+        [GenerationResult("s1", truncation_notice(4096), truncated=True)],
+        [GenerationResult("s1", "")],
+        [GenerationResult("s1", good)],
+    ]
+
+    class _Gen:
+        def __init__(self):
+            self.calls = []
+
+        def generate(self, samples):
+            self.calls.append(samples[0].messages[-1]["content"] if samples[0].messages else "")
+            return bad_by_attempt[len(self.calls) - 1]
+
+    gen = _Gen()
+    sample = EvalSample(sample_id="s1", prompt="p", messages=[{"role": "user", "content": "task"}])
+    out = W._generate_retrying_bad_turns(gen, [sample])
+
+    assert out[0].text == good, "the usable third attempt must win"
+    assert len(gen.calls) == 3
+    assert "reached the output token limit" in gen.calls[1], "truncation -> be concise"
+    assert "Format error" in gen.calls[2], "empty response -> format feedback"
+
+
+def test_eval_gives_up_after_three_consecutive_bad_turns():
+    from albedo_eval_service.remote import worker as W
+    from albedo_eval_service.remote.dataset import EvalSample
+    from albedo_eval_service.remote.generation import GenerationResult
+
+    class _Gen:
+        def __init__(self):
+            self.calls = 0
+
+        def generate(self, samples):
+            self.calls += 1
+            return [GenerationResult("s1", "")]
+
+    gen = _Gen()
+    sample = EvalSample(sample_id="s1", prompt="p", messages=[{"role": "user", "content": "t"}])
+    out = W._generate_retrying_bad_turns(gen, [sample])
+    assert gen.calls == W.MAX_CONSECUTIVE_BAD_TURNS
+    assert out[0].text == ""
+
+
+def test_eval_retry_fires_inside_the_real_turn_loop(tmp_path, monkeypatch):
+    """End to end through the worker: a bad first turn is re-asked, the run still succeeds."""
+    _write_dataset(tmp_path)
+    monkeypatch.setattr(
+        "albedo_eval_service.remote.dataset._load_tokenizer", lambda _path: _Tokenizer()
+    )
+    seen: list[str] = []
+
+    class _FlakyGenerator:
+        """Emits one unusable turn per sample, then behaves."""
+
+        def __init__(self, side):
+            self.side = side
+            self.bad_done: set[str] = set()
+
+        def generate(self, samples):
+            out = []
+            for sample in samples:
+                last = (sample.messages or [{}])[-1].get("content", "")
+                if "Format error" in last or "output token limit" in last:
+                    seen.append(last[:40])
+                if sample.sample_id in self.bad_done:
+                    text = f"{sample.sample_id} ok\n```bash\nls\n```"
+                else:
+                    self.bad_done.add(sample.sample_id)
+                    text = ""  # empty response -> must be re-asked, not fatal
+                out.append(GenerationResult(sample_id=sample.sample_id, text=text))
+            return out
+
+        def close(self):
+            return None
+
+    settings = RemoteSettings(
+        dataset_root=str(tmp_path),
+        generation_backend="vllm",
+        upload_artifacts=False,
+        artifact_spool_dir=str(tmp_path / "artifacts"),
+        scoring_backend="mock",
+        trajectory_assistant_turns=2,
+    )
+    request = _request()
+    run = RemoteRun(remote_run_id=str(request.eval_run_id), request=request, state="accepted")
+    RemoteEvalWorker(
+        settings, generator_factory=lambda side, gpu_ids, model: _FlakyGenerator(side)
+    ).execute(run)
+
+    assert run.state == "succeeded"
+    assert seen, "the retry feedback must have reached the generator"
+    assert all("Format error" in s for s in seen)

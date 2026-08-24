@@ -242,22 +242,29 @@ def test_trajectory_ignores_short_heuristic_for_bash_command():
 
 
 def test_trajectory_keeps_heuristic_for_non_command_output():
+    """A non-command output is still held against the model — after the re-ask budget.
+
+    The benchmark re-asks such a turn up to 3 consecutive times, so a single one must not
+    decide the sample; three in a row must.
+    """
     state = sanity_dispatcher._TrajectoryState(
         sample_id="sanity-fallback:0",
         prompt="initial prompt",
         messages=[{"role": "user", "content": "Fix it."}],
         turns=[],
     )
+    turn = {
+        "responses": [""],
+        "heuristics": [{"passed": False, "reason": "empty response"}],
+    }
 
-    sanity_dispatcher._apply_turn_result(
-        [state],
-        {
-            "responses": [""],
-            "heuristics": [{"passed": False, "reason": "empty response"}],
-        },
-    )
+    sanity_dispatcher._apply_turn_result([state], turn)
+    assert state.heuristic_reason == ""
+    assert state.retry_reason == "empty response"
 
-    assert state.heuristic_reason == "empty response"
+    for _ in range(sanity_dispatcher.MAX_CONSECUTIVE_BAD_TURNS - 1):
+        sanity_dispatcher._apply_turn_result([state], turn)
+    assert state.heuristic_reason == "empty response on 3 consecutive turns"
 
 
 def test_heuristics_passes_varied_code_responses():

@@ -16,15 +16,17 @@ from loguru import logger
 from albedo_config import JudgeSettings, SanitySettings, get_judge_settings, get_sanity_settings
 from albedo_eval_service.remote.dataset import format_messages
 from albedo_eval_service.shared.observation_format import (
+    MAX_CONSECUTIVE_BAD_TURNS,
     detect_format,
     empty_output,
+    retry_feedback,
     valid_output,
     wrap,
 )
 from albedo_eval_service.shared.submit_protocol import (
     assign_submit,
     command_for,
-    is_exact_submission,
+    first_bash_command,
     rewrite_messages,
 )
 from albedo_eval_service.simulator.prompt_simulator import (
@@ -36,6 +38,7 @@ from sanity_service.chain import (
     _EDIT_RE as _CHAIN_EDIT_RE,
 )
 from sanity_service.chain import (
+    META_LEAK_RE,
     SUBMIT_NUDGE,
     amputated_thinking,
     empty_submit_count,
@@ -62,7 +65,10 @@ from sanity_service.uploads import put_sanity_fault
 _CANONICAL_TOKENIZER_PATH = (
     Path(__file__).resolve().parents[2] / "assets" / "tokenizers" / "Qwen3.6-35B-A3B"
 )
-_BASH_BLOCK_RE = re.compile(r"```(?:bash|sh|shell)\s*\n.*?```", re.IGNORECASE | re.DOTALL)
+_BASH_BLOCK_RE = re.compile(
+    r"```(?:bash|sh|shell)\s*\n.*?```|<([a-z_]*bash[a-z_]*)>.*?</\1>",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 @dataclass
@@ -82,6 +88,9 @@ class _TrajectoryState:
     micro: dict[str, str] | None = None
     nudged_at: int = 0
     submits: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+    retry_reason: str = ""
+    consecutive_bad_turns: int = 0
+    last_followup: str = ""
 
 
 class SanityDispatcher:
@@ -252,10 +261,10 @@ class SanityDispatcher:
                         "prompt_messages": [state.messages for state in active]
                         if turn_index == 0
                         else None,
-                        "teardown_after_run": turn_index == turn_count - 1,
+                        "teardown_after_run": False,
                     }
                 )
-                kept_warm = not turn_request.teardown_after_run
+                kept_warm = True
                 logger.info(
                     "[sanity-dispatch] trajectory turn {}/{} samples={}",
                     turn_index + 1,
@@ -266,6 +275,27 @@ class SanityDispatcher:
                 if result.get("state") == "failed":
                     return result
                 _apply_turn_result(active, result)
+                for _ in range(MAX_CONSECUTIVE_BAD_TURNS - 1):
+                    redo = [state for state in active if state.retry_reason]
+                    if not redo:
+                        break
+                    redo_request = request.model_copy(
+                        update={
+                            "run_id": (
+                                f"{claimed.attempt_id}:turn-{turn_index + 1}"
+                                f"-retry{redo[0].consecutive_bad_turns}"
+                            ),
+                            "prompts": [state.prompt for state in redo],
+                            "sample_ids": [state.sample_id for state in redo],
+                            "prompt_messages": None,
+                            "teardown_after_run": False,
+                        }
+                    )
+                    kept_warm = True
+                    redo_result = await self._run_remote_request(client, redo_request, claimed)
+                    if redo_result.get("state") == "failed":
+                        return redo_result
+                    _apply_turn_result(redo, redo_result)
                 if turn_index == turn_count - 1:
                     break
                 await _append_observations(active, str(claimed.attempt_id), turn_index + 1)
@@ -354,6 +384,7 @@ class SanityDispatcher:
 
         responses = list(result.get("responses", []))
         heuristics = list(result.get("heuristics", []))
+        submit_commands = list(result.get("submit_commands", []))
         samples = [
             SampleInput(
                 prompt=prompts[i] if i < len(prompts) else "",
@@ -363,6 +394,7 @@ class SanityDispatcher:
                 else True,
                 heuristic_reason=heuristics[i].get("reason", "") if i < len(heuristics) else "",
                 heuristic_infra=bool(heuristics[i].get("infra")) if i < len(heuristics) else False,
+                submit_command=submit_commands[i] if i < len(submit_commands) else "",
             )
             for i in range(len(responses))
         ]
@@ -650,7 +682,13 @@ async def _inject_submit_nudges(states: list[_TrajectoryState]) -> None:
             nudge = SUBMIT_NUDGE.format(clause=state.submit_clause)
         state.messages.append({"role": "user", "content": nudge})
         state.turns.append(
-            {"role": "user", "content": nudge, "segment": state.segment, "injected": True}
+            {
+                "role": "user",
+                "content": nudge,
+                "segment": state.segment,
+                "injected": True,
+                "nudge": True,
+            }
         )
         state.prompt = format_messages(
             state.messages, tokenizer_path=str(_CANONICAL_TOKENIZER_PATH), enable_thinking=True
@@ -696,10 +734,48 @@ def _apply_turn_result(states: list[_TrajectoryState], result: dict[str, Any]) -
     responses = list(result.get("responses", []))
     heuristics = list(result.get("heuristics", []))
     for i, state in enumerate(states):
+        state.retry_reason = ""
         if i >= len(responses):
             state.error = "missing_generation_response"
             continue
         response = str(responses[i] or "")
+        failed = i < len(heuristics) and not bool(heuristics[i].get("passed", True))
+        reason = str(heuristics[i].get("reason") or "heuristic failed") if failed else ""
+        if failed and not _has_bash_command(response):
+            state.consecutive_bad_turns += 1
+            if state.consecutive_bad_turns >= MAX_CONSECUTIVE_BAD_TURNS:
+                state.turns.append(
+                    {
+                        "role": "assistant",
+                        "content": response,
+                        "score_target": True,
+                        "segment": state.segment,
+                    }
+                )
+                state.heuristic_reason = (
+                    f"{reason} on {state.consecutive_bad_turns} consecutive turns"
+                )
+                continue
+            state.retry_reason = reason
+            feedback = retry_feedback(reason)
+            state.messages.append({"role": "user", "content": feedback})
+            state.turns.append(
+                {"role": "user", "content": feedback, "injected": True, "retry_feedback": True}
+            )
+            state.prompt = format_messages(
+                state.messages,
+                tokenizer_path=str(_CANONICAL_TOKENIZER_PATH),
+                enable_thinking=True,
+            )
+            logger.warning(
+                "[sanity-dispatch] {} bad turn ({}/{}): {} — re-asking",
+                state.sample_id,
+                state.consecutive_bad_turns,
+                MAX_CONSECUTIVE_BAD_TURNS,
+                reason,
+            )
+            continue
+        state.consecutive_bad_turns = 0
         state.turns.append(
             {
                 "role": "assistant",
@@ -708,10 +784,6 @@ def _apply_turn_result(states: list[_TrajectoryState], result: dict[str, Any]) -
                 "segment": state.segment,
             }
         )
-        if i < len(heuristics) and not bool(heuristics[i].get("passed", True)):
-            reason = str(heuristics[i].get("reason") or "heuristic failed")
-            if not _has_bash_command(response):
-                state.heuristic_reason = reason
 
 
 async def _append_observations(
@@ -720,10 +792,10 @@ async def _append_observations(
     active = []
     submitted = []
     for state in states:
-        if state.error or state.stopped:
+        if state.error or state.stopped or state.heuristic_reason:
             continue
         assistant_output = str(state.turns[-1].get("content") or "")
-        if is_exact_submission(assistant_output, state.submit_clause):
+        if state.submit_marker and state.submit_marker in first_bash_command(assistant_output):
             submitted.append((state, assistant_output))
         elif not _has_bash_command(assistant_output):
             _append_observation(
@@ -823,6 +895,16 @@ def _advance_segment(
     )
     first = state.segment == "micro"
     state.segment_index += not first
+    repeated = followup.strip() and followup.strip() == state.last_followup
+    state.last_followup = followup.strip()
+    if not followup.strip() or repeated:
+        state.stopped = True
+        logger.info(
+            "[sanity-dispatch] {} submission accepted ({})",
+            state.sample_id,
+            "repeated request" if repeated else "no grounded follow-up",
+        )
+        return
     state.segment = "real" if first else f"followup_{state.segment_index}"
     instruction = followup_instruction(followup, state.submit_clause, first=first)
     _append_observation(state, instruction)
@@ -884,6 +966,13 @@ async def _simulate_observation(
     if response.error:
         raise RuntimeError(response.error)
     observation = response.raw.strip()
+    if META_LEAK_RE.search(observation):
+        logger.warning(
+            "[sanity-dispatch] observation broke character sample_id={}: {!r}",
+            sample_id,
+            observation[:160],
+        )
+        return empty_output(fmt)
     if not valid_output(observation, fmt):
         fallback = empty_output(fmt)
         logger.warning(
@@ -917,6 +1006,7 @@ def _trajectory_result(
         "state": "succeeded",
         "responses": responses,
         "heuristics": heuristics,
+        "submit_commands": [state.submit_clause for state in states],
         "assistant_turns": turn_count,
     }
 

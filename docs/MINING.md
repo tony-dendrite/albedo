@@ -112,7 +112,7 @@ on disk (`safetensors_index`).
 In short: fine-tune the weights, keep the Qwen3.6-35B-A3B architecture and tokenizer intact, don't add
 custom code or quantize.
 
-**Dedup** — validators also reject models that are near-duplicates (≥ 0.95 fingerprint similarity)
+**Dedup** — validators also reject models that are near-duplicates (≥ 0.98 fingerprint similarity)
 of an already-seen model. This check needs OpenSearch and is **not** run by the local CLI; your
 model needs to be meaningfully different from existing submissions.
 
@@ -318,7 +318,7 @@ CHAIN_NETWORK=test albedo check-commit
 - **Copies are rejected regardless of hub.** Validators fingerprint the weights and hash the weight
   files themselves; re-uploading someone else's model to the other backend still counts as a duplicate.
 - **Dedup isn't local.** Passing `check-model` doesn't guarantee acceptance — a model too similar
-  (≥ 0.95) to an existing submission is rejected by the validator. Make your model genuinely distinct.
+  (≥ 0.98) to an existing submission is rejected by the validator. Make your model genuinely distinct.
 - **No custom code, no quantization.** `*.py` files are forbidden and `config.json` must not contain
   `auto_map` or `quantization_config`.
 - **Registration is required to commit.** Both `commit` and `publish` verify your hotkey is in the

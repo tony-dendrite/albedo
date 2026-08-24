@@ -36,7 +36,10 @@ from sanity_service.checks import (
 )
 
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
-_BASH_BLOCK_RE = re.compile(r"```(?:bash|sh|shell)\s*\n.*?```", re.IGNORECASE | re.DOTALL)
+_BASH_BLOCK_RE = re.compile(
+    r"```(?:bash|sh|shell)\s*\n.*?```|<([a-z_]*bash[a-z_]*)>.*?</\1>",
+    re.IGNORECASE | re.DOTALL,
+)
 _FORBIDDEN_CONFIG_KEYS = frozenset({"auto_map", "quantization_config"})
 
 

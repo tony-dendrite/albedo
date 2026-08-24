@@ -42,7 +42,7 @@ ALLOWED_FILES: tuple[str, ...] = tuple(_f.get("allowed", []))
 ALLOWED_GLOBS: tuple[str, ...] = tuple(_f.get("allowed_globs", []))
 FORBIDDEN_GLOBS: tuple[str, ...] = tuple(_f.get("forbidden_globs", []))
 
-SIM_THRESHOLD: float = float(_p.get("similarity_threshold", 0.95))
+SIM_THRESHOLD: float = float(_p.get("similarity_threshold", 0.98))
 
 MODEL_CACHE_DIR: str = (
     os.environ.get("CV_MODEL_CACHE_DIR")

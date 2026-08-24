@@ -292,7 +292,7 @@ allowed_globs       = ["model-*-of-*.safetensors", "model.safetensors"]
 forbidden_globs     = ["*.py"]                        # no custom modeling code
 
 [preeval]
-similarity_threshold = 0.95                           # fingerprint cosine ≥ this → near-duplicate
+similarity_threshold = 0.98                           # fingerprint cosine ≥ this → near-duplicate
 ```
 
 > **Live manifest (what's actually enforced)** — `ModelValidationSettings.REQUIRED_FILES` in
@@ -373,7 +373,7 @@ except where noted. Each maps to a `fault_code`.
    weight_map must match the shards + tensors actually on disk (`safetensors_index`)
 7. `config.json` doesn't match the genesis arch spec on the lock keys (incl. the MoE keys), or
    contains `auto_map` (remote code) / `quantization_config` (quantized) (`architecture`)
-8. **Near-duplicate** (fingerprint cosine ≥ 0.95 of an already-seen model, or an exact
+8. **Near-duplicate** (fingerprint cosine ≥ 0.98 of an already-seen model, or an exact
    weights-hash match) — *not* checked locally; needs OpenSearch, runs only in
    `model_validation`. Make your model genuinely distinct (`duplicate`)
 
@@ -546,7 +546,7 @@ claim model_submissions oldest-first  (SUBMITTED | HIPPIUS_RETRYABLE)  → HIPPI
   6. fingerprint      per-tensor L2 norms + deterministic value samples (layer_norms_v2)
                       (fingerprint dim > MAX_KNN_DIM 16000 → fingerprint_too_large)
   7. OpenSearch dedup per-dimension kNN prefilter (HNSW cosine, top-20) → exact per-tensor rerank
-                      cosine ≥ similarity_threshold (0.95) AND different hotkey → DUPLICATE
+                      cosine ≥ similarity_threshold (0.98) AND different hotkey → DUPLICATE
                       (plus an exact weights_hash gate ahead of the kNN for byte-identical re-uploads)
   success → HIPPIUS_VALIDATED ; index fingerprint for future dedup ; publish fingerprint corpus to S3
   miner fault → TERMINAL_INVALID + fault.json

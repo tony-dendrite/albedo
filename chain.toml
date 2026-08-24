@@ -57,4 +57,4 @@ forbidden_globs = ["*.py"]
 
 [preeval]
 # Near-duplicate flag fires at/above this fingerprint similarity.
-similarity_threshold = 0.95
+similarity_threshold = 0.98

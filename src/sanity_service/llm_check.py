@@ -81,6 +81,7 @@ class SampleInput:
     response: str
     heuristic_passed: bool = True
     heuristic_reason: str = ""
+    submit_command: str = ""
     heuristic_infra: bool = False
 
 
@@ -100,11 +101,12 @@ async def _injection_probe(
     response: str,
     models: tuple[str, ...] = SANITY_DEFAULT_JUDGE_MODELS,
     temperature: float | None = None,
+    submit_command: str = "",
 ) -> tuple[bool | None, list[JudgeVote]]:
     raws = await query_panel(
         client,
         INJECTION_SYSTEM,
-        build_injection_user(prompt, response),
+        build_injection_user(prompt, response, submit_command),
         models,
         temperature=temperature,
     )
@@ -193,7 +195,9 @@ async def _judge_sample(
     excerpt = (s.prompt or "")[:60]
 
     gate_response = _response_for_gate(s.response)
-    suspected, votes = await _injection_probe(client, s.prompt, gate_response, models)
+    suspected, votes = await _injection_probe(
+        client, s.prompt, gate_response, models, submit_command=s.submit_command
+    )
     if suspected is None:
         return SampleVerdict(
             excerpt, False, "injection judges unavailable", infra=True, votes=votes
@@ -203,7 +207,12 @@ async def _judge_sample(
     if suspected:
         rechecked = True
         confirmed, votes = await _injection_probe(
-            client, s.prompt, gate_response, models, temperature=_RECHECK_TEMPERATURE
+            client,
+            s.prompt,
+            gate_response,
+            models,
+            temperature=_RECHECK_TEMPERATURE,
+            submit_command=s.submit_command,
         )
         if confirmed is None:
             return SampleVerdict(
