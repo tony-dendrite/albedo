@@ -227,3 +227,51 @@ def test_commands_that_only_name_pytest_still_run_normally():
     assert absent_tool_output("pip install pytest-cov")[0].endswith(
         "No matching distribution found for pytest-cov"
     )
+
+
+def test_degenerate_observation_catches_a_collapsed_file():
+    from albedo_eval_service.shared.observation_format import degenerate_observation
+
+    collapsed = (
+        "<returncode>0</returncode>\n<output>\n"
+        + "\n".join(f"{i:>6}\tAQRSymbol," for i in range(1, 160))
+        + "\n</output>"
+    )
+    assert degenerate_observation(collapsed)
+
+    # the real shapes seen in healthy genesis runs, all simulator collapse
+    for line in ("visible?: boolean;", "import { Property } from 'csstype';", "`"):
+        assert degenerate_observation("\n".join([line] * 200)), line
+
+
+def test_degenerate_observation_leaves_real_output_alone():
+    from albedo_eval_service.shared.observation_format import degenerate_observation
+
+    real_file = "\n".join(
+        [
+            "from qrcode.util import (",
+            "    QRData,",
+            "    QRCode,",
+            ")",
+            "",
+            "class BaseImage:",
+            "    def __init__(self, border, width, box_size):",
+            "        self.border = border",
+            "        self.width = width",
+            "        self.box_size = box_size",
+            "        self.modules = None",
+            "    def drawrect(self, row, col):",
+            "        raise NotImplementedError",
+        ]
+    )
+    assert not degenerate_observation(real_file)
+
+    # short outputs are never judged: too little signal
+    assert not degenerate_observation("\n".join(["}"] * 6))
+    assert not degenerate_observation("")
+    # a listing with repeated short tokens but real variety
+    assert not degenerate_observation(
+        "\n".join(
+            ["}", "x = 1", "}", "y = 2", "}", "z = 3", "}", "w = 4", "}", "v = 5", "}", "u = 6"]
+        )
+    )

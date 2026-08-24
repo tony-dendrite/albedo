@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass
 
 RETURNCODE = "returncode"
@@ -188,6 +189,19 @@ def unusable_turn(text: str, *, truncated: bool = False) -> str:
     if not _ACTION_RE.search(text):
         return "no bash command found in the response"
     return ""
+
+
+_LEADING_LINE_NO = re.compile(r"^\s*\d+\s+")
+_MIN_LINES_FOR_DEGENERACY = 10
+_MAX_LINE_SHARE = 0.8
+
+
+def degenerate_observation(text: str) -> bool:
+    lines = [_LEADING_LINE_NO.sub("", ln).strip() for ln in (text or "").splitlines()]
+    lines = [ln for ln in lines if ln]
+    if len(lines) < _MIN_LINES_FOR_DEGENERACY:
+        return False
+    return max(Counter(lines).values()) / len(lines) >= _MAX_LINE_SHARE
 
 
 def retry_feedback(reason: str) -> str:

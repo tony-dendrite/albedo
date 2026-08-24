@@ -17,6 +17,7 @@ from albedo_config import JudgeSettings, SanitySettings, get_judge_settings, get
 from albedo_eval_service.remote.dataset import format_messages
 from albedo_eval_service.shared.observation_format import (
     MAX_CONSECUTIVE_BAD_TURNS,
+    degenerate_observation,
     detect_format,
     empty_output,
     retry_feedback,
@@ -961,11 +962,18 @@ async def _simulate_observation(
         temperature=0.0,
         max_tokens=settings.simulation_max_tokens,
         provider=_evaluator_provider(settings),
-        accept=lambda raw: valid_output(raw, fmt),
+        accept=lambda raw: valid_output(raw, fmt) and not degenerate_observation(raw),
     )
     if response.error:
         raise RuntimeError(response.error)
     observation = response.raw.strip()
+    if degenerate_observation(observation):
+        logger.warning(
+            "[sanity-dispatch] observation collapsed into repeated lines sample_id={}: {!r}",
+            sample_id,
+            observation[:160],
+        )
+        return empty_output(fmt)
     if META_LEAK_RE.search(observation):
         logger.warning(
             "[sanity-dispatch] observation broke character sample_id={}: {!r}",

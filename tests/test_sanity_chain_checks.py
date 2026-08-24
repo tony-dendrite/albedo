@@ -378,3 +378,27 @@ def test_edit_regex_covers_the_common_writers():
         assert _EDIT_RE.search(cmd), cmd
     for cmd in ["ls -la", "grep -n foo f.py", "cat f.py", "pwd", "python -m pytest -q"]:
         assert not _EDIT_RE.search(cmd), cmd
+
+
+def test_edit_regex_covers_write_redirects_but_not_lookalikes():
+    from sanity_service.chain import _EDIT_RE
+
+    for cmd in [
+        'echo "# IVS" > ./moto/ivs/__init__.py',
+        "printf 'x' > f.py",
+        "git show HEAD:src/a.ts > src/a.ts",
+        "git diff -- a.py > /workspace/patch.txt",
+        "cat notes >> docs/log.md",
+    ]:
+        assert _EDIT_RE.search(cmd), cmd
+    for cmd in [
+        "pytest -q 2>/dev/null",
+        "make 2>&1 | tail -5",
+        "ls > /dev/null",
+        "echo boom >&2",
+        "awk 'length > 79' f.py",
+        "if (a >= b.c):",
+        "x -> self.foo",
+        "<p>a.b</p>",
+    ]:
+        assert not _EDIT_RE.search(cmd), cmd

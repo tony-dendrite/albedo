@@ -76,7 +76,8 @@ _EDIT_RE = re.compile(
     r"\b(sed -i|cat >|cat >>|tee |git apply|applypatch|str_replace|patch -p\d)"
     r"|<<\s*'?\"?[A-Za-z_][A-Za-z0-9_]*'?\"?\s*>"
     r"|<<\s*'?(EOF|PYEOF|PATCH|PY|SH|BASH|SCRIPT)\b"
-    r"|\.write_text\(|\.writelines\(|open\([^)]*['\"][wa]\+?['\"]",
+    r"|\.write_text\(|\.writelines\(|open\([^)]*['\"][wa]\+?['\"]"
+    r"|(?<=\s)>>?\s*(?!/dev/)[~$\w./-]*(?:/[~$\w.-]+|\.[A-Za-z]\w*)",
     re.I,
 )
 _MICRO_CONTEXT_CHARS = 24000
