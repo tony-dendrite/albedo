@@ -16,21 +16,28 @@ from loguru import logger
 from albedo_config import JudgeSettings, SanitySettings, get_judge_settings, get_sanity_settings
 from albedo_eval_service.remote.dataset import format_messages
 from albedo_eval_service.shared.observation_format import (
+    _FILE_TOKEN,
     MAX_CONSECUTIVE_BAD_TURNS,
     canonical_empty,
+    claims_tracked_change,
+    command_contract,
     degenerate_observation,
+    deleted_files,
     detect_format,
     empty_output,
     has_content,
     leaked_turn,
+    observation_body,
     prints_nothing_on_success,
     renumbered_view,
     repair_output,
+    repair_to_contract,
     requires_output,
     retry_feedback,
     silent_observation,
     unusable_turn,
     valid_output,
+    without_tracked_changes,
     wrap,
 )
 from albedo_eval_service.shared.sed_check import fabricated_sed_error, sed_error_message
@@ -727,11 +734,7 @@ def _run_chain_checks(states: list[_TrajectoryState], turn_count: int) -> None:
     for state in states:
         if state.error or state.heuristic_reason:
             continue
-        if not state.submits and not any(
-            _CHAIN_EDIT_RE.search(str(t.get("content") or ""))
-            for t in state.turns
-            if t.get("role") == "assistant"
-        ):
+        if not state.submits and not _has_edited(state):
             state.heuristic_reason = f"chain: no submission and no edits in {turn_count} turns"
         elif state.micro and not micro_target_touched(state, state.micro):
             state.heuristic_reason = (
@@ -973,6 +976,31 @@ def _append_observation(state: _TrajectoryState, observation: str) -> None:
     )
 
 
+def _has_edited(state: _TrajectoryState) -> bool:
+    return any(
+        _CHAIN_EDIT_RE.search(str(t.get("content") or ""))
+        for t in state.turns
+        if t.get("role") == "assistant"
+    )
+
+
+_REMOVAL_RE = re.compile(r"\brm\b|\bgit\s+(?:rm|checkout|stash)\b|\bmv\b")
+
+
+def _named_in_removal(state: _TrajectoryState, path: str) -> bool:
+    """Did any prior edit- or removal-shaped command name this path (by full path or suffix)?"""
+    for turn in state.turns:
+        if turn.get("role") != "assistant":
+            continue
+        content = str(turn.get("content") or "")
+        if not (_CHAIN_EDIT_RE.search(content) or _REMOVAL_RE.search(first_bash_command(content))):
+            continue
+        for token in _FILE_TOKEN.findall(first_bash_command(content)):
+            if token == path or token.endswith("/" + path) or path.endswith("/" + token):
+                return True
+    return False
+
+
 def _misdiagnosed_sed(command: str, observation: str) -> str:
     if not _SED_ERROR_RE.search(observation):
         return ""
@@ -1081,6 +1109,24 @@ async def _simulate_observation(
             fallback,
         )
         return fallback
+    if observation_body(observation, fmt).strip() == command.strip():
+        logger.warning(
+            "[sanity-dispatch] observation echoed the command back sample_id={} command={!r}",
+            sample_id,
+            command[:80],
+        )
+        return empty_output(fmt)
+    phantom = (not _has_edited(state) and claims_tracked_change(command, observation)) or any(
+        not _named_in_removal(state, path) for path in deleted_files(command, observation)
+    )
+    if phantom:
+        logger.warning(
+            "[sanity-dispatch] claimed a change no command made sample_id={} command={!r}",
+            sample_id,
+            command[:80],
+        )
+        observation = without_tracked_changes(observation, fmt)
+    observation = repair_to_contract(observation, fmt, command_contract(command))
     observation = renumbered_view(command, canonical_empty(observation, fmt))
     if requires_output(command) and not has_content(observation, fmt):
         return await _retry_for_output(

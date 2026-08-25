@@ -29,7 +29,12 @@ STRICT RULES:
   Count your output lines before replying.
 - Never pre-apply a pending request: when the transcript asks for something to be added, fixed
   or renamed, the repository does NOT contain it yet. Render the file as it reads BEFORE that
-  change — showing the request as already done makes it impossible to satisfy.
+  change — showing the request as already done makes it impossible to satisfy. This covers
+  command output too: a test exercising the pending change still fails until a transcript edit
+  makes it pass.
+- The repository starts as a clean checkout: `git status` and `git diff` report a file as
+  modified only when an earlier command in this transcript actually modified it — never invent
+  a change or its hunks.
 - Anchor on evidence: file, directory and symbol names mentioned in the task description are
   real — build your output around them and the standard layout for the project's language.
   When you cannot infer paths with confidence, prefer FEWER lines over invented ones; if the

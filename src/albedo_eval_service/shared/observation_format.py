@@ -72,27 +72,34 @@ def valid_output(raw: str, fmt: str) -> bool:
 
 
 _NUMBERED_VIEW_LINE = re.compile(r"^(\s*)(\d+)(\t.*)$", re.DOTALL)
-_SED_READ_RANGE = re.compile(r"^sed\s+-n\s+'?(\d+),(\d+)p'?")
+_SED_READ_RANGE = re.compile(r"\bsed\s+-n\s+'?(\d+),(\d+)p'?(?!\S)")
+_CONTIGUOUS_VIEW = re.compile(r"\bcat\s+-n\b|\bnl\s+-ba\b")
+_SPARSE_VIEW = re.compile(r"\bgrep\b|\brg\b|p;|;\s*\d+,\d+p")
 
 
 def renumbered_view(command: str, raw: str) -> str:
-    match = _SED_READ_RANGE.match((command or "").strip())
-    if not match:
+    text = (command or "").strip()
+    window, numberer = _SED_READ_RANGE.search(text), _CONTIGUOUS_VIEW.search(text)
+    if not (window or numberer) or _SPARSE_VIEW.search(text):
         return raw
-    start = int(match.group(1))
+    if OPENHANDS_TRUNCATION_NOTICE in (raw or ""):
+        return raw
+    if window and numberer and numberer.start() > window.start():
+        window = None
     lines = (raw or "").splitlines()
     numbered = [i for i, line in enumerate(lines) if _NUMBERED_VIEW_LINE.match(line)]
     if not numbered:
         return raw
     first = _NUMBERED_VIEW_LINE.match(lines[numbered[0]])
-    if first is None or int(first.group(2)) == start:
-        return raw
-    offset = start - int(first.group(2))
-    for i in numbered:
+    start = int(window.group(1)) if window else int(first.group(2))
+    fixed = False
+    for count, i in enumerate(numbered):
         pad, number, rest = _NUMBERED_VIEW_LINE.match(lines[i]).groups()
-        renumbered = str(int(number) + offset)
-        lines[i] = f"{' ' * max(len(pad) + len(number) - len(renumbered), 1)}{renumbered}{rest}"
-    return "\n".join(lines)
+        want = str(start + count)
+        if want != number:
+            lines[i] = f"{' ' * max(len(pad) + len(number) - len(want), 1)}{want}{rest}"
+            fixed = True
+    return "\n".join(lines) if fixed else raw
 
 
 def leaked_turn(raw: str) -> bool:
@@ -318,6 +325,71 @@ def prints_nothing_on_success(command: str) -> bool:
     """True when every stage of `command` is a write or a navigation that stays quiet."""
     stages = [stage.strip() for stage in (command or "").split("&&")]
     return bool(stages) and all(stage and _PRINTS_NOTHING.match(stage) for stage in stages)
+
+
+_GIT_WORKTREE_QUERY = re.compile(r"\bgit\s+(?:diff|status)\b")
+# a diff against a revision or the index is not a report on the working tree
+_GIT_NOT_WORKTREE = re.compile(r"\bgit\s+diff\s+[^|;&]*(?:--cached|--staged|HEAD|[~^]|\.\.)")
+_DIFF_HEADER = re.compile(r"^diff --git ")
+_DIFF_BODY = re.compile(r"^(?:index |--- |\+\+\+ |@@ |[ +\-\\])")
+_CHANGE_SECTION = re.compile(r"^changes (?:not staged for commit|to be committed):", re.I | re.M)
+_CHANGE_ENTRY = re.compile(r"^\s*(?:modified|deleted|renamed|new file|typechange):\s+\S", re.I)
+_SHORT_ENTRY = re.compile(r"^\s?[MADRCU][MADRCU ]?\s+\S")
+_STATUS_HINT = re.compile(r"^\s*\(use ")
+_DELETION_HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+0,0 @@", re.M)
+
+
+def claims_tracked_change(command: str, raw: str) -> bool:
+    """True when git output reports a tracked file as changed.
+
+    Diff hunks only count when the command diffs the working tree (`git log -p` and `git show`
+    print hunks legitimately); `modified:` entries only count inside a status change section,
+    so the words appearing in ordinary file content do not trip this."""
+    text, body = command or "", raw or ""
+    worktree = bool(_GIT_WORKTREE_QUERY.search(text)) and not _GIT_NOT_WORKTREE.search(text)
+    if worktree and any(_DIFF_HEADER.match(line) for line in body.splitlines()):
+        return True
+    if "git status" in text and any(_SHORT_ENTRY.match(line) for line in body.splitlines()):
+        return True
+    return bool(_CHANGE_SECTION.search(body)) and any(
+        _CHANGE_ENTRY.match(line) for line in body.splitlines()
+    )
+
+
+_FILE_TOKEN = re.compile(r"[\w./-]*[\w-]+\.[A-Za-z]\w*")
+
+
+def deleted_files(command: str, raw: str) -> list[str]:
+    """Paths a working-tree `git diff` claims were deleted or emptied outright."""
+    text = command or ""
+    if not _GIT_WORKTREE_QUERY.search(text) or _GIT_NOT_WORKTREE.search(text):
+        return []
+    body = raw or ""
+    if not _DELETION_HUNK.search(body):
+        return []
+    return [
+        m.group(1) for line in body.splitlines() if (m := re.match(r"^diff --git a/(\S+)", line))
+    ]
+
+
+def without_tracked_changes(raw: str, fmt: str) -> str:
+    """Drop the change report from git output, keeping the branch and untracked-file lines."""
+    kept: list[str] = []
+    dropping = False
+    for line in observation_body(raw, fmt).splitlines():
+        if (
+            _DIFF_HEADER.match(line)
+            or _CHANGE_SECTION.match(line)
+            or _CHANGE_ENTRY.match(line)
+            or _SHORT_ENTRY.match(line)
+        ):
+            dropping = True
+        elif dropping and (not line.strip() or _STATUS_HINT.match(line) or _DIFF_BODY.match(line)):
+            pass  # the section's hint lines and hunk bodies go with it
+        else:
+            dropping = False
+            kept.append(line)
+    return wrap("\n".join(kept).strip("\n"), fmt)
 
 
 def silent_observation(raw: str) -> bool:
