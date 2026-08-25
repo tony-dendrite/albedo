@@ -21,17 +21,6 @@ class ValidationResult:
         return all(c.ok for c in self.checks)
 
     def to_jsonl_record(self, *, ts: float | None = None) -> dict[str, Any]:
-        fp = next(
-            (
-                c.details.get("fingerprint")
-                for c in self.checks
-                if c.name == "duplicate" and c.details.get("fingerprint")
-            ),
-            None,
-        )
-        fingerprint_summary = (
-            {"method": fp.get("method"), "n_tensors": len(fp.get("layer_keys", []))} if fp else None
-        )
         return {
             "ts": ts if ts is not None else time.time(),
             "block": self.block,
@@ -44,9 +33,8 @@ class ValidationResult:
                 c.name: {
                     "ok": c.ok,
                     "reason": c.reason,
-                    "details": {k: v for k, v in c.details.items() if k != "fingerprint"},
+                    "details": dict(c.details),
                 }
                 for c in self.checks
             },
-            "fingerprint_summary": fingerprint_summary,
         }
