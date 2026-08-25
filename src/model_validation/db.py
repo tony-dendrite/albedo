@@ -91,9 +91,10 @@ async def claim_next(
                 """
                 SELECT ms.id AS submission_id, ms.chain_commit_id, ms.hotkey,
                        ms.model_uri, ms.commit_hash, ms.retry_count, ms.priority,
-                       cc.block_number, cc.payload_hash
+                       cc.block_number, cc.payload_hash, m.coldkey
                 FROM model_submissions ms
                 JOIN chain_commits cc ON cc.id = ms.chain_commit_id
+                LEFT JOIN miners m ON m.hotkey = ms.hotkey
                 WHERE ms.state IN ('SUBMITTED', 'HIPPIUS_RETRYABLE')
                 ORDER BY cc.block_number ASC, ms.priority ASC, ms.created_at ASC
                 FOR UPDATE OF ms SKIP LOCKED
