@@ -94,6 +94,11 @@ stdout, so an empty observation is not a possible result for it: reproduce the o
 actually print, deriving it from the repository contents given above. Follow the OUTPUT FORMAT
 exactly and return nothing else."""
 
+DEGENERATE_RETRY = """The previous answer collapsed: nearly every line of it was the same line
+repeated. No real command prints that. Re-derive the output this command would actually produce
+from the repository contents given above, emitting each distinct line once. Prefer FEWER lines
+over padding with a repeated one. Follow the OUTPUT FORMAT exactly and return nothing else."""
+
 
 def simulation_system_prompt(fmt: str, context_block: str | None = None) -> str:
     block = format_block(fmt)

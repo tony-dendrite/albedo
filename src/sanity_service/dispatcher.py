@@ -21,6 +21,7 @@ from albedo_eval_service.shared.observation_format import (
     detect_format,
     empty_output,
     retry_feedback,
+    unusable_turn,
     valid_output,
     wrap,
 )
@@ -32,6 +33,7 @@ from albedo_eval_service.shared.submit_protocol import (
 )
 from albedo_eval_service.simulator.prompt_simulator import (
     COMPLETE_MARKER,
+    DEGENERATE_RETRY,
     simulation_system_prompt,
 )
 from sanity_remote.models import SanityRunRequest
@@ -70,6 +72,9 @@ _BASH_BLOCK_RE = re.compile(
     r"```(?:bash|sh|shell)\s*\n.*?```|<([a-z_]*bash[a-z_]*)>.*?</\1>",
     re.IGNORECASE | re.DOTALL,
 )
+
+MAX_CONSECUTIVE_DEGENERATE_OBSERVATIONS = 3
+_DEGENERATE_RETRY_TEMPERATURE = 0.3
 
 
 @dataclass
@@ -740,8 +745,12 @@ def _apply_turn_result(states: list[_TrajectoryState], result: dict[str, Any]) -
             state.error = "missing_generation_response"
             continue
         response = str(responses[i] or "")
-        failed = i < len(heuristics) and not bool(heuristics[i].get("passed", True))
-        reason = str(heuristics[i].get("reason") or "heuristic failed") if failed else ""
+        reason = (
+            str(heuristics[i].get("reason") or "heuristic failed")
+            if i < len(heuristics) and not bool(heuristics[i].get("passed", True))
+            else unusable_turn(response)
+        )
+        failed = bool(reason)
         if failed and not _has_bash_command(response):
             state.consecutive_bad_turns += 1
             if state.consecutive_bad_turns >= MAX_CONSECUTIVE_BAD_TURNS:
@@ -816,9 +825,7 @@ async def _append_observations(
                     client=client,
                     settings=settings,
                     eval_run_id=eval_run_id,
-                    sample_id=state.sample_id,
-                    prompt=state.prompt,
-                    messages=state.messages,
+                    state=state,
                     assistant_output=assistant_output,
                 )
                 for state, assistant_output in active
@@ -940,40 +947,46 @@ async def _simulate_observation(
     client: Any,
     settings: JudgeSettings,
     eval_run_id: str,
-    sample_id: str,
-    prompt: str,
-    messages: list[dict[str, str]],
+    state: _TrajectoryState,
     assistant_output: str,
 ) -> str:
+    sample_id, prompt, messages = state.sample_id, state.prompt, state.messages
     fmt = detect_format(sample_id, messages)
-    response = await client.complete(
-        model=settings.evaluator_model,
-        messages=[
-            {"role": "system", "content": simulation_system_prompt(fmt)},
-            {
-                "role": "user",
-                "content": _simulation_transcript(
-                    messages=messages,
-                    prompt=prompt,
-                    assistant_output=assistant_output,
-                ),
-            },
-        ],
-        temperature=0.0,
-        max_tokens=settings.simulation_max_tokens,
-        provider=_evaluator_provider(settings),
-        accept=lambda raw: valid_output(raw, fmt) and not degenerate_observation(raw),
+    transcript = _simulation_transcript(
+        messages=messages, prompt=prompt, assistant_output=assistant_output
     )
-    if response.error:
-        raise RuntimeError(response.error)
-    observation = response.raw.strip()
-    if degenerate_observation(observation):
+    observation = ""
+    for attempt in range(MAX_CONSECUTIVE_DEGENERATE_OBSERVATIONS):
+        ask = transcript if attempt == 0 else f"{transcript}\n\n{DEGENERATE_RETRY}"
+        response = await client.complete(
+            model=settings.evaluator_model,
+            messages=[
+                {"role": "system", "content": simulation_system_prompt(fmt)},
+                {"role": "user", "content": ask},
+            ],
+            temperature=0.0 if attempt == 0 else _DEGENERATE_RETRY_TEMPERATURE,
+            max_tokens=settings.simulation_max_tokens,
+            provider=_evaluator_provider(settings),
+            accept=lambda raw: valid_output(raw, fmt) and not degenerate_observation(raw),
+        )
+        if response.error:
+            raise RuntimeError(response.error)
+        observation = response.raw.strip()
+        if not degenerate_observation(observation):
+            break
         logger.warning(
-            "[sanity-dispatch] observation collapsed into repeated lines sample_id={}: {!r}",
+            "[sanity-dispatch] observation collapsed into repeated lines sample_id={} "
+            "attempt={}/{}: {!r}",
             sample_id,
+            attempt + 1,
+            MAX_CONSECUTIVE_DEGENERATE_OBSERVATIONS,
             observation[:160],
         )
-        return empty_output(fmt)
+    else:
+        raise RuntimeError(
+            f"simulator collapsed into repeated lines on "
+            f"{MAX_CONSECUTIVE_DEGENERATE_OBSERVATIONS} consecutive attempts at one step"
+        )
     if META_LEAK_RE.search(observation):
         logger.warning(
             "[sanity-dispatch] observation broke character sample_id={}: {!r}",

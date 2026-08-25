@@ -167,7 +167,7 @@ META_LEAK_RE = re.compile(
 )
 
 _ROLE_LEAK_RE = re.compile(
-    r"```|^\s*THOUGHT\s*:"
+    r"```|^\s*THOUGHT\s*:|✓|✅|^\s*<returncode>|^\s*OBSERVATION:"
     r"|\bI(?:'ve|\s+have)?\s+(?:fixed|added|implemented|applied|updated|refactored|corrected)\b",
     re.MULTILINE | re.IGNORECASE,
 )
@@ -184,6 +184,7 @@ _MSG_PATH_RE = re.compile(
     rf"\b(?:[\w.-]+/)+[\w.-]+\.\w{{1,6}}\b|\b[\w-]+\.(?:{_SOURCE_EXT})\b", re.I
 )
 _MIN_TRIGRAM_DIVERSITY = 0.6
+_MIN_REQUEST_WORDS = 8
 
 
 def chain_context(state: Any) -> str:
@@ -197,8 +198,14 @@ def ungrounded_reason(message: str, context: str, clause: str = "") -> str:
     context = f"{context}\n{clause}"
     if not text:
         return "empty"
+    marker = next(iter(clause.split()[1:2]), "") if clause.startswith("echo ") else ""
+    submit = re.compile(rf"\b{re.escape(marker)}\b") if marker else None
+    if submit and submit.search(text):
+        request = submit.sub("", text.replace(clause, " "))
+        if submit.match(text.removeprefix("echo ")) or len(request.split()) < _MIN_REQUEST_WORDS:
+            return "carries the submit command and no request"
     if _ROLE_LEAK_RE.search(text):
-        return "written as an agent turn (shell block or THOUGHT: line)"
+        return "written as an agent turn (shell block, THOUGHT: line or a ✓ status report)"
     if META_LEAK_RE.search(text):
         return "breaks character (mentions being an AI, a simulation or an evaluation)"
     if _TEST_DEMAND_RE.search(text):

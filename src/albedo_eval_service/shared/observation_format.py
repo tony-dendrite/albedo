@@ -192,16 +192,22 @@ def unusable_turn(text: str, *, truncated: bool = False) -> str:
 
 
 _LEADING_LINE_NO = re.compile(r"^\s*\d+\s+")
+_DIGIT_RUN = re.compile(r"\d+")
 _MIN_LINES_FOR_DEGENERACY = 10
+_TOP_LINES_COUNTED = 3
 _MAX_LINE_SHARE = 0.8
 
 
 def degenerate_observation(text: str) -> bool:
-    lines = [_LEADING_LINE_NO.sub("", ln).strip() for ln in (text or "").splitlines()]
-    lines = [ln for ln in lines if ln]
+    lines = [
+        _DIGIT_RUN.sub("#", _LEADING_LINE_NO.sub("", line)).strip()
+        for line in (text or "").splitlines()
+    ]
+    lines = [line for line in lines if line]
     if len(lines) < _MIN_LINES_FOR_DEGENERACY:
         return False
-    return max(Counter(lines).values()) / len(lines) >= _MAX_LINE_SHARE
+    repeated = sum(count for _, count in Counter(lines).most_common(_TOP_LINES_COUNTED))
+    return repeated / len(lines) >= _MAX_LINE_SHARE
 
 
 def retry_feedback(reason: str) -> str:
