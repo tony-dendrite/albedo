@@ -23,6 +23,8 @@ from albedo_eval_service.shared.observation_format import (
     empty_output,
     has_content,
     leaked_turn,
+    prints_nothing_on_success,
+    renumbered_view,
     repair_output,
     requires_output,
     retry_feedback,
@@ -856,13 +858,16 @@ async def _append_observations(
     finally:
         await client.aclose()
 
-    for (state, _assistant_output), result in zip(active, results, strict=False):
+    for (state, assistant_output), result in zip(active, results, strict=False):
         if isinstance(result, Exception):
             state.error = f"{type(result).__name__}: {result}"
             continue
         _append_observation(state, result)
+        quiet_by_design = prints_nothing_on_success(first_bash_command(assistant_output))
         state.consecutive_silent_observations = (
-            state.consecutive_silent_observations + 1 if silent_observation(result) else 0
+            state.consecutive_silent_observations + 1
+            if silent_observation(result) and not quiet_by_design
+            else 0
         )
         if state.consecutive_silent_observations >= MAX_CONSECUTIVE_SILENT_OBSERVATIONS:
             state.error = (
@@ -1076,7 +1081,7 @@ async def _simulate_observation(
             fallback,
         )
         return fallback
-    observation = canonical_empty(observation, fmt)
+    observation = renumbered_view(command, canonical_empty(observation, fmt))
     if requires_output(command) and not has_content(observation, fmt):
         return await _retry_for_output(
             client=client,

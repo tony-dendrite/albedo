@@ -71,6 +71,30 @@ def valid_output(raw: str, fmt: str) -> bool:
     return not text.startswith(("<returncode>", "Observation:", "OBSERVATION:"))
 
 
+_NUMBERED_VIEW_LINE = re.compile(r"^(\s*)(\d+)(\t.*)$", re.DOTALL)
+_SED_READ_RANGE = re.compile(r"^sed\s+-n\s+'?(\d+),(\d+)p'?")
+
+
+def renumbered_view(command: str, raw: str) -> str:
+    match = _SED_READ_RANGE.match((command or "").strip())
+    if not match:
+        return raw
+    start = int(match.group(1))
+    lines = (raw or "").splitlines()
+    numbered = [i for i, line in enumerate(lines) if _NUMBERED_VIEW_LINE.match(line)]
+    if not numbered:
+        return raw
+    first = _NUMBERED_VIEW_LINE.match(lines[numbered[0]])
+    if first is None or int(first.group(2)) == start:
+        return raw
+    offset = start - int(first.group(2))
+    for i in numbered:
+        pad, number, rest = _NUMBERED_VIEW_LINE.match(lines[i]).groups()
+        renumbered = str(int(number) + offset)
+        lines[i] = f"{' ' * max(len(pad) + len(number) - len(renumbered), 1)}{renumbered}{rest}"
+    return "\n".join(lines)
+
+
 def leaked_turn(raw: str) -> bool:
     return bool(_ROLE_MARKER.match((raw or "").strip()))
 
@@ -283,6 +307,17 @@ def canonical_empty(raw: str, fmt: str) -> str:
 
 
 _BARE_LINE_NUMBER = re.compile(r"^\s*\d+\s*$")
+
+
+_PRINTS_NOTHING = re.compile(
+    r"^(?:cd|rm|mkdir|mv|cp|touch|export|chmod|true|git add|sed\s+(?:-i|--in-place))\b"
+)
+
+
+def prints_nothing_on_success(command: str) -> bool:
+    """True when every stage of `command` is a write or a navigation that stays quiet."""
+    stages = [stage.strip() for stage in (command or "").split("&&")]
+    return bool(stages) and all(stage and _PRINTS_NOTHING.match(stage) for stage in stages)
 
 
 def silent_observation(raw: str) -> bool:
