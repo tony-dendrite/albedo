@@ -426,19 +426,36 @@ class ModelValidationSettings(BaseSettings):
     OPENSEARCH_URL: str = "http://127.0.0.1:9200"
     OPENSEARCH_USER: str = ""
     OPENSEARCH_PASSWORD: str = ""
-    OPENSEARCH_INDEX: str = "albedo_fingerprints"
-    MAX_KNN_DIM: int = 16000
+    OPENSEARCH_INDEX: str = "albedo_dedup_ws"
     S3_BUCKET: str = ""
     S3_ENDPOINT: str = "https://s3.hippius.com"
     S3_ACCESS_KEY: str = ""
     S3_SECRET_KEY: str = ""
-    FP_FILE: str = "fingerprint.json"
-    TENSORS_FILE: str = "tensors.json"
     ARCH_SPEC_PATH: str = Field(
         _MV_ARCH_SPEC_PATH, validation_alias=AliasChoices("ALBEDO_ARCH_SPEC")
     )
-    SIM_THRESHOLD: float = 0.98
-    KNN_CANDIDATES: int = 20
+    DEDUP_SECRET: str = ""
+    DEDUP_SECRET_FILE: str = ""
+    DEDUP_REF_DIR: str = ""
+    DEDUP_GPU: int = 0
+    DEDUP_ENFORCE: bool = False
+    DEDUP_NEAREST_K: int = 10
+    DEDUP_COPY_REL: float = 1e-5
+    DEDUP_LINEAR_RESID: float = 0.20
+    DEDUP_ALPHA_Z: float = 8.0
+    DEDUP_ALPHA_MIN: float = 0.02
+    DEDUP_F_NOISE: float = 0.10
+    DEDUP_EMBED_RATIO_NOISE: float = 0.60
+    DEDUP_DENS_MIN: float = 0.40
+    DEDUP_KURT_MAX: float = 100.0
+    DEDUP_REL_TRIVIAL: float = 0.0025
+    DEDUP_LORA_MAX_SPIKES: float = 40
+    DEDUP_LORA_MIN_F: float = 0.9
+    DEDUP_HEAD_SCALE_MAX: float = 0.02
+    DEDUP_GLOBAL_SCALE_MAX: float = 0.005
+    DEDUP_REUSE_COS: float = 0.8
+    DEDUP_TOPK_PARTNERS: int = 5
+    DEDUP_PERMUTED_MAX_IDENT: float = 0.5
     POLL_INTERVAL_S: float = Field(5.0, validation_alias=AliasChoices("ALBEDO_HV_POLL_S"))
     LEASE_SECONDS: int = Field(600, validation_alias=AliasChoices("ALBEDO_HV_LEASE_S"))
     HEARTBEAT_S: float = Field(30.0, validation_alias=AliasChoices("ALBEDO_HV_HEARTBEAT_S"))

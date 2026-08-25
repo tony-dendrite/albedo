@@ -17,7 +17,6 @@ _c = _T.get("chain", {})
 _a = _T.get("arch", {})
 _s = _T.get("seed", {})
 _f = _T.get("files", {})
-_p = _T.get("preeval", {})
 
 NAME: str = _c.get("name", "Albedo")
 SEED_REPO: str = _c.get("seed_repo", "")
@@ -41,8 +40,6 @@ REQUIRE_SAFETENSORS: bool = bool(_f.get("require_safetensors", True))
 ALLOWED_FILES: tuple[str, ...] = tuple(_f.get("allowed", []))
 ALLOWED_GLOBS: tuple[str, ...] = tuple(_f.get("allowed_globs", []))
 FORBIDDEN_GLOBS: tuple[str, ...] = tuple(_f.get("forbidden_globs", []))
-
-SIM_THRESHOLD: float = float(_p.get("similarity_threshold", 0.98))
 
 MODEL_CACHE_DIR: str = (
     os.environ.get("CV_MODEL_CACHE_DIR")
