@@ -740,7 +740,7 @@ def _run_chain_checks(states: list[_TrajectoryState], turn_count: int) -> None:
             state.heuristic_reason = (
                 f"chain: micro-task submitted without touching {state.micro.get('file')}"
             )
-        elif empty_submit_count(state, state.submit_marker) >= 2:
+        elif empty_submit_count(state, state.submit_marker) > max(1, _edit_turns(state)):
             state.heuristic_reason = "chain: repeated submissions without doing any work"
         elif amputated_thinking(state):
             state.heuristic_reason = "chain: reasoning absent on majority of turns"
@@ -977,10 +977,15 @@ def _append_observation(state: _TrajectoryState, observation: str) -> None:
 
 
 def _has_edited(state: _TrajectoryState) -> bool:
-    return any(
-        _CHAIN_EDIT_RE.search(str(t.get("content") or ""))
+    return bool(_edit_turns(state))
+
+
+def _edit_turns(state: _TrajectoryState) -> int:
+    """How many turns actually changed a file — the work the empty-submit check is named for."""
+    return sum(
+        1
         for t in state.turns
-        if t.get("role") == "assistant"
+        if t.get("role") == "assistant" and _CHAIN_EDIT_RE.search(str(t.get("content") or ""))
     )
 
 

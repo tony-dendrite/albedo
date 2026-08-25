@@ -18,7 +18,7 @@ from sanity_service.rubricisity import (
 )
 
 DUP_CMD_THRESHOLD = 0.65
-MAX_RUN_THRESHOLD = 4
+MAX_RUN_THRESHOLD = 6
 
 TAIL_CUTOFF = 16
 TAIL_JUDGE_FAIL_ZEROS = 3
