@@ -71,6 +71,10 @@ def valid_output(raw: str, fmt: str) -> bool:
     return not text.startswith(("<returncode>", "Observation:", "OBSERVATION:"))
 
 
+def leaked_turn(raw: str) -> bool:
+    return bool(_ROLE_MARKER.match((raw or "").strip()))
+
+
 def repair_output(raw: str, fmt: str) -> str:
     text = (raw or "").strip()
     if fmt != RETURNCODE or not text.startswith("<returncode>"):

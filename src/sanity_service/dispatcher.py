@@ -22,6 +22,8 @@ from albedo_eval_service.shared.observation_format import (
     detect_format,
     empty_output,
     has_content,
+    leaked_turn,
+    repair_output,
     requires_output,
     retry_feedback,
     silent_observation,
@@ -1010,7 +1012,18 @@ async def _simulate_observation(
         )
         if response.error:
             raise RuntimeError(response.error)
-        observation = response.raw.strip()
+        observation = repair_output(response.raw.strip(), fmt)
+        if leaked_turn(observation):
+            logger.warning(
+                "[sanity-dispatch] observation came back as a transcript turn sample_id={} "
+                "attempt={}/{}: {!r}",
+                sample_id,
+                attempt + 1,
+                MAX_CONSECUTIVE_DEGENERATE_OBSERVATIONS,
+                observation[:160],
+            )
+            observation = ""
+            continue
         if fabricated_sed_error(command, observation):
             logger.warning(
                 "[sanity-dispatch] invented a sed error real sed does not give sample_id={} "
@@ -1039,6 +1052,8 @@ async def _simulate_observation(
             observation[:160],
         )
     else:
+        if not observation:
+            return empty_output(fmt)
         raise RuntimeError(
             f"simulator collapsed into repeated lines on "
             f"{MAX_CONSECUTIVE_DEGENERATE_OBSERVATIONS} consecutive attempts at one step"
