@@ -740,7 +740,7 @@ def _run_chain_checks(states: list[_TrajectoryState], turn_count: int) -> None:
             state.heuristic_reason = (
                 f"chain: micro-task submitted without touching {state.micro.get('file')}"
             )
-        elif empty_submit_count(state, state.submit_marker) > max(1, _edit_turns(state)):
+        elif empty_submit_count(state, state.submit_marker) > max(1, 2 * _edit_turns(state)):
             state.heuristic_reason = "chain: repeated submissions without doing any work"
         elif amputated_thinking(state):
             state.heuristic_reason = "chain: reasoning absent on majority of turns"
