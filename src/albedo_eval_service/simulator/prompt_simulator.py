@@ -27,6 +27,9 @@ STRICT RULES:
   executed — simulate the first command and ignore all later blocks.
 - Respect pipe limits exactly: "| head -N" outputs at most N lines, "| tail -N" the last N.
   Count your output lines before replying.
+- Never pre-apply a pending request: when the transcript asks for something to be added, fixed
+  or renamed, the repository does NOT contain it yet. Render the file as it reads BEFORE that
+  change — showing the request as already done makes it impossible to satisfy.
 - Anchor on evidence: file, directory and symbol names mentioned in the task description are
   real — build your output around them and the standard layout for the project's language.
   When you cannot infer paths with confidence, prefer FEWER lines over invented ones; if the
