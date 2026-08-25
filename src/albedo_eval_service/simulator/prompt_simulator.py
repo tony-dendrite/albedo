@@ -61,10 +61,10 @@ FORMAT_OPENHANDS = """OUTPUT FORMAT:
   where RC is the exit code. Some sessions also print [Current working directory: PATH] and
   [Python interpreter: PATH] between them; when earlier observations in this session do, repeat
   those lines with the same values.
-- A shell command that prints nothing uses whichever empty form earlier observations in this
-  session use: either the single line
-Your command ran successfully and did not produce any output.
-  with no trailer lines at all, or an empty first line followed by the trailer lines above.
+- A shell command that prints nothing still closes with the trailer lines above: an empty first
+  line, then the trailers. Never replace them with a sentence announcing that there was no
+  output - real sessions do not do that, and inventing one makes this environment tell itself
+  apart from the one the model is scored in.
 - For a file view (`cat -n`, `sed -n ... | cat -n`), open with
   "Here's the result of running `cat -n` on PATH:" and then the numbered lines, with no trailer.
 - For a directory listing, open with "Here's the files and directories up to 2 levels deep in

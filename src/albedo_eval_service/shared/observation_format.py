@@ -270,6 +270,19 @@ def has_content(raw: str, fmt: str) -> bool:
     return bool(observation_body(raw, fmt).strip())
 
 
+NO_OUTPUT_SENTENCE = "Your command ran successfully and did not produce any output."
+
+
+def canonical_empty(raw: str, fmt: str) -> str:
+    body = observation_body(raw, fmt).strip()
+    return empty_output(fmt) if body == NO_OUTPUT_SENTENCE else raw
+
+
+def silent_observation(raw: str) -> bool:
+    body = observation_body(raw, classify(raw)).strip()
+    return not body or body == NO_OUTPUT_SENTENCE
+
+
 _FIRST_BLOCK_RE = re.compile(r"```(?:bash|sh)?[ \t]*\n(.*?)```", re.DOTALL)
 _TAGGED_BLOCK_RE = re.compile(r"```(?:bash|sh)[ \t]*\n(.*?)```", re.DOTALL)
 

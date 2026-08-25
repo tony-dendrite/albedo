@@ -17,10 +17,14 @@ from albedo_config import JudgeSettings, SanitySettings, get_judge_settings, get
 from albedo_eval_service.remote.dataset import format_messages
 from albedo_eval_service.shared.observation_format import (
     MAX_CONSECUTIVE_BAD_TURNS,
+    canonical_empty,
     degenerate_observation,
     detect_format,
     empty_output,
+    has_content,
+    requires_output,
     retry_feedback,
+    silent_observation,
     unusable_turn,
     valid_output,
     wrap,
@@ -35,6 +39,7 @@ from albedo_eval_service.shared.submit_protocol import (
 from albedo_eval_service.simulator.prompt_simulator import (
     COMPLETE_MARKER,
     DEGENERATE_RETRY,
+    MUST_PRINT_RETRY,
     simulation_system_prompt,
 )
 from sanity_remote.models import SanityRunRequest
@@ -76,6 +81,7 @@ _BASH_BLOCK_RE = re.compile(
 
 MAX_CONSECUTIVE_DEGENERATE_OBSERVATIONS = 3
 _DEGENERATE_RETRY_TEMPERATURE = 0.3
+MAX_CONSECUTIVE_SILENT_OBSERVATIONS = 6
 
 
 @dataclass
@@ -97,6 +103,7 @@ class _TrajectoryState:
     submits: list[dict[str, Any]] = dataclasses.field(default_factory=list)
     retry_reason: str = ""
     consecutive_bad_turns: int = 0
+    consecutive_silent_observations: int = 0
     last_followup: str = ""
 
 
@@ -851,6 +858,21 @@ async def _append_observations(
             state.error = f"{type(result).__name__}: {result}"
             continue
         _append_observation(state, result)
+        state.consecutive_silent_observations = (
+            state.consecutive_silent_observations + 1 if silent_observation(result) else 0
+        )
+        if state.consecutive_silent_observations >= MAX_CONSECUTIVE_SILENT_OBSERVATIONS:
+            state.error = (
+                f"simulator answered {state.consecutive_silent_observations} consecutive "
+                f"commands with no output"
+            )
+            logger.warning(
+                "[sanity-dispatch] {} dropped as infra at turn {}: {}",
+                state.sample_id,
+                turn_index,
+                state.error,
+            )
+            continue
         state.prompt = format_messages(
             state.messages,
             tokenizer_path=str(_CANONICAL_TOKENIZER_PATH),
@@ -1020,7 +1042,56 @@ async def _simulate_observation(
             fallback,
         )
         return fallback
+    observation = canonical_empty(observation, fmt)
+    if requires_output(command) and not has_content(observation, fmt):
+        return await _retry_for_output(
+            client=client,
+            settings=settings,
+            sample_id=sample_id,
+            fmt=fmt,
+            transcript=transcript,
+            command=command,
+            observation=observation,
+        )
     return observation
+
+
+async def _retry_for_output(
+    *,
+    client: Any,
+    settings: JudgeSettings,
+    sample_id: str,
+    fmt: str,
+    transcript: str,
+    command: str,
+    observation: str,
+) -> str:
+    response = await client.complete(
+        model=settings.evaluator_model,
+        messages=[
+            {"role": "system", "content": simulation_system_prompt(fmt)},
+            {"role": "user", "content": f"{transcript}\n\n{MUST_PRINT_RETRY}"},
+        ],
+        temperature=0.0,
+        max_tokens=settings.simulation_max_tokens,
+        provider=_evaluator_provider(settings),
+        accept=lambda raw: (
+            valid_output(raw, fmt) and has_content(raw, fmt) and not degenerate_observation(raw)
+        ),
+    )
+    candidate = "" if response.error else response.raw.strip()
+    recovered = (
+        valid_output(candidate, fmt)
+        and has_content(candidate, fmt)
+        and not degenerate_observation(candidate)
+    )
+    logger.info(
+        "[sanity-dispatch] must_print_retry sample_id={} command={!r} recovered={}",
+        sample_id,
+        command[:80],
+        recovered,
+    )
+    return candidate if recovered else observation
 
 
 def _trajectory_result(
