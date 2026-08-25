@@ -322,9 +322,11 @@ _PRINTS_NOTHING = re.compile(
 
 
 def prints_nothing_on_success(command: str) -> bool:
-    """True when every stage of `command` is a write or a navigation that stays quiet."""
+    """True when every stage of `command` is a write, a navigation or a redirect: all quiet."""
     stages = [stage.strip() for stage in (command or "").split("&&")]
-    return bool(stages) and all(stage and _PRINTS_NOTHING.match(stage) for stage in stages)
+    return bool(stages) and all(
+        stage and (_PRINTS_NOTHING.match(stage) or _WRITE_RE.search(stage)) for stage in stages
+    )
 
 
 _GIT_WORKTREE_QUERY = re.compile(r"\bgit\s+(?:diff|status)\b")

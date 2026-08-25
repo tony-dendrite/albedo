@@ -5,7 +5,10 @@ from dataclasses import dataclass
 from loguru import logger
 
 from albedo_eval_service.shared.json_extract import extract_json
-from albedo_eval_service.shared.observation_format import action_blocks
+from albedo_eval_service.shared.observation_format import (
+    action_blocks,
+    prints_nothing_on_success,
+)
 from albedo_eval_service.shared.submit_protocol import ANY_MARKER_RE
 from sanity_service.judge_panel import make_client, query_panel
 from sanity_service.rubricisity import (
@@ -23,7 +26,10 @@ TAIL_JUDGE_MIN_FAILED_SAMPLES = 2
 
 
 def _asked_submit(command: str) -> bool:
-    return bool(ANY_MARKER_RE.match(command.removeprefix("echo ").lstrip()))
+    head, echoed, tail = command.partition("echo ")
+    if not echoed or not ANY_MARKER_RE.match(tail.lstrip()):
+        return False
+    return not head.strip() or prints_nothing_on_success(head.strip().rstrip("&|;").strip())
 
 
 def loop_stats(assistant_turns: list[str]) -> dict:

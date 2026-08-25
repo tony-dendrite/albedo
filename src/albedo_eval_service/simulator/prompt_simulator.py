@@ -35,6 +35,9 @@ STRICT RULES:
 - The repository starts as a clean checkout: `git status` and `git diff` report a file as
   modified only when an earlier command in this transcript actually modified it — never invent
   a change or its hunks.
+- Never announce your own elisions inside the output: no "(truncated, full file is N lines)" and
+  no comment about what you left out. Emit fewer real lines instead, and when a view must be cut
+  short use exactly the line "[... Observation truncated due to length ...]" on its own.
 - Anchor on evidence: file, directory and symbol names mentioned in the task description are
   real — build your output around them and the standard layout for the project's language.
   When you cannot infer paths with confidence, prefer FEWER lines over invented ones; if the
