@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from .observation_format import action_blocks
 
-DUP_CMD_THRESHOLD = 0.5
+DUP_CMD_THRESHOLD = 0.65
 MAX_RUN_THRESHOLD = 4
 
 MAX_LISTED_COMMANDS = 5

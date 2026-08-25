@@ -126,10 +126,13 @@ def test_explanation_names_the_loop_the_command_and_the_count():
 
 
 def test_explanation_caps_the_listed_commands():
-    commands = []
-    for name in ["a", "b", "c", "d", "e", "f", "g"]:
+    """Seven repeated commands, listed five at a time. The run rule is what makes this looped —
+    seven-pairs alone is a 0.5 ratio, which DUP_CMD_THRESHOLD deliberately no longer catches."""
+    commands = ["a"] * MAX_RUN_THRESHOLD
+    for name in ["b", "c", "d", "e", "f", "g"]:
         commands += [name, name]
     verdict = loop_verdict([_turn(c) for c in commands])
+    assert verdict.looped and verdict.dup_cmd_ratio < DUP_CMD_THRESHOLD
     text = loop_explanation(verdict)
     assert len(verdict.commands) == 7
     assert "and 2 more" in text
