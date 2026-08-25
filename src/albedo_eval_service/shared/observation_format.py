@@ -278,9 +278,14 @@ def canonical_empty(raw: str, fmt: str) -> str:
     return empty_output(fmt) if body == NO_OUTPUT_SENTENCE else raw
 
 
+_BARE_LINE_NUMBER = re.compile(r"^\s*\d+\s*$")
+
+
 def silent_observation(raw: str) -> bool:
     body = observation_body(raw, classify(raw)).strip()
-    return not body or body == NO_OUTPUT_SENTENCE
+    if not body or body == NO_OUTPUT_SENTENCE:
+        return True
+    return all(_BARE_LINE_NUMBER.match(line) for line in body.splitlines())
 
 
 _FIRST_BLOCK_RE = re.compile(r"```(?:bash|sh)?[ \t]*\n(.*?)```", re.DOTALL)
