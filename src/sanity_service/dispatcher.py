@@ -25,6 +25,7 @@ from albedo_eval_service.shared.observation_format import (
     valid_output,
     wrap,
 )
+from albedo_eval_service.shared.sed_check import fabricated_sed_error
 from albedo_eval_service.shared.submit_protocol import (
     assign_submit,
     command_for,
@@ -955,6 +956,7 @@ async def _simulate_observation(
     transcript = _simulation_transcript(
         messages=messages, prompt=prompt, assistant_output=assistant_output
     )
+    command = first_bash_command(assistant_output)
     observation = ""
     for attempt in range(MAX_CONSECUTIVE_DEGENERATE_OBSERVATIONS):
         ask = transcript if attempt == 0 else f"{transcript}\n\n{DEGENERATE_RETRY}"
@@ -967,11 +969,24 @@ async def _simulate_observation(
             temperature=0.0 if attempt == 0 else _DEGENERATE_RETRY_TEMPERATURE,
             max_tokens=settings.simulation_max_tokens,
             provider=_evaluator_provider(settings),
-            accept=lambda raw: valid_output(raw, fmt) and not degenerate_observation(raw),
+            accept=lambda raw: (
+                valid_output(raw, fmt)
+                and not degenerate_observation(raw)
+                and not fabricated_sed_error(command, raw)
+            ),
         )
         if response.error:
             raise RuntimeError(response.error)
         observation = response.raw.strip()
+        if fabricated_sed_error(command, observation):
+            logger.warning(
+                "[sanity-dispatch] invented a sed error real sed does not give sample_id={} "
+                "command={!r}: {!r}",
+                sample_id,
+                command[:120],
+                observation[:120],
+            )
+            return empty_output(fmt)
         if not degenerate_observation(observation):
             break
         logger.warning(
