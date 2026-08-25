@@ -60,3 +60,26 @@ def test_scan_commitments_accepts_only_three_part_v7_payloads():
     assert hf_commit.uid == 10
     assert hf_commit.model_uri == "alice/model-hf@" + "d" * 40
     assert "hk-mutable" not in by_hotkey
+
+
+def test_resolve_missing_coldkeys_only_for_registered_hotkeys(monkeypatch):
+    import asyncio
+
+    from chain_reader import db, reader
+
+    stored = {}
+
+    async def fake_missing(pool):
+        return ["hk-reg", "hk-gone", "hk-no-owner"]
+
+    async def fake_set(pool, hk, ck):
+        stored[hk] = ck
+
+    owners = {"hk-reg": "ck-1", "hk-no-owner": None}
+    monkeypatch.setattr(db, "hotkeys_missing_coldkey", fake_missing)
+    monkeypatch.setattr(db, "set_coldkey", fake_set)
+    monkeypatch.setattr(reader.chain, "hotkey_owner", lambda st, hk, block: owners.get(hk))
+
+    n = asyncio.run(reader.resolve_missing_coldkeys(None, object(), {"hk-reg", "hk-no-owner"}, 123))
+    assert n == 1
+    assert stored == {"hk-reg": "ck-1"}

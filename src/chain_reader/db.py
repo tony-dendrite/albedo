@@ -213,3 +213,18 @@ async def _reject_reused_commit(
             submission_id,
             uri,
         )
+
+
+async def hotkeys_missing_coldkey(pool: asyncpg.Pool) -> list[str]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT hotkey FROM miners WHERE coldkey IS NULL")
+    return [r["hotkey"] for r in rows]
+
+
+async def set_coldkey(pool: asyncpg.Pool, hotkey: str, coldkey: str) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE miners SET coldkey = $2, updated_at = now() WHERE hotkey = $1",
+            hotkey,
+            coldkey,
+        )
