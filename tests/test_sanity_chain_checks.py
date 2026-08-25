@@ -156,7 +156,9 @@ def test_ungrounded_reason_allows_dotted_attributes_and_the_submit_clause():
     context = "class Client:\n    def copy(self): ...\n"
     assert not ungrounded_reason("Use os.path here and keep self.data intact.", context, CLAUSE)
     assert not ungrounded_reason(
-        "Submit again with echo MARKER && cat patch.txt", context, "echo M && cat patch.txt"
+        f"Keep self.data intact in copy(), then submit again with {CLAUSE} && cat patch.txt",
+        context,
+        f"{CLAUSE} && cat patch.txt",
     )
 
 

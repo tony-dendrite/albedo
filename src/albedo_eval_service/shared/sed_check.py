@@ -6,6 +6,7 @@ import shlex
 import subprocess
 
 _SED_ERROR_RE = re.compile(r"^\s*sed:\s", re.MULTILINE)
+_SHELL_SUBSTITUTION = re.compile(r"\$[({A-Za-z_]|`")
 _SEPARATORS = frozenset({"&&", "||", ";", "|", "&"})
 _SCRIPT_FLAG = re.compile(r"^-[a-zA-Z]*[ef]")
 _CHECK_TIMEOUT_SECONDS = 2.0
@@ -52,6 +53,26 @@ def sed_accepts(script: str) -> bool:
     except (OSError, subprocess.SubprocessError):
         return False
     return done.returncode == 0
+
+
+def sed_error_message(command: str) -> str:
+    scripts = sed_scripts(command)
+    if not scripts or any(_SHELL_SUBSTITUTION.search(script) for script in scripts):
+        return ""
+    for script in scripts:
+        try:
+            done = subprocess.run(  # noqa: S603 - fixed argv, script passed after `--`
+                ["sed", "--sandbox", "-n", "--", script],
+                input=b"",
+                capture_output=True,
+                timeout=_CHECK_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        if done.returncode:
+            lines = done.stderr.decode("utf-8", "replace").strip().splitlines()
+            return lines[0] if lines else ""
+    return ""
 
 
 def fabricated_sed_error(command: str, observation: str) -> bool:

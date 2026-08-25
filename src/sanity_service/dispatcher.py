@@ -29,7 +29,7 @@ from albedo_eval_service.shared.observation_format import (
     valid_output,
     wrap,
 )
-from albedo_eval_service.shared.sed_check import fabricated_sed_error
+from albedo_eval_service.shared.sed_check import fabricated_sed_error, sed_error_message
 from albedo_eval_service.shared.submit_protocol import (
     assign_submit,
     command_for,
@@ -74,6 +74,7 @@ from sanity_service.uploads import put_sanity_fault
 _CANONICAL_TOKENIZER_PATH = (
     Path(__file__).resolve().parents[2] / "assets" / "tokenizers" / "Qwen3.6-35B-A3B"
 )
+_SED_ERROR_RE = re.compile(r"^\s*sed:\s", re.MULTILINE)
 _BASH_BLOCK_RE = re.compile(
     r"```(?:bash|sh|shell)\s*\n.*?```|<([a-z_]*bash[a-z_]*)>.*?</\1>",
     re.IGNORECASE | re.DOTALL,
@@ -965,6 +966,16 @@ def _append_observation(state: _TrajectoryState, observation: str) -> None:
     )
 
 
+def _misdiagnosed_sed(command: str, observation: str) -> str:
+    if not _SED_ERROR_RE.search(observation):
+        return ""
+    real = sed_error_message(command)
+    stated = next(
+        (line.strip() for line in observation.splitlines() if line.strip().startswith("sed:")), ""
+    )
+    return real if real and real != stated else ""
+
+
 async def _simulate_observation(
     *,
     client: Any,
@@ -1009,6 +1020,14 @@ async def _simulate_observation(
                 observation[:120],
             )
             return empty_output(fmt)
+        if diagnostic := _misdiagnosed_sed(command, observation):
+            logger.info(
+                "[sanity-dispatch] replaced an invented sed diagnostic sample_id={}: {!r} -> {!r}",
+                sample_id,
+                observation[:80],
+                diagnostic,
+            )
+            return wrap(diagnostic, fmt, returncode=1)
         if not degenerate_observation(observation):
             break
         logger.warning(
