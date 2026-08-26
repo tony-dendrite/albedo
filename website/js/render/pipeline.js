@@ -64,6 +64,9 @@ function idleRow() {
 
 export function renderPipeline(container, state, netuid) {
   const rows = collectRows(state?.stages || {});
+  const oldWrap = container.querySelector(".q-table-wrap");
+  const scrollTop = oldWrap ? oldWrap.scrollTop : 0;
+  const scrollLeft = oldWrap ? oldWrap.scrollLeft : 0;
   mount(container,
     el("section", { class: "queue-panel" },
       el("div", { class: "q-table-wrap" },
@@ -75,4 +78,9 @@ export function renderPipeline(container, state, netuid) {
             el("th", {}, "model"),
             el("th", { class: "r" }, "updated"))),
           el("tbody", {}, rows.length ? rows.map(row => queueRow(row, netuid)) : idleRow())))));
+  if (scrollTop || scrollLeft) {
+    const wrap = container.querySelector(".q-table-wrap");
+    wrap.scrollTop = scrollTop;
+    wrap.scrollLeft = scrollLeft;
+  }
 }
