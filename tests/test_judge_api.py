@@ -35,6 +35,7 @@ from albedo_eval_service.shared.observation_format import (
     OPENHANDS,
     RETURNCODE,
     SWE_AGENT,
+    abandonment_notice,
     empty_output,
     truncation_notice,
     valid_output,
@@ -417,6 +418,40 @@ def test_truncated_side_scores_zero_without_calling_the_judge():
 
     assert len(fake.judged) == 1
     assert all("KING" in judged for judged in fake.judged)
+
+
+def test_abandoned_side_scores_zero_like_the_bench_abandons_the_instance():
+    fake = FakeClient(n_questions=8)
+    settings = JudgeSettings(num_questions=3, sota_trajectory_turns=1)
+    store = QuestionPrepStore(settings, _reference_backed_service(settings, fake))
+    notice = abandonment_notice("no bash command found in the response")
+    request = ScoreBatchRequest(
+        eval_run_id="r",
+        batch_id="b",
+        total_sample_count=1,
+        judge_models=list(JUDGE_MODELS[:1]),
+        samples=[
+            JudgeSample(
+                sample_id="s1",
+                prompt="task",
+                previous_king_output="KING",
+                challenger_output=f"CANDIDATE OUTPUT 1:\n{notice}",
+                messages=_MESSAGES,
+            )
+        ],
+    )
+    record = asyncio.run(
+        _score_samples(client=fake, request=request, settings=settings, prep_store=store)
+    )[0]
+
+    assert record["scored"] is True
+    assert record["challenger_score"] == 0.0
+    assert record["king_score"] is not None
+
+    challenger_results = [r for r in record["judge_results"] if r["side"] == "challenger"]
+    assert challenger_results
+    assert all(r["corrupted"] for r in challenger_results)
+    assert all("abandons" in r["corruption_reason"] for r in challenger_results)
 
 
 def test_looped_side_scores_zero_without_calling_the_judge():

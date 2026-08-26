@@ -79,6 +79,7 @@ from .shared.observation_format import (
     empty_output,
     first_bash_block,
     has_content,
+    is_abandoned,
     is_file_read,
     is_truncated,
     no_output_notice,
@@ -1659,6 +1660,13 @@ async def _score_samples(
                     questions=questions,
                     judge_models=request.judge_models,
                     reason="output truncated mid-generation",
+                )
+            if is_abandoned(response_text):
+                return _corrupted_side(
+                    side=side,
+                    questions=questions,
+                    judge_models=request.judge_models,
+                    reason="turn unusable after repeated attempts; the benchmark abandons here",
                 )
             leak = reserved_token_leak(response_text)
             if leak:

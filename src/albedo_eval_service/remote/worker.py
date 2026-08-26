@@ -23,8 +23,10 @@ from ..shared.dataset_manifest import load_manifest_file
 from ..shared.models import EvalRequest
 from ..shared.observation_format import (
     MAX_CONSECUTIVE_BAD_TURNS,
+    abandonment_notice,
     detect_format,
     first_bash_block,
+    is_abandoned,
     retry_feedback,
     truncation_notice,
     unusable_turn,
@@ -825,11 +827,14 @@ def _generate_retrying_bad_turns(
     """Generate one turn, re-asking any sample whose turn carries no usable action.
 
     The benchmark drops such a turn, says what went wrong and asks again, abandoning the
-    instance only after MAX_CONSECUTIVE_BAD_TURNS in a row. Scoring must not be harsher: a
-    single cut-off turn should not truncate a whole trajectory the judge then scores.
+    instance after MAX_CONSECUTIVE_BAD_TURNS in a row. Both halves are mirrored: the feedback
+    of every re-ask is kept on the result (the model saw it), and a turn still unusable after
+    the last attempt becomes an abandonment sentinel that scoring zeroes the way the bench
+    zeroes an abandoned instance. Truncation keeps its own sentinel path.
     """
     results = generator.generate(samples)
     by_id = {sample.sample_id: sample for sample in samples}
+    feedbacks: dict[str, list[str]] = {}
     for _ in range(MAX_CONSECUTIVE_BAD_TURNS - 1):
         redo = [
             (by_id[r.sample_id], unusable_turn(r.text, truncated=r.truncated))
@@ -838,15 +843,26 @@ def _generate_retrying_bad_turns(
         ]
         if not redo:
             break
-        retry_samples = [_with_retry_feedback(s, reason) for s, reason in redo]
+        retry_samples = []
+        for sample, reason in redo:
+            feedbacks.setdefault(sample.sample_id, []).append(retry_feedback(reason))
+            retry_samples.append(_with_retry_feedback(sample, feedbacks[sample.sample_id]))
         fresh = {r.sample_id: r for r in generator.generate(retry_samples)}
         results = [fresh.get(r.sample_id, r) for r in results]
-    return results
+    out: list[GenerationResult] = []
+    for result in results:
+        if fed := feedbacks.get(result.sample_id):
+            result = replace(result, retry_feedbacks=tuple(fed))
+        if not result.error and not result.truncated and result.sample_id in by_id:
+            if reason := unusable_turn(result.text):
+                result = replace(result, text=abandonment_notice(reason))
+        out.append(result)
+    return out
 
 
-def _with_retry_feedback(sample: EvalSample, reason: str) -> EvalSample:
-    """The same sample, with the turn dropped and the model told why."""
-    messages = _base_messages(sample) + [{"role": "user", "content": retry_feedback(reason)}]
+def _with_retry_feedback(sample: EvalSample, feedbacks: list[str]) -> EvalSample:
+    """The same sample, with the bad turns dropped and the model told why each time."""
+    messages = _base_messages(sample) + [{"role": "user", "content": f} for f in feedbacks]
     return replace(
         sample,
         prompt=format_messages(
@@ -870,12 +886,20 @@ def _next_turn_samples(
         observation = observations.get((side, sample.sample_id))
         if result is None or result.error or observation is None or observation.error:
             continue
-        if result.truncated or _assistant_submitted(sample, result.text):
+        if (
+            result.truncated
+            or is_abandoned(result.text)
+            or _assistant_submitted(sample, result.text)
+        ):
             continue
-        messages = _base_messages(sample) + [
-            {"role": "assistant", "content": result.text},
-            {"role": "user", "content": observation.observation},
-        ]
+        messages = (
+            _base_messages(sample)
+            + [{"role": "user", "content": feedback} for feedback in result.retry_feedbacks]
+            + [
+                {"role": "assistant", "content": result.text},
+                {"role": "user", "content": observation.observation},
+            ]
+        )
         out.append(
             replace(
                 sample,
@@ -912,6 +936,10 @@ def _merge_trajectory_results(
             if result.error:
                 error = result.error
                 break
+            for feedback in result.retry_feedbacks:
+                turns.append(
+                    {"role": "user", "content": feedback, "injected": True, "retry_feedback": True}
+                )
             if result.truncated:
                 truncated = True
                 turns.append(
@@ -920,6 +948,16 @@ def _merge_trajectory_results(
                         "content": truncation_notice(token_limit),
                         "score_target": True,
                         "truncated": True,
+                    }
+                )
+                break
+            if is_abandoned(result.text):
+                turns.append(
+                    {
+                        "role": "assistant",
+                        "content": result.text,
+                        "score_target": True,
+                        "abandoned": True,
                     }
                 )
                 break
@@ -949,7 +987,10 @@ def _merge_trajectory_results(
         merged.append(
             GenerationResult(
                 sample_id=sample.sample_id,
-                text=format_scored_trajectory(turns),
+                # judges never see the retry feedback; it stays in `turns` for the artifact
+                text=format_scored_trajectory(
+                    [turn for turn in turns if not turn.get("retry_feedback")]
+                ),
                 error=None,
                 turns=turns,
                 truncated=truncated,

@@ -12,6 +12,7 @@ import pyarrow.parquet as pq
 from albedo_config import RemoteSettings
 from albedo_eval_service.modelstore.canonical_model_config import canonical_max_model_len
 from albedo_eval_service.modelstore.resolver import ResolvedModel
+from albedo_eval_service.remote.dataset import EvalSample
 from albedo_eval_service.remote.generation import (
     GenerationResult,
     VllmProcessGenerator,
@@ -24,6 +25,7 @@ from albedo_eval_service.remote.worker import (
     ObservationResult,
     RemoteEvalWorker,
     _completion_observation,
+    _generate_retrying_bad_turns,
     _merge_trajectory_results,
     _missing_command_observation,
     _next_turn_samples,
@@ -36,7 +38,12 @@ from albedo_eval_service.shared.models import (
     PreviousKing,
     ScoringConfig,
 )
-from albedo_eval_service.shared.observation_format import TRUNCATION_SENTINEL
+from albedo_eval_service.shared.observation_format import (
+    MAX_CONSECUTIVE_BAD_TURNS,
+    TRUNCATION_SENTINEL,
+    abandonment_notice,
+    is_abandoned,
+)
 
 
 class _Tokenizer:
@@ -421,6 +428,124 @@ def test_truncated_response_ends_trajectory_and_stays_valid(monkeypatch):
     assert "CANDIDATE OUTPUT 2" not in merged[0].text
 
 
+class _ScriptedGenerator:
+    """Returns the scripted response per call; records every prompt it was asked."""
+
+    def __init__(self, responses: list[str]):
+        self.responses = responses
+        self.prompts: list[list[str]] = []
+
+    def generate(self, samples):
+        self.prompts.append([sample.prompt for sample in samples])
+        text = self.responses.pop(0)
+        return [GenerationResult(sample.sample_id, text) for sample in samples]
+
+
+def _eval_sample(sample_id: str = "s1") -> EvalSample:
+    return EvalSample(
+        sample_id=sample_id, prompt="Task", messages=[{"role": "user", "content": "Task"}]
+    )
+
+
+def test_bad_turn_is_retried_with_accumulated_feedback(monkeypatch):
+    monkeypatch.setattr(
+        "albedo_eval_service.remote.worker.format_messages",
+        lambda messages, **_kwargs: "\n".join(m["content"] for m in messages),
+    )
+    good = "THOUGHT: ok\n\n```bash\nls\n```"
+    generator = _ScriptedGenerator(["no command here", "", good])
+
+    results = _generate_retrying_bad_turns(generator, [_eval_sample()])
+
+    assert results[0].text == good
+    assert len(results[0].retry_feedbacks) == 2
+    assert all("Format error" in feedback for feedback in results[0].retry_feedbacks)
+    # the second re-ask carries BOTH earlier feedbacks, like the bench conversation would
+    assert generator.prompts[2][0].count("Format error") == 2
+
+
+def test_turn_still_unusable_after_all_attempts_becomes_abandonment(monkeypatch):
+    monkeypatch.setattr(
+        "albedo_eval_service.remote.worker.format_messages",
+        lambda messages, **_kwargs: "\n".join(m["content"] for m in messages),
+    )
+    generator = _ScriptedGenerator(["prose one", "prose two", "prose three"])
+
+    results = _generate_retrying_bad_turns(generator, [_eval_sample()])
+
+    assert len(generator.prompts) == MAX_CONSECUTIVE_BAD_TURNS
+    assert is_abandoned(results[0].text)
+    assert "no bash command" in results[0].text
+    assert results[0].error is None
+    assert len(results[0].retry_feedbacks) == MAX_CONSECUTIVE_BAD_TURNS - 1
+
+
+def test_abandoned_turn_ends_trajectory_and_hides_feedback_from_judges(monkeypatch):
+    monkeypatch.setattr(
+        "albedo_eval_service.remote.worker.format_messages", lambda messages, **_kwargs: "next"
+    )
+    sample = _trajectory_sample()
+    abandoned = GenerationResult(
+        "sample-1",
+        abandonment_notice("no bash command found in the response"),
+        retry_feedbacks=("FB-ONE", "FB-TWO"),
+    )
+    observation = ObservationResult("sample-1", "")
+
+    assert (
+        _next_turn_samples(
+            [sample],
+            [abandoned],
+            {("challenger", "sample-1"): observation},
+            side="challenger",
+        )
+        == []
+    )
+
+    merged = _merge_trajectory_results(
+        [sample],
+        [[abandoned], []],
+        [{("challenger", "sample-1"): observation}],
+        side="challenger",
+        token_limit=16384,
+    )
+
+    assert merged[0].error is None
+    assert is_abandoned(merged[0].text)
+    assert "CANDIDATE OUTPUT 2" not in merged[0].text
+    assert "FB-ONE" not in merged[0].text
+    feedback_turns = [t for t in merged[0].turns if t.get("retry_feedback")]
+    assert [t["content"] for t in feedback_turns] == ["FB-ONE", "FB-TWO"]
+
+
+def test_retry_feedback_persists_into_next_turn_context(monkeypatch):
+    captured: list[list[dict[str, str]]] = []
+
+    def _fake_format(messages, **_kwargs):
+        captured.append(messages)
+        return "next"
+
+    monkeypatch.setattr("albedo_eval_service.remote.worker.format_messages", _fake_format)
+    sample = _eval_sample("sample-1")
+    recovered = GenerationResult("sample-1", "```bash\nls\n```", retry_feedbacks=("FB-ONE",))
+    observation = ObservationResult("sample-1", "ok")
+
+    (next_sample,) = _next_turn_samples(
+        [sample],
+        [recovered],
+        {("challenger", "sample-1"): observation},
+        side="challenger",
+    )
+
+    roles_and_contents = [(m["role"], m["content"]) for m in next_sample.messages]
+    assert roles_and_contents == [
+        ("user", "Task"),
+        ("user", "FB-ONE"),
+        ("assistant", "```bash\nls\n```"),
+        ("user", "ok"),
+    ]
+
+
 def _pairs_worker(scorer):
     return RemoteEvalWorker(
         RemoteSettings(
@@ -736,7 +861,8 @@ def test_eval_gives_up_after_three_consecutive_bad_turns():
     sample = EvalSample(sample_id="s1", prompt="p", messages=[{"role": "user", "content": "t"}])
     out = W._generate_retrying_bad_turns(gen, [sample])
     assert gen.calls == W.MAX_CONSECUTIVE_BAD_TURNS
-    assert out[0].text == ""
+    assert is_abandoned(out[0].text)
+    assert "empty response" in out[0].text
 
 
 def test_eval_retry_fires_inside_the_real_turn_loop(tmp_path, monkeypatch):

@@ -277,6 +277,20 @@ def retry_feedback(reason: str) -> str:
     return TURN_FORMAT_FEEDBACK.format(reason=reason)
 
 
+ABANDONMENT_SENTINEL = "CONSECUTIVE_BAD_TURNS_LIMIT_EXCEEDED"
+
+
+def abandonment_notice(reason: str) -> str:
+    return (
+        f"{ABANDONMENT_SENTINEL}: turn unusable after {MAX_CONSECUTIVE_BAD_TURNS} attempts "
+        f"({reason}); the benchmark abandons the instance here."
+    )
+
+
+def is_abandoned(text: str) -> bool:
+    return ABANDONMENT_SENTINEL in (text or "")
+
+
 THINK_PAIR_RE = re.compile(r"<\s*think\s*>.*?<\s*/\s*think\s*>", re.DOTALL | re.IGNORECASE)
 THINK_OPEN_RE = re.compile(r"<\s*think\s*>", re.IGNORECASE)
 THINK_CLOSE_RE = re.compile(r"<\s*/\s*think\s*>", re.IGNORECASE)
@@ -405,9 +419,6 @@ def claims_tracked_change(command: str, raw: str) -> bool:
     return bool(_CHANGE_SECTION.search(body)) and any(
         _CHANGE_ENTRY.match(line) for line in body.splitlines()
     )
-
-
-_FILE_TOKEN = re.compile(r"[\w./-]*[\w-]+\.[A-Za-z]\w*")
 
 
 def deleted_files(command: str, raw: str) -> list[str]:

@@ -20,6 +20,8 @@ class GenerationResult:
     error: str | None = None
     turns: list[dict[str, Any]] | None = None
     truncated: bool = False
+    # feedback shown to the model for each dropped bad attempt at this turn (bench-style)
+    retry_feedbacks: tuple[str, ...] = ()
 
 
 class Generator(Protocol):
