@@ -1217,7 +1217,7 @@ def test_a_git_command_the_snapshot_can_compute_never_reaches_the_memo():
     second = _observe(service, "git status --short")
     assert first == second == "<returncode>0</returncode>\n<output>\nM app.py\n</output>"
     assert client.calls == 0
-    assert service._memo == {}
+    assert service._observations._memo == {}
 
 
 def test_edit_dependent_specialists_are_called_only_when_the_reference_edited():

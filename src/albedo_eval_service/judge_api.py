@@ -83,6 +83,7 @@ from .shared.observation_format import (
     with_body,
     wrap,
 )
+from .shared.observation_memo import ObservationMemo
 from .shared.submit_protocol import is_exact_submission
 from .simulator.prompt_simulator import (
     COMPLETE_MARKER,
@@ -765,36 +766,14 @@ class ObservationSimulationService:
         self.settings = settings
         self.client = client
         self.repo_context = repo_context
-        self._memo: dict[str, str] = {}
-        self._inflight: dict[str, asyncio.Task[str]] = {}
-
-    def _remember(self, key: str, observation: str) -> None:
-        self._memo[key] = observation
-        while len(self._memo) > _MEMO_MAX_ENTRIES:
-            self._memo.pop(next(iter(self._memo)))
+        self._observations = ObservationMemo(max_entries=_MEMO_MAX_ENTRIES)
 
     async def _observe(
         self,
         key: str,
         produce: Callable[[], Awaitable[str]],
     ) -> str:
-        """Answer from the per-state store, or produce once and share that one answer.
-
-        Concurrent callers on the same key await the same task rather than each asking the
-        model: the check and the insert happen without an await between them, so one event
-        loop needs no lock. `shield` keeps a cancelled waiter from killing the shared task.
-        """
-        stored = self._memo.get(key)
-        if stored is not None:
-            return stored
-        task = self._inflight.get(key)
-        if task is None:
-            task = asyncio.create_task(produce())
-            self._inflight[key] = task
-            task.add_done_callback(lambda _: self._inflight.pop(key, None))
-        observation = await asyncio.shield(task)
-        self._remember(key, observation)
-        return observation
+        return await self._observations.observe(key, produce)
 
     async def _retry_for_output(
         self,

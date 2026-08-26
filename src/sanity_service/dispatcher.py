@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import dataclasses
+import hashlib
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -41,6 +42,7 @@ from albedo_eval_service.shared.observation_format import (
     without_tracked_changes,
     wrap,
 )
+from albedo_eval_service.shared.observation_memo import ObservationMemo
 from albedo_eval_service.shared.sed_check import fabricated_sed_error, sed_error_message
 from albedo_eval_service.shared.submit_protocol import (
     assign_submit,
@@ -118,6 +120,7 @@ class _TrajectoryState:
     consecutive_bad_turns: int = 0
     consecutive_silent_observations: int = 0
     last_followup: str = ""
+    observation_memo: ObservationMemo = dataclasses.field(default_factory=ObservationMemo)
 
 
 class SanityDispatcher:
@@ -991,6 +994,20 @@ def _edit_turns(state: _TrajectoryState) -> int:
 
 
 _REMOVAL_RE = re.compile(r"\brm\b|\bgit\s+(?:rm|checkout|stash)\b|\bmv\b")
+_EXECUTES_RE = re.compile(r"\b(?:python\d?|pytest|go|cargo|npm|npx|yarn|make|bash|sh|mocha|tox)\b")
+
+
+def _state_fingerprint(state: _TrajectoryState) -> str:
+    mutating = [
+        first_bash_command(content)
+        for t in state.turns
+        if t.get("role") == "assistant"
+        for content in [str(t.get("content") or "")]
+        if _CHAIN_EDIT_RE.search(content)
+        or _REMOVAL_RE.search(first_bash_command(content))
+        or _EXECUTES_RE.search(first_bash_command(content))
+    ]
+    return hashlib.sha1("\0".join(mutating).encode("utf-8", "replace")).hexdigest()
 
 
 def _named_in_removal(state: _TrajectoryState, path: str) -> bool:
@@ -1018,6 +1035,35 @@ def _misdiagnosed_sed(command: str, observation: str) -> str:
 
 
 async def _simulate_observation(
+    *,
+    client: Any,
+    settings: JudgeSettings,
+    eval_run_id: str,
+    state: _TrajectoryState,
+    assistant_output: str,
+) -> str:
+    key = hashlib.sha1(
+        "\0".join(
+            (
+                state.sample_id,
+                _state_fingerprint(state),
+                first_bash_command(assistant_output),
+            )
+        ).encode("utf-8", "replace")
+    ).hexdigest()
+    return await state.observation_memo.observe(
+        key,
+        lambda: _simulate_observation_uncached(
+            client=client,
+            settings=settings,
+            eval_run_id=eval_run_id,
+            state=state,
+            assistant_output=assistant_output,
+        ),
+    )
+
+
+async def _simulate_observation_uncached(
     *,
     client: Any,
     settings: JudgeSettings,
