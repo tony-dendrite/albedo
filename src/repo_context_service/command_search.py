@@ -1045,6 +1045,7 @@ def run_search(
     read_file,
     listing: list[str],
     size_file=None,
+    root: str = "",
 ) -> SearchResult | ParseFailure:
     limits = Limits()
     if plan.literal is not None:
@@ -1069,6 +1070,14 @@ def run_search(
     if isinstance(candidates, ParseFailure):
         return candidates
     candidates, unmatched, searched_dir = candidates
+    if plan.absolute and not plan.root_prefix:
+        # a search rooted above the checkout (`find /`, `grep -r x /`) reports absolute paths,
+        # so it needs the directory the checkout sits at. With it, anchor the results; without
+        # it, decline rather than print `pkg/mod.py` — no absolutely-rooted search can produce a
+        # bare relative path, and handing the assistant one un-anchors it from the repository.
+        if not root:
+            return ParseFailure("unsupported_form", "absolute search root is unknown")
+        plan.root_prefix = root
     truncated = len(candidates) > limits.max_files
     candidates = candidates[: limits.max_files]
 

@@ -52,7 +52,7 @@ from .git_sim import (
     ledger_block,
     run_git_chain,
 )
-from .overlay import Overlay, build_overlay, strip_sandbox
+from .overlay import Overlay, attested_paths, build_overlay, session_root, strip_sandbox
 
 _API_BASE = "https://api.github.com"
 _DONE_MARKER = ".albedo-repo-context-done"
@@ -101,14 +101,51 @@ def _scaffold_truncate(text: str, fmt: str) -> str:
     )
 
 
+_RENDER_RULE = """- Print each path the way the command itself would print it: a command given an absolute search
+  root (`find /`, `find {root}/x`, `ls {root}/x`, `realpath`) prints the absolute path, a command
+  given a relative one (`find .`, `ls src`) prints it relative to the working directory, and `ls`
+  of a single directory prints bare entry names. NEVER answer an absolutely-rooted search with a
+  bare relative path — `find /` cannot return `pkg/mod.py`, only `{root}/pkg/mod.py`.
+"""
+
 LISTING_HEADER = """REPOSITORY FILE LISTING — tracked files at the current commit relevant to the
 command (paths relative to the repo root, sorted; the filesystem returns files in this order).
+The repo root is the directory this session starts in and has not left unless a command in the
+transcript ran `cd`.
 Derive the output of exploration commands (find, ls, grep -l, ...) EXACTLY from this list,
 applying the command's filters and pipe limits:
 - Output matching paths in EXACTLY the order they appear in this listing — never re-sort them.
+- Print each path the way the command itself would print it: `find .` prefixes results with `./`,
+  `find src` prefixes them with `src/`, `ls` of a single directory prints bare entry names. A
+  search rooted at an absolute directory prints absolute paths — never a bare relative path.
 - Do not invent paths that are not in this list and do not omit paths that match.
 - This listing is complete for the scope shown: if nothing in it matches the command's
   filters, the command's output is empty.
+"""
+
+LISTING_HEADER_ROOTED = (
+    """REPOSITORY FILE LISTING — tracked files at the current commit relevant to the command.
+The repository is checked out at {root} and stays there for this entire session: it is never
+moved, never renamed, and the same file is never served under a second root. The paths below are
+absolute, exactly as this filesystem holds them, sorted (the filesystem returns files in this
+order).
+Derive the output of exploration commands (find, ls, grep -l, ...) EXACTLY from this list,
+applying the command's filters and pipe limits:
+- Output matching paths in EXACTLY the order they appear in this listing — never re-sort them.
+"""
+    + _RENDER_RULE
+    + """- Do not invent paths that are not in this list and do not omit paths that match.
+- This listing is complete for the scope shown: if nothing in it matches the command's
+  filters, the command's output is empty.
+"""
+)
+
+SESSION_PATHS_HEADER = """PATHS ALREADY ESTABLISHED — earlier observations in this session showed each path below
+exists. They are outside the tracked listing because the listing covers only what the repository
+tracks at this commit, while the machine also holds harness scripts, build output, vendored
+dependencies, downloads and files this session created. Being absent from the listing is NOT
+evidence of absence: treat every path below as present, never report it missing, and derive its
+content or entries from what the earlier observation showed:
 """
 
 CONTENTS_HEADER = """FILE CONTENTS — exact current content of files referenced by the command:
@@ -125,10 +162,11 @@ reproduce it for lines the command prints, and strip it anywhere line numbers ar
 """
 
 NOT_PRESENT_HEADER = """FILES NOT PRESENT — ONLY the paths listed immediately below are absent
-from the repository at this commit. Every other path the command names does exist; never claim
-otherwise. Do not invent content for a listed path — report the terminal error shown beside it,
-inside the observation, following the OUTPUT FORMAT exactly. When the command produces no output
-at all, reply with exactly the empty observation the OUTPUT FORMAT specifies:
+from this machine. Every other path the command names does exist; never claim otherwise, and in
+particular never infer absence from a path being missing from the listing above. Do not invent
+content for a listed path — report the terminal error shown beside it, inside the observation,
+following the OUTPUT FORMAT exactly. When the command produces no output at all, reply with
+exactly the empty observation the OUTPUT FORMAT specifies:
 """
 
 COMPUTED_HEADER = """COMMAND OUTPUT — this search was executed against the repository at this commit, so
@@ -335,6 +373,29 @@ def _referenced_paths(cmd: str, listing: list[str]) -> tuple[list[str], list[str
     return present, missing[:_MAX_MISSING_PATHS]
 
 
+def _split_attested(missing: list[str], attested: set[str] | None) -> tuple[list[str], list[str]]:
+    """Peel the paths the transcript already vouched for out of the not-present list.
+
+    `missing` holds whatever the command names that the tracked listing does not, which is a
+    strictly narrower question than whether the path is on the machine: the harness scripts,
+    build output, vendored dependencies and downloads a trajectory was recorded against are all
+    real and all untracked. Anything an earlier observation showed to exist moves to the vouched
+    list instead, so the block states it is present rather than staying silent about it.
+    """
+    if not attested:
+        return missing, []
+    known = {strip_sandbox(path): path for path in attested}
+    kept: list[str] = []
+    vouched: list[str] = []
+    for path in missing:
+        hit = known.get(path) or known.get(strip_sandbox(path))
+        if hit is None:
+            kept.append(path)
+        elif hit not in vouched:
+            vouched.append(hit)
+    return kept, vouched
+
+
 _SEPARATOR = r"(?:^|\||&&|\|\||;)\s*"
 _WANTS_LINE_NUMBERS = re.compile(
     _SEPARATOR + r"(?:grep|rg)\b[^|&;]*?\s-\w*n\w*\b"
@@ -499,6 +560,8 @@ class RepoContextService:
             overlay,
             fmt,
             self.git_meta(snapshot, source, owner, repo, sha),
+            root=session_root(messages),
+            attested=attested_paths(messages),
         )
         present, missing = _referenced_paths(command, listing)
         return GroundingContext(
@@ -853,7 +916,13 @@ class RepoContextService:
     _LISTING_MIN_CHARS = 8000
 
     def _run_command(
-        self, snapshot_dir: Path, listing: list[str], cmd: str, overlay: Overlay
+        self,
+        snapshot_dir: Path,
+        listing: list[str],
+        cmd: str,
+        overlay: Overlay,
+        attested: set[str] | None = None,
+        root: str = "",
     ) -> SearchResult | None:
         plan = parse_search(cmd)
         if isinstance(plan, ParseFailure):
@@ -863,11 +932,25 @@ class RepoContextService:
             lambda rel: self._file_text(snapshot_dir, rel, overlay),
             listing,
             size_file=lambda rel: self._file_size(snapshot_dir, rel, overlay),
+            root=root,
         )
-        return None if isinstance(result, ParseFailure) else result
+        if isinstance(result, ParseFailure):
+            return None
+        if result.missing and _split_attested(list(result.missing), attested)[1]:
+            # the search ran against the tracked commit, which does not know about harness
+            # scripts or build output: a "No such file" it derives for a path the transcript
+            # already showed is a fabrication, so decline and let the grounded block answer
+            return None
+        return result
 
     def _chain_evidence(
-        self, snapshot_dir: Path, listing: list[str], cmd: str, overlay: Overlay
+        self,
+        snapshot_dir: Path,
+        listing: list[str],
+        cmd: str,
+        overlay: Overlay,
+        attested: set[str] | None = None,
+        root: str = "",
     ) -> str:
         stages = split_chain(cmd)
         if stages is None:
@@ -876,7 +959,7 @@ class RepoContextService:
         for stage in stages:
             if _CD_ONLY.match(stage):
                 continue
-            result = self._run_command(snapshot_dir, listing, stage, overlay)
+            result = self._run_command(snapshot_dir, listing, stage, overlay, attested, root)
             if result is None:
                 continue
             if result.output:
@@ -928,9 +1011,16 @@ class RepoContextService:
         return _truncate(block, self.settings.max_context_chars), exact, result.returncode
 
     def _computed_search_block(
-        self, snapshot_dir: Path, listing: list[str], cmd: str, overlay: Overlay, fmt: str = ""
+        self,
+        snapshot_dir: Path,
+        listing: list[str],
+        cmd: str,
+        overlay: Overlay,
+        fmt: str = "",
+        attested: set[str] | None = None,
+        root: str = "",
     ) -> tuple[str, str | None] | None:
-        result = self._run_command(snapshot_dir, listing, cmd, overlay)
+        result = self._run_command(snapshot_dir, listing, cmd, overlay, attested, root)
         if result is None:
             return None
         if result.empty and result.incomplete:
@@ -961,32 +1051,49 @@ class RepoContextService:
         overlay: Overlay,
         fmt: str = "",
         meta: GitMeta | None = None,
+        root: str = "",
+        attested: set[str] | None = None,
     ) -> tuple[str, str | None, int | None]:
-        computed = self._computed_search_block(snapshot_dir, listing, cmd, overlay, fmt)
+        computed = self._computed_search_block(
+            snapshot_dir, listing, cmd, overlay, fmt, attested, root
+        )
         if computed is not None:
             return computed[0], computed[1], None
         meta = meta or GitMeta()
         computed_git = self._computed_git_block(snapshot_dir, listing, cmd, overlay, fmt, meta)
         if computed_git is not None:
             return computed_git
-        evidence = self._chain_evidence(snapshot_dir, listing, cmd, overlay) + self._git_hints(
-            snapshot_dir, listing, cmd, overlay, meta
-        )
+        evidence = self._chain_evidence(
+            snapshot_dir, listing, cmd, overlay, attested, root
+        ) + self._git_hints(snapshot_dir, listing, cmd, overlay, meta)
         listing_paths, _ = _filter_listing(listing, cmd)
         present, missing = _referenced_paths(cmd, listing)
+        missing, vouched = _split_attested(missing, attested)
+        listing_header = LISTING_HEADER_ROOTED.format(root=root) if root else LISTING_HEADER
+        show = lambda path: f"{root}/{path}" if root else f"./{path}"  # noqa: E731
         missing_text = (
             "\n"
             + NOT_PRESENT_HEADER
-            + "\n".join(f"- {p}   ->   No such file or directory" for p in missing)
+            + "\n".join(
+                f"- {show(p) if root and not p.startswith(('/', '..')) else p}"
+                f"   ->   No such file or directory"
+                for p in missing
+            )
             + "\n"
             if missing
+            else ""
+        )
+        vouched_text = (
+            "\n" + SESSION_PATHS_HEADER + "\n".join(f"- {p}" for p in vouched) + "\n"
+            if vouched
             else ""
         )
 
         contents_budget = (
             self.settings.max_context_chars
-            - len(LISTING_HEADER)
+            - len(listing_header)
             - len(missing_text)
+            - len(vouched_text)
             - len(evidence)
             - self._LISTING_MIN_CHARS
         )
@@ -1007,7 +1114,7 @@ class RepoContextService:
             body = _truncate(text, self.settings.max_file_chars)
             if wants_numbers:
                 body = _number_lines(body, grep_style)
-            label = f"./{path}{PRE_EDIT_SUFFIX if stale else ''}"
+            label = f"{show(path)}{PRE_EDIT_SUFFIX if stale else ''}"
             part = f"--- {label} ---\n{body}\n"
             if contents_used + len(part) > contents_budget:
                 break
@@ -1019,9 +1126,10 @@ class RepoContextService:
 
         listing_budget = (
             self.settings.max_context_chars
-            - len(LISTING_HEADER)
+            - len(listing_header)
             - len(contents_text)
             - len(missing_text)
+            - len(vouched_text)
             - len(evidence)
             - 64
         )
@@ -1034,7 +1142,7 @@ class RepoContextService:
             lines: list[str] = []
             used = 0
             for path in listing_paths[: self.settings.max_paths]:
-                line = "./" + path
+                line = show(path)
                 if used + len(line) + 1 > listing_budget:
                     break
                 lines.append(line)
@@ -1044,7 +1152,15 @@ class RepoContextService:
             if over > 0:
                 listing_text += f"\n... (+{over} more matching files)"
 
-        block = LISTING_HEADER + "\n" + listing_text + "\n" + contents_text + missing_text
+        block = (
+            listing_header
+            + "\n"
+            + listing_text
+            + "\n"
+            + contents_text
+            + vouched_text
+            + missing_text
+        )
         return _truncate(evidence + block, self.settings.max_context_chars), None, None
 
     def _git_hints(

@@ -54,6 +54,23 @@ _HEREDOC_HEAD = re.compile(
     re.M,
 )
 
+# The sandbox checkout directory as the transcript itself spells it: /testbed, or a
+# /workspace/<owner>__<repo>__<ver> checkout. Deliberately narrower than a bare /workspace/<name>
+# so a path a simulated observation invented at the workspace root cannot pass as the repo root.
+_SESSION_ROOT = re.compile(
+    r"/workspace/[A-Za-z0-9_.+-]+__[A-Za-z0-9_.+-]+|/testbed(?![A-Za-z0-9_.+-])"
+)
+# Observation shapes that prove a path exists, all emitted by the OpenHands scaffold.
+_LISTING_BLOCK = re.compile(
+    r"^Here's the files and directories up to \d+ levels? deep in (\S+?)[,:]", re.M
+)
+_VIEW_OF = re.compile(r"^\s*Here's the result of running `[^`]+` on (\S+?):\s*$", re.M)
+_CREATED_AT = re.compile(r"^File created successfully at:\s*(\S+)\s*$", re.M)
+_ENOENT = re.compile(
+    r"No such file or directory|cannot access|can't read|can't open file|does not exist"
+)
+_LISTED_PATH = re.compile(r"^\s{0,4}(/[^\s:]+)\s*$")
+
 
 @dataclass
 class Overlay:
@@ -121,6 +138,57 @@ def strip_sandbox(path: str) -> str:
     cleaned = path.strip("'\"")
     stripped = _SANDBOX.sub("", cleaned)
     return stripped.lstrip("/") if stripped != cleaned else cleaned
+
+
+def session_root(messages) -> str:
+    """The absolute directory the checkout lives at, as this transcript spells it.
+
+    The frozen prefix names it on nearly every line, so the most frequent match wins over a
+    root a later observation drifted into. Empty when the transcript works from a bare working
+    directory (the mini-coder corpus), which is itself the answer: there is no absolute root to
+    join paths onto.
+    """
+    counts: dict[str, int] = {}
+    for message in messages or []:
+        for match in _SESSION_ROOT.finditer(str(message.get("content") or "")):
+            counts[match.group(0)] = counts.get(match.group(0), 0) + 1
+    if not counts:
+        return ""
+    return max(counts.items(), key=lambda item: (item[1], -len(item[0])))[0]
+
+
+def attested_paths(messages) -> set[str]:
+    """Paths an earlier observation in this transcript already showed to exist.
+
+    The tracked listing covers the repository at its upstream commit; the container the
+    trajectory was recorded in holds more than that — harness scripts (run_tests.sh), build
+    output, vendored dependencies, downloads. Those are real, and the frozen prefix proves it
+    by listing them, so they must never be reported missing.
+    """
+    found: set[str] = set()
+    for message in messages or []:
+        if str(message.get("role") or "").lower() == "assistant":
+            continue
+        text = str(message.get("content") or "")
+        if not text:
+            continue
+        found.update(match.group(1) for match in _CREATED_AT.finditer(text))
+        for match in _VIEW_OF.finditer(text):
+            body = next(
+                (line for line in text[match.end() :].split("\n") if line.strip()),
+                "",
+            )
+            if not _ENOENT.search(body):
+                found.add(match.group(1).strip("`"))
+        for match in _LISTING_BLOCK.finditer(text):
+            for line in text[match.end() :].split("\n")[1:]:
+                if not line.strip():
+                    break
+                entry = _LISTED_PATH.match(line)
+                if entry is None:
+                    break
+                found.add(entry.group(1).rstrip("/"))
+    return {path for path in found if path and not _ENOENT.search(path)}
 
 
 def _resolve(token: str, listing: set[str], index: dict[str, str]) -> str | None:

@@ -41,11 +41,34 @@ STRICT RULES:
 - Never render the same line or block twice: a real file lists an import once and defines each
   method once, and grep or find prints a match once. Repeating content makes the file look
   corrupted and sends the agent chasing damage that does not exist.
-- Anchor on evidence: file, directory and symbol names mentioned in the task description are
-  real — build your output around them and the standard layout for the project's language.
-  When you cannot infer paths with confidence, prefer FEWER lines over invented ones; if the
-  command's filters plausibly match nothing in this project (e.g. a file extension foreign to
-  its language), the output is empty.
+- Anchor on evidence: file, directory and symbol names mentioned in the task description OR in
+  any earlier observation in this transcript are real — build your output around them and the
+  standard layout for the project's language. When you cannot infer paths with confidence,
+  prefer FEWER lines over invented ones; if the command's filters plausibly match nothing in
+  this project (e.g. a file extension foreign to its language), the output is empty.
+
+SESSION INVARIANTS — you are simulating ONE machine whose state persists for the whole
+transcript. Every observation you write must hold together with the ones above it; a session
+whose paths move under the assistant is not a session it can work in.
+- The repository lives at exactly ONE path for the whole session. Never move it, never rename
+  it, never abbreviate the checkout directory's name, and never serve the same file under a
+  second root. Whatever root earlier observations used is the root, for every later one.
+- The working directory changes ONLY when a command runs `cd`. Writing to /tmp, running a
+  script, a command failing, or a new command starting never moves it: `pwd` prints what the
+  previous observation implied, and the repository is still where it was.
+- Path resolution is stable: a path that resolved once resolves the same way for the rest of
+  the session, and a path that failed to resolve stays absent until a command in this
+  transcript creates it. Never contradict an earlier observation about whether a path exists.
+- `find`, `ls`, `grep -r` and `realpath` print every result under the root they were given: an
+  absolute search root yields absolute paths, a relative one relative paths. A search rooted at
+  `/` cannot return `pkg/mod.py`; it returns the full path or nothing.
+- A path is a file or a directory, never both. `cat src` on a directory prints
+  "cat: src: Is a directory" and exits 1; `ls` on a regular file prints just that one entry.
+- A redirect WRITES its target: `cmd > f`, `cat > f << 'EOF'`, `cat << 'EOF' > f` and `tee f`
+  create f and print nothing of their own. They never read f, never report f missing, and f
+  exists for every later command in this transcript.
+- Substitute real values everywhere the OUTPUT FORMAT below writes a placeholder: never emit the
+  literal words PATH or RC — write the actual path and the actual exit code.
 """
 
 FORMAT_MINI_CODER = """OUTPUT FORMAT:
