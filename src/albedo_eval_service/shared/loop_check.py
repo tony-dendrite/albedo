@@ -5,9 +5,10 @@ from collections import Counter
 from dataclasses import dataclass
 
 from .observation_format import action_blocks
+from .submit_protocol import asked_submit
 
 DUP_CMD_THRESHOLD = 0.65
-MAX_RUN_THRESHOLD = 4
+MAX_RUN_THRESHOLD = 6
 
 MAX_LISTED_COMMANDS = 5
 MAX_COMMAND_CHARS = 120
@@ -46,7 +47,7 @@ def candidate_turns(document: str) -> list[str]:
 def commands_of(turns: list[str]) -> list[str]:
     cmds: list[str] = []
     for turn in turns:
-        cmds += action_blocks(turn)
+        cmds += [c for c in action_blocks(turn) if not asked_submit(c)]
     return cmds
 
 

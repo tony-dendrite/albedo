@@ -8,6 +8,7 @@ from typing import Any
 
 from loguru import logger
 
+from albedo_eval_service.shared.edit_detection import WORK_EDIT_RE
 from albedo_eval_service.shared.json_extract import extract_json
 from albedo_eval_service.shared.submit_protocol import first_bash_command
 
@@ -72,14 +73,7 @@ TRANSCRIPT:
 AGENT'S SUBMISSION TURN:
 {submission}"""
 
-_EDIT_RE = re.compile(
-    r"\b(sed -i|cat >|cat >>|tee |git apply|applypatch|str_replace|patch -p\d|cp |mv )"
-    r"|<<\s*'?\"?[A-Za-z_][A-Za-z0-9_]*'?\"?\s*>"
-    r"|<<\s*'?(EOF|PYEOF|PATCH|PY|SH|BASH|SCRIPT)\b"
-    r"|\.write_text\(|\.writelines\(|open\([^)]*['\"][wa]\+?['\"]"
-    r"|(?<=\s)>>?\s*(?!/dev/)[~$\w./-]*(?:/[~$\w.-]+|\.[A-Za-z]\w*)",
-    re.I,
-)
+_EDIT_RE = WORK_EDIT_RE
 _MICRO_CONTEXT_CHARS = 24000
 
 

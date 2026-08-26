@@ -60,15 +60,22 @@ from .judge_core import (
 )
 from .judge_llm_client import JudgeLLMClient
 from .remote.generation import format_scored_trajectory
+from .shared.edit_detection import any_shows_work, named_in_removal
 from .shared.loop_check import LoopVerdict, loop_explanation, loop_verdict_for_document
 from .shared.observation_format import (
     NOT_DERIVABLE,
     RETURNCODE,
+    ROLE_MARKER_RE,
     CommandContract,
     absent_tool_output,
+    canonical_empty,
+    claims_tracked_change,
     command_contract,
     contract_violation,
+    degenerate_observation,
+    deleted_files,
     detect_format,
+    echoed_command,
     empty_output,
     first_bash_block,
     has_content,
@@ -76,15 +83,19 @@ from .shared.observation_format import (
     is_truncated,
     no_output_notice,
     output_expectation,
+    renumbered_view,
     repair_output,
     repair_to_contract,
     requires_output,
+    stuttered_lines,
     valid_output,
     with_body,
+    without_tracked_changes,
     wrap,
 )
 from .shared.observation_memo import ObservationMemo
-from .shared.submit_protocol import is_exact_submission
+from .shared.sed_check import fabricated_sed_error, misdiagnosed_sed
+from .shared.submit_protocol import first_bash_command, is_exact_submission
 from .simulator.prompt_simulator import (
     COMPLETE_MARKER,
     COMPUTED_BLOCK_MARKER,
@@ -946,6 +957,7 @@ class ObservationSimulationService:
                         fmt,
                         require_content=require_content,
                         contract=contract,
+                        command=command,
                     ),
                     **capped_kwargs,
                 )
@@ -996,6 +1008,45 @@ class ObservationSimulationService:
                 len(collapsed),
             )
             observation = collapsed
+        observation = canonical_empty(observation, fmt)
+        if diagnostic := misdiagnosed_sed(command, observation):
+            logger.info(
+                "observation_simulation_sed_rediagnosed eval_run_id={} sample_id={}: {!r}",
+                request.eval_run_id,
+                request.sample_id,
+                diagnostic,
+            )
+            observation = wrap(diagnostic, fmt, returncode=1)
+        if echoed_command(command, observation):
+            logger.warning(
+                "observation_simulation_echoed eval_run_id={} sample_id={} command={!r}",
+                request.eval_run_id,
+                request.sample_id,
+                command[:80],
+            )
+            observation = empty_output(fmt)
+        if exact_output is None:
+            assistant = [
+                str(m.get("content") or "")
+                for m in (request.messages or [])
+                if str(m.get("role") or "").lower() == "assistant"
+            ]
+            phantom = (
+                not any_shows_work(assistant) and claims_tracked_change(command, observation)
+            ) or any(
+                not named_in_removal(assistant, [first_bash_command(a) for a in assistant], path)
+                for path in deleted_files(command, observation)
+            )
+            if phantom:
+                logger.warning(
+                    "observation_simulation_phantom_change eval_run_id={} sample_id={} "
+                    "command={!r}",
+                    request.eval_run_id,
+                    request.sample_id,
+                    command[:80],
+                )
+                observation = without_tracked_changes(observation, fmt)
+        observation = renumbered_view(command, observation)
         if (
             require_content
             and exact_output is None
@@ -1346,12 +1397,9 @@ def _collapse_looping(text: str) -> str:
     return collapsed
 
 
-_ROLE_LEAK_RE = re.compile(r"(?:^|\n)\s*(?:THOUGHT:|### (?:assistant|user|system)\b)")
-
-
 def _role_violation(raw: str) -> bool:
     text = raw or ""
-    return bool(_ROLE_LEAK_RE.search(text)) or text.count("<returncode>") > 1
+    return bool(ROLE_MARKER_RE.search(text)) or text.count("<returncode>") > 1
 
 
 _RANK_INVALID = 0
@@ -1388,11 +1436,15 @@ def _usable_simulation_output(
     *,
     require_content: bool = False,
     contract: CommandContract | None = None,
+    command: str = "",
 ) -> bool:
     return (
         valid_output(raw, fmt)
         and not _role_violation(raw)
         and not _looping_output(raw)
+        and not degenerate_observation(raw)
+        and not stuttered_lines(raw)
+        and not (command and fabricated_sed_error(command, raw))
         and (not require_content or has_content(raw, fmt))
         and (contract is None or contract_violation(raw, fmt, contract) is None)
     )
@@ -1411,6 +1463,10 @@ def _unusable_reason(
         return "role_violation"
     if _looping_output(raw):
         return "looping"
+    if degenerate_observation(raw):
+        return "degenerate_lines"
+    if reason := stuttered_lines(raw):
+        return f"stuttered: {reason}"
     if require_content and not has_content(raw, fmt):
         return "no_content_for_read"
     if contract is not None and (breach := contract_violation(raw, fmt, contract)):

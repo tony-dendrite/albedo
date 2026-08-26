@@ -326,3 +326,12 @@ def rewrite_messages(
     if _verify(rewritten, command, marker):
         return rewritten, mode
     return [dict(m) for m in messages], "failed"
+
+
+def asked_submit(command: str) -> bool:
+    from albedo_eval_service.shared.observation_format import prints_nothing_on_success
+
+    head, echoed, tail = (command or "").partition("echo ")
+    if not echoed or not ANY_MARKER_RE.match(tail.lstrip()):
+        return False
+    return not head.strip() or prints_nothing_on_success(head.strip().rstrip("&|;").strip())

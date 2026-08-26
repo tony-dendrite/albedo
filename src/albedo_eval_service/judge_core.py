@@ -9,12 +9,7 @@ from .evaluator.shared.questions import _CANDIDATE_BLOCK_RE, measurements_block
 from .judge.prompt_judge import JUDGE_SYSTEM, JUDGE_USER
 from .shared.json_extract import extract_json
 from .shared.observation_format import (
-    THINK_CLOSE_RE,
-    THINK_OPEN_RE,
-    THINK_PAIR_RE,
-    THINK_TAG_RE,
-    mask_fenced_spans,
-    unmask_fenced_spans,
+    strip_leaked_reasoning,
 )
 
 CHALLENGER_WIN_MARGIN = 0.025
@@ -59,34 +54,6 @@ def amputated_thinking(document: str) -> bool:
 
 
 NO_VISIBLE_OUTPUT = "[no visible output]"
-_COMMAND_FENCE_RE = re.compile(r"```(?:bash|sh|shell)[ \t]*\n", re.IGNORECASE)
-
-
-def _drop_unclosed_reasoning(text: str, fences: list[str]) -> str:
-    match = THINK_OPEN_RE.search(text)
-    if not match:
-        return text
-    tail = text[match.end() :]
-    if _COMMAND_FENCE_RE.search(unmask_fenced_spans(tail, fences)):
-        return text[: match.start()] + tail
-    return text[: match.start()]
-
-
-def strip_leaked_reasoning(text: str) -> str:
-    """Drop model reasoning that leaked into a scored candidate turn.
-
-    vLLM's qwen3 reasoning parser leaves an orphaned closing tag (and occasionally the reasoning
-    itself) in the generated text. A `THOUGHT:` before the tag is the mini-coder-rs corpus's own
-    style and is real content, so only the stray tag is removed in that case.
-    """
-    masked, fences = mask_fenced_spans(text or "")
-    cleaned = THINK_PAIR_RE.sub("", masked)
-    cleaned = _drop_unclosed_reasoning(cleaned, fences)
-    if THINK_CLOSE_RE.search(cleaned):
-        head, tail = THINK_CLOSE_RE.split(cleaned, 1)
-        cleaned = head + tail if "THOUGHT:" in head else tail
-    cleaned = THINK_TAG_RE.sub("", cleaned)
-    return unmask_fenced_spans(cleaned, fences).strip()
 
 
 def strip_candidate_reasoning(trajectory: str) -> str:

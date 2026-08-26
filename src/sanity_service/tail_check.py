@@ -5,11 +5,11 @@ from dataclasses import dataclass
 from loguru import logger
 
 from albedo_eval_service.shared.json_extract import extract_json
-from albedo_eval_service.shared.observation_format import (
-    action_blocks,
-    prints_nothing_on_success,
+from albedo_eval_service.shared.loop_check import (
+    DUP_CMD_THRESHOLD,
+    MAX_RUN_THRESHOLD,
+    commands_of,
 )
-from albedo_eval_service.shared.submit_protocol import ANY_MARKER_RE
 from sanity_service.judge_panel import make_client, query_panel
 from sanity_service.rubricisity import (
     TAIL_JUDGE_QUESTIONS,
@@ -17,25 +17,13 @@ from sanity_service.rubricisity import (
     TAIL_JUDGE_USER,
 )
 
-DUP_CMD_THRESHOLD = 0.65
-MAX_RUN_THRESHOLD = 6
-
 TAIL_CUTOFF = 16
 TAIL_JUDGE_FAIL_ZEROS = 3
 TAIL_JUDGE_MIN_FAILED_SAMPLES = 2
 
 
-def _asked_submit(command: str) -> bool:
-    head, echoed, tail = command.partition("echo ")
-    if not echoed or not ANY_MARKER_RE.match(tail.lstrip()):
-        return False
-    return not head.strip() or prints_nothing_on_success(head.strip().rstrip("&|;").strip())
-
-
 def loop_stats(assistant_turns: list[str]) -> dict:
-    cmds: list[str] = []
-    for turn in assistant_turns:
-        cmds += [c for c in action_blocks(turn) if not _asked_submit(c)]
+    cmds = commands_of(assistant_turns)
     max_run = run = 1
     for prev, cur in zip(cmds, cmds[1:]):
         run = run + 1 if cur == prev else 1

@@ -5,6 +5,7 @@ import re
 from collections.abc import Callable
 from difflib import SequenceMatcher
 
+from ...shared.edit_detection import edited_in_turn, trajectory_made_edit
 from ...shared.json_extract import extract_json
 from ...shared.submit_protocol import ANY_MARKER_RE
 
@@ -134,32 +135,7 @@ RUBRIC_TAG_REQUIRES = {
     "economy": "neutral",
 }
 
-_EDIT_BLOCK_RE = re.compile(r"```(?:bash|sh)?[ \t]*\n(.*?)```", re.DOTALL)
-_EDIT_COMMAND_RE = re.compile(
-    r"sed\s+-i"
-    # a write counts only to a repo path: `2>/dev/null`, `2>&1`, /tmp scratch files
-    # (reproduction scripts), `->`/`=>` arrows and `x > 5` comparisons are not edits —
-    # the redirect target must look like a path (contain . or /)
-    r"|(?<![-=0-9&])>>?\s*(?!/dev/|/tmp/)(?=[\w.~/-]*[./])[\w./~-]"
-    r"|tee\s+(?!/dev/|/tmp/)[\w./~-]|cat\s*>>?\s*(?!/dev/|/tmp/)[\w./~-]"
-    r"|str_replace|git\s+apply|patch\s+-p|applypatch|>{7}\s*REPLACE"
-    r"|cp\s+[\w./-]+\s+(?!/dev/|/tmp/)[\w./-]+|mv\s+[\w./-]+\s+(?!/dev/|/tmp/)[\w./-]+"
-    r"|open\s*\([^)]*['\"][wa]\+?['\"]"
-    r"|\.write_text\s*\(|\.write_bytes\s*\(|\.writelines\s*\("
-    r"|fileinput\.input\([^)]*inplace"
-    r"|shutil\.(?:copy|copyfile|copy2|move)\s*\(|os\.(?:replace|rename)\s*\("
-    r"|(?:perl|ruby)\s+-[a-zA-Z]*i\b",
-)
-
-
-def _edited_in_turn(text: str) -> bool:
-    """Whether a turn's shell commands change the repository.
-
-    Only bash blocks are scanned. Running the pattern over the whole turn made a `</think>` tag or
-    a `>` in prose read as a redirect, which marked every candidate as having edited and so left
-    apply_measurement_gate permanently inert.
-    """
-    return any(_EDIT_COMMAND_RE.search(cmd) for cmd in _EDIT_BLOCK_RE.findall(text or ""))
+_edited_in_turn = edited_in_turn
 
 
 _SUBMIT_RE = ANY_MARKER_RE
@@ -180,10 +156,6 @@ READ_ONLY_QUESTION_CAP = 5
 
 def candidate_turn_texts_from_merged(text: str) -> list[str]:
     return _CANDIDATE_BLOCK_RE.findall(text or "")
-
-
-def trajectory_made_edit(turn_texts: list[str]) -> bool:
-    return any(_edited_in_turn(text) for text in turn_texts)
 
 
 def _discard_recorder(

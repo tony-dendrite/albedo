@@ -16,8 +16,9 @@ from loguru import logger
 
 from albedo_config import JudgeSettings, SanitySettings, get_judge_settings, get_sanity_settings
 from albedo_eval_service.remote.dataset import format_messages
+from albedo_eval_service.shared.edit_detection import REMOVAL_RE as _REMOVAL_RE
+from albedo_eval_service.shared.edit_detection import named_in_removal
 from albedo_eval_service.shared.observation_format import (
-    _FILE_TOKEN,
     MAX_CONSECUTIVE_BAD_TURNS,
     canonical_empty,
     claims_tracked_change,
@@ -25,10 +26,10 @@ from albedo_eval_service.shared.observation_format import (
     degenerate_observation,
     deleted_files,
     detect_format,
+    echoed_command,
     empty_output,
     has_content,
     leaked_turn,
-    observation_body,
     prints_nothing_on_success,
     renumbered_view,
     repair_output,
@@ -43,7 +44,7 @@ from albedo_eval_service.shared.observation_format import (
     wrap,
 )
 from albedo_eval_service.shared.observation_memo import ObservationMemo
-from albedo_eval_service.shared.sed_check import fabricated_sed_error, sed_error_message
+from albedo_eval_service.shared.sed_check import fabricated_sed_error, misdiagnosed_sed
 from albedo_eval_service.shared.submit_protocol import (
     assign_submit,
     command_for,
@@ -993,7 +994,6 @@ def _edit_turns(state: _TrajectoryState) -> int:
     )
 
 
-_REMOVAL_RE = re.compile(r"\brm\b|\bgit\s+(?:rm|checkout|stash)\b|\bmv\b")
 _EXECUTES_RE = re.compile(
     r"\b(?:python\d?|pytest|go|cargo|npm|npx|yarn|make|bash|sh|mocha|tox|mvn|gradle|java|node)\b"
 )
@@ -1013,27 +1013,8 @@ def _state_fingerprint(state: _TrajectoryState) -> str:
 
 
 def _named_in_removal(state: _TrajectoryState, path: str) -> bool:
-    """Did any prior edit- or removal-shaped command name this path (by full path or suffix)?"""
-    for turn in state.turns:
-        if turn.get("role") != "assistant":
-            continue
-        content = str(turn.get("content") or "")
-        if not (_CHAIN_EDIT_RE.search(content) or _REMOVAL_RE.search(first_bash_command(content))):
-            continue
-        for token in _FILE_TOKEN.findall(first_bash_command(content)):
-            if token == path or token.endswith("/" + path) or path.endswith("/" + token):
-                return True
-    return False
-
-
-def _misdiagnosed_sed(command: str, observation: str) -> str:
-    if not _SED_ERROR_RE.search(observation):
-        return ""
-    real = sed_error_message(command)
-    stated = next(
-        (line.strip() for line in observation.splitlines() if line.strip().startswith("sed:")), ""
-    )
-    return real if real and real != stated else ""
+    assistant = [str(t.get("content") or "") for t in state.turns if t.get("role") == "assistant"]
+    return named_in_removal(assistant, [first_bash_command(a) for a in assistant], path)
 
 
 async def _simulate_observation(
@@ -1121,7 +1102,7 @@ async def _simulate_observation_uncached(
                 observation[:120],
             )
             return empty_output(fmt)
-        if diagnostic := _misdiagnosed_sed(command, observation):
+        if diagnostic := misdiagnosed_sed(command, observation):
             logger.info(
                 "[sanity-dispatch] replaced an invented sed diagnostic sample_id={}: {!r} -> {!r}",
                 sample_id,
@@ -1170,7 +1151,7 @@ async def _simulate_observation_uncached(
             fallback,
         )
         return fallback
-    if observation_body(observation, fmt).strip() == command.strip():
+    if echoed_command(command, observation):
         logger.warning(
             "[sanity-dispatch] observation echoed the command back sample_id={} command={!r}",
             sample_id,

@@ -52,7 +52,8 @@ def _first_observation(messages: list[dict[str, str]] | None) -> str | None:
     return None
 
 
-_ROLE_MARKER = re.compile(r"(?:^|\n)\s*(?:THOUGHT:|### (?:assistant|user|system)\b)")
+ROLE_MARKER_RE = re.compile(r"(?:^|\n)\s*(?:THOUGHT:|### (?:assistant|user|system)\b)")
+_ROLE_MARKER = ROLE_MARKER_RE
 
 
 def valid_output(raw: str, fmt: str) -> bool:
@@ -123,6 +124,11 @@ def stuttered_lines(raw: str) -> str:
 
 def leaked_turn(raw: str) -> bool:
     return bool(_ROLE_MARKER.match((raw or "").strip()))
+
+
+def echoed_command(command: str, raw: str) -> bool:
+    body = observation_body(raw, classify(raw)).strip()
+    return bool(body) and body == (command or "").strip()
 
 
 def repair_output(raw: str, fmt: str) -> str:
@@ -277,6 +283,30 @@ THINK_CLOSE_RE = re.compile(r"<\s*/\s*think\s*>", re.IGNORECASE)
 THINK_TAG_RE = re.compile(r"<\s*/?\s*think\s*>", re.IGNORECASE)
 _FENCED_SPAN_RE = re.compile(r"```.*?```", re.DOTALL)
 _FENCE_PLACEHOLDER = "\x00fence{}\x00"
+
+
+_COMMAND_FENCE_RE = re.compile(r"```(?:bash|sh|shell)[ \t]*\n", re.IGNORECASE)
+
+
+def _drop_unclosed_reasoning(text: str, fences: list[str]) -> str:
+    match = THINK_OPEN_RE.search(text)
+    if not match:
+        return text
+    tail = text[match.end() :]
+    if _COMMAND_FENCE_RE.search(unmask_fenced_spans(tail, fences)):
+        return text[: match.start()] + tail
+    return text[: match.start()]
+
+
+def strip_leaked_reasoning(text: str) -> str:
+    masked, fences = mask_fenced_spans(text or "")
+    cleaned = THINK_PAIR_RE.sub("", masked)
+    cleaned = _drop_unclosed_reasoning(cleaned, fences)
+    if THINK_CLOSE_RE.search(cleaned):
+        head, tail = THINK_CLOSE_RE.split(cleaned, 1)
+        cleaned = head + tail if "THOUGHT:" in head else tail
+    cleaned = THINK_TAG_RE.sub("", cleaned)
+    return unmask_fenced_spans(cleaned, fences).strip()
 
 
 def mask_fenced_spans(text: str) -> tuple[str, list[str]]:

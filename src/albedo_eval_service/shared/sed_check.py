@@ -80,3 +80,12 @@ def fabricated_sed_error(command: str, observation: str) -> bool:
         return False
     scripts = sed_scripts(command)
     return bool(scripts) and all(sed_accepts(script) for script in scripts)
+
+
+def misdiagnosed_sed(command: str, observation: str) -> str:
+    if not _SED_ERROR_RE.search(observation or ""):
+        return ""
+    real = sed_error_message(command)
+    lines = (observation or "").splitlines()
+    stated = next((line.strip() for line in lines if line.strip().startswith("sed:")), "")
+    return real if real and real != stated else ""

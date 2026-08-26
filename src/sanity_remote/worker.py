@@ -19,13 +19,13 @@ from albedo_eval_service.modelstore.canonical_model_config import canonical_max_
 from albedo_eval_service.remote.dataset import format_messages
 from albedo_eval_service.remote.prompt_remote import QWEN3_IM_END_TOKEN_ID
 from albedo_eval_service.shared.observation_format import (
-    THINK_CLOSE_RE,
     THINK_OPEN_RE,
+    THINK_PAIR_RE,
     THINK_TAG_RE,
     mask_fenced_spans,
+    strip_leaked_reasoning,
     truncation_notice,
     unclosed_think_block_notice,
-    unmask_fenced_spans,
 )
 from sanity_remote.state import SanityRun
 from sanity_service.checks import (
@@ -68,16 +68,13 @@ def _warn_if_generation_budget_consumes_context(
 
 
 def _strip_thinking(text: str) -> str:
-    masked, fences = mask_fenced_spans(text or "")
-    if THINK_CLOSE_RE.search(masked):
-        kept = THINK_CLOSE_RE.split(masked)[-1]
-        if THINK_OPEN_RE.search(kept):
-            return unclosed_think_block_notice()
-        return unmask_fenced_spans(kept, fences).strip()
-    if THINK_OPEN_RE.search(masked):
+    cleaned = strip_leaked_reasoning(text or "")
+    if cleaned and _BASH_BLOCK_RE.search(cleaned):
+        return cleaned
+    masked, _fences = mask_fenced_spans(text or "")
+    if THINK_OPEN_RE.search(THINK_PAIR_RE.sub("", masked)):
         return unclosed_think_block_notice()
-
-    return text
+    return cleaned if cleaned else text
 
 
 def _has_bash_command(text: str) -> bool:

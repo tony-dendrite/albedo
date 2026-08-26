@@ -82,7 +82,7 @@ def test_duplicate_ratio_threshold_is_looped_without_consecutive_run():
 
 
 def test_only_looping_commands_are_reported():
-    turns = [_turn(c) for c in ["dup", "dup", "dup", "dup", "once", "twice", "twice"]]
+    turns = [_turn(c) for c in ["dup"] * MAX_RUN_THRESHOLD + ["once", "twice", "twice"]]
     verdict = loop_verdict(turns)
     reported = {entry.command for entry in verdict.commands}
     assert "once" not in reported
