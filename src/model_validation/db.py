@@ -82,10 +82,17 @@ async def enqueue_from_commits(pool: asyncpg.Pool, netuid: int) -> int:
     return int(row or 0)
 
 
-async def pre_eval_running_repos(pool: asyncpg.Pool) -> set[str]:
-    """Repos whose model pre-eval is processing right now — never evict these from the cache."""
+async def protected_pre_eval_repos(pool: asyncpg.Pool) -> set[str]:
+    """Repos pre-eval is processing now or will claim next — never evict these from the cache."""
     rows = await pool.fetch(
-        "SELECT model_uri FROM model_submissions WHERE state = 'PRE_EVAL_RUNNING'"
+        """
+        (SELECT model_uri FROM model_submissions WHERE state = 'PRE_EVAL_RUNNING')
+        UNION ALL
+        (SELECT model_uri FROM model_submissions
+         WHERE state IN ('HIPPIUS_VALIDATED', 'PRE_EVAL_RETRYABLE')
+         ORDER BY priority ASC, created_at ASC
+         LIMIT 1)
+        """
     )
     return {str(row["model_uri"]).partition("@")[0] for row in rows}
 

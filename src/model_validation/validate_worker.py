@@ -413,7 +413,7 @@ async def run() -> None:
 
             hb = asyncio.create_task(_heartbeat_loop(pool, attempt["id"]))
             try:
-                protected = frozenset(await db.pre_eval_running_repos(pool))
+                protected = frozenset(await db.protected_pre_eval_repos(pool))
                 outcome = await asyncio.to_thread(
                     process_model, attempt["model_uri"], attempt["hotkey"], protected
                 )
