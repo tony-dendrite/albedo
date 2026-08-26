@@ -44,6 +44,7 @@ from albedo_eval_service.shared.observation_format import (
     wrap,
 )
 from albedo_eval_service.shared.observation_memo import ObservationMemo
+from albedo_eval_service.shared.pip_check import fabricated_pip_error, pip_success_body
 from albedo_eval_service.shared.sed_check import fabricated_sed_error, misdiagnosed_sed
 from albedo_eval_service.shared.submit_protocol import (
     assign_submit,
@@ -1077,6 +1078,7 @@ async def _simulate_observation_uncached(
                 and not degenerate_observation(raw)
                 and not stuttered_lines(raw)
                 and not fabricated_sed_error(command, raw)
+                and not fabricated_pip_error(command, raw)
             ),
         )
         if response.error:
@@ -1110,6 +1112,15 @@ async def _simulate_observation_uncached(
                 diagnostic,
             )
             return wrap(diagnostic, fmt, returncode=1)
+        if fabricated_pip_error(command, observation):
+            logger.warning(
+                "[sanity-dispatch] invented a pip failure the bench cannot give sample_id={} "
+                "command={!r}: {!r}",
+                sample_id,
+                command[:120],
+                observation[:120],
+            )
+            return wrap(pip_success_body(command), fmt)
         if not degenerate_observation(observation) and not stuttered_lines(observation):
             break
         logger.warning(

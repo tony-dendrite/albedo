@@ -4,6 +4,7 @@ from model_validation.storage.download import (
     download_full,
     list_files,
     make_ref,
+    make_room,
 )
 from model_validation.storage.preflight import safetensors_dtypes
 
@@ -13,5 +14,6 @@ __all__ = [
     "download_full",
     "list_files",
     "make_ref",
+    "make_room",
     "safetensors_dtypes",
 ]

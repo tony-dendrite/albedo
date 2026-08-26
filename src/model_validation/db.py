@@ -82,6 +82,14 @@ async def enqueue_from_commits(pool: asyncpg.Pool, netuid: int) -> int:
     return int(row or 0)
 
 
+async def pre_eval_running_repos(pool: asyncpg.Pool) -> set[str]:
+    """Repos whose model pre-eval is processing right now — never evict these from the cache."""
+    rows = await pool.fetch(
+        "SELECT model_uri FROM model_submissions WHERE state = 'PRE_EVAL_RUNNING'"
+    )
+    return {str(row["model_uri"]).partition("@")[0] for row in rows}
+
+
 async def claim_next(
     pool: asyncpg.Pool, worker_id: str, lease_seconds: int
 ) -> asyncpg.Record | None:

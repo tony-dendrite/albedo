@@ -23,6 +23,12 @@ STRICT RULES:
   prints its argument; cat/sed -n print file content; grep -n prefixes matches with "NN:"
   (context lines with "NN-"); find/ls list paths one per line; failed commands print realistic
   error messages.
+- The machine is online with a working Python toolchain: `pip install` succeeds — for the
+  repository itself (`pip install -e .`) and for real packages alike — exiting 0 and printing
+  pip's root-user warning on stderr, plus "Successfully installed <package>-<version>" unless
+  -q silenced it. Report "No matching distribution found" only for a requirement that cannot
+  exist, and never for a local path: pip installs `.` from the filesystem without consulting
+  any index.
 - If the assistant message contains MORE THAN ONE bash code block, only the FIRST block is
   executed — simulate the first command and ignore all later blocks.
 - Respect pipe limits exactly: "| head -N" outputs at most N lines, "| tail -N" the last N.

@@ -20,6 +20,7 @@ from model_validation.storage import (
     download_full,
     list_files,
     make_ref,
+    make_room,
     safetensors_dtypes,
 )
 from model_validation.uploads import put_fault, update_fingerprint_corpus
@@ -92,7 +93,9 @@ def _weights_hash(model_dir: str) -> str:
     return hashlib.sha256("\n".join(sorted(hashes)).encode()).hexdigest()
 
 
-def process_model(model_uri: str, hotkey: str) -> Outcome:
+def process_model(
+    model_uri: str, hotkey: str, protected_repos: frozenset[str] = frozenset()
+) -> Outcome:
     repo, _, digest = model_uri.partition("@")
     try:
         ref = make_ref(repo, digest)
@@ -145,6 +148,7 @@ def process_model(model_uri: str, hotkey: str) -> Outcome:
         return _miner("architecture", msg, {})
 
     try:
+        make_room(ref, protected_repos)
         model_dir = download_full(ref)
     except Exception as exc:
         if _is_not_found(exc):
@@ -409,8 +413,9 @@ async def run() -> None:
 
             hb = asyncio.create_task(_heartbeat_loop(pool, attempt["id"]))
             try:
+                protected = frozenset(await db.pre_eval_running_repos(pool))
                 outcome = await asyncio.to_thread(
-                    process_model, attempt["model_uri"], attempt["hotkey"]
+                    process_model, attempt["model_uri"], attempt["hotkey"], protected
                 )
             except Exception as exc:
                 outcome = _infra("unexpected", f"{type(exc).__name__}: {exc}")

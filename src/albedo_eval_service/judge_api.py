@@ -95,6 +95,7 @@ from .shared.observation_format import (
     wrap,
 )
 from .shared.observation_memo import ObservationMemo
+from .shared.pip_check import fabricated_pip_error, pip_success_body
 from .shared.sed_check import fabricated_sed_error, misdiagnosed_sed
 from .shared.submit_protocol import first_bash_command, is_exact_submission
 from .simulator.prompt_simulator import (
@@ -993,7 +994,11 @@ class ObservationSimulationService:
                     attempt + 1,
                     tries,
                     _unusable_reason(
-                        candidate, fmt, require_content=require_content, contract=contract
+                        candidate,
+                        fmt,
+                        require_content=require_content,
+                        contract=contract,
+                        command=command,
                     ),
                     best_rank,
                 )
@@ -1018,6 +1023,14 @@ class ObservationSimulationService:
                 diagnostic,
             )
             observation = wrap(diagnostic, fmt, returncode=1)
+        if fabricated_pip_error(command, observation):
+            logger.warning(
+                "observation_simulation_pip_fabrication eval_run_id={} sample_id={} command={!r}",
+                request.eval_run_id,
+                request.sample_id,
+                command[:80],
+            )
+            observation = wrap(pip_success_body(command), fmt)
         if echoed_command(command, observation):
             logger.warning(
                 "observation_simulation_echoed eval_run_id={} sample_id={} command={!r}",
@@ -1446,6 +1459,7 @@ def _usable_simulation_output(
         and not degenerate_observation(raw)
         and not stuttered_lines(raw)
         and not (command and fabricated_sed_error(command, raw))
+        and not (command and fabricated_pip_error(command, raw))
         and (not require_content or has_content(raw, fmt))
         and (contract is None or contract_violation(raw, fmt, contract) is None)
     )
@@ -1457,6 +1471,7 @@ def _unusable_reason(
     *,
     require_content: bool = False,
     contract: CommandContract | None = None,
+    command: str = "",
 ) -> str:
     if not valid_output(raw, fmt):
         return "invalid_format"
@@ -1468,6 +1483,10 @@ def _unusable_reason(
         return "degenerate_lines"
     if reason := stuttered_lines(raw):
         return f"stuttered: {reason}"
+    if command and fabricated_sed_error(command, raw):
+        return "fabricated_sed_error"
+    if command and fabricated_pip_error(command, raw):
+        return "fabricated_pip_error"
     if require_content and not has_content(raw, fmt):
         return "no_content_for_read"
     if contract is not None and (breach := contract_violation(raw, fmt, contract)):
