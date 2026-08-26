@@ -1176,7 +1176,7 @@ async def _simulate_observation_uncached(
             sample_id,
             command[:80],
         )
-        return empty_output(fmt)
+        observation = empty_output(fmt)
     phantom = (not _has_edited(state) and claims_tracked_change(command, observation)) or any(
         not _named_in_removal(state, path) for path in deleted_files(command, observation)
     )

@@ -73,7 +73,7 @@ AGENT'S SUBMISSION TURN:
 {submission}"""
 
 _EDIT_RE = re.compile(
-    r"\b(sed -i|cat >|cat >>|tee |git apply|applypatch|str_replace|patch -p\d)"
+    r"\b(sed -i|cat >|cat >>|tee |git apply|applypatch|str_replace|patch -p\d|cp |mv )"
     r"|<<\s*'?\"?[A-Za-z_][A-Za-z0-9_]*'?\"?\s*>"
     r"|<<\s*'?(EOF|PYEOF|PATCH|PY|SH|BASH|SCRIPT)\b"
     r"|\.write_text\(|\.writelines\(|open\([^)]*['\"][wa]\+?['\"]"
