@@ -994,7 +994,9 @@ def _edit_turns(state: _TrajectoryState) -> int:
 
 
 _REMOVAL_RE = re.compile(r"\brm\b|\bgit\s+(?:rm|checkout|stash)\b|\bmv\b")
-_EXECUTES_RE = re.compile(r"\b(?:python\d?|pytest|go|cargo|npm|npx|yarn|make|bash|sh|mocha|tox)\b")
+_EXECUTES_RE = re.compile(
+    r"\b(?:python\d?|pytest|go|cargo|npm|npx|yarn|make|bash|sh|mocha|tox|mvn|gradle|java|node)\b"
+)
 
 
 def _state_fingerprint(state: _TrajectoryState) -> str:
