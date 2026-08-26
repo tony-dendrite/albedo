@@ -102,6 +102,25 @@ def renumbered_view(command: str, raw: str) -> str:
     return "\n".join(lines) if fixed else raw
 
 
+_VIEW_LINE_PREFIX = re.compile(r"^\s*\d+[:\t]\s?|^\s*\d+\s{2,}")
+_STUTTER_MIN_CHARS = 12
+
+
+def stuttered_lines(raw: str) -> str:
+    lines = [_VIEW_LINE_PREFIX.sub("", line).rstrip() for line in (raw or "").splitlines()]
+    substantial = [len(line.strip()) >= _STUTTER_MIN_CHARS for line in lines]
+    run = 1
+    for i in range(1, len(lines)):
+        run = run + 1 if lines[i] == lines[i - 1] and substantial[i] else 1
+        if run >= 3:
+            return f"the line {lines[i].strip()[:60]!r} rendered {run}x consecutively"
+    for i in range(len(lines) - 3):
+        a, b, c, d = lines[i : i + 4]
+        if a == b != c and c == d and substantial[i] and substantial[i + 2]:
+            return "consecutive lines each rendered twice (A A B B)"
+    return ""
+
+
 def leaked_turn(raw: str) -> bool:
     return bool(_ROLE_MARKER.match((raw or "").strip()))
 

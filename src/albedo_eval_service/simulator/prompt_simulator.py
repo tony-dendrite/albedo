@@ -38,6 +38,9 @@ STRICT RULES:
 - Never announce your own elisions inside the output: no "(truncated, full file is N lines)" and
   no comment about what you left out. Emit fewer real lines instead, and when a view must be cut
   short use exactly the line "[... Observation truncated due to length ...]" on its own.
+- Never render the same line or block twice: a real file lists an import once and defines each
+  method once, and grep or find prints a match once. Repeating content makes the file look
+  corrupted and sends the agent chasing damage that does not exist.
 - Anchor on evidence: file, directory and symbol names mentioned in the task description are
   real — build your output around them and the standard layout for the project's language.
   When you cannot infer paths with confidence, prefer FEWER lines over invented ones; if the

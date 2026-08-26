@@ -35,6 +35,7 @@ from albedo_eval_service.shared.observation_format import (
     requires_output,
     retry_feedback,
     silent_observation,
+    stuttered_lines,
     unusable_turn,
     valid_output,
     without_tracked_changes,
@@ -1045,6 +1046,7 @@ async def _simulate_observation(
             accept=lambda raw: (
                 valid_output(raw, fmt)
                 and not degenerate_observation(raw)
+                and not stuttered_lines(raw)
                 and not fabricated_sed_error(command, raw)
             ),
         )
@@ -1079,7 +1081,7 @@ async def _simulate_observation(
                 diagnostic,
             )
             return wrap(diagnostic, fmt, returncode=1)
-        if not degenerate_observation(observation):
+        if not degenerate_observation(observation) and not stuttered_lines(observation):
             break
         logger.warning(
             "[sanity-dispatch] observation collapsed into repeated lines sample_id={} "
@@ -1092,9 +1094,15 @@ async def _simulate_observation(
     else:
         if not observation:
             return empty_output(fmt)
-        raise RuntimeError(
-            f"simulator collapsed into repeated lines on "
-            f"{MAX_CONSECUTIVE_DEGENERATE_OBSERVATIONS} consecutive attempts at one step"
+        if degenerate_observation(observation):
+            raise RuntimeError(
+                f"simulator collapsed into repeated lines on "
+                f"{MAX_CONSECUTIVE_DEGENERATE_OBSERVATIONS} consecutive attempts at one step"
+            )
+        logger.warning(
+            "[sanity-dispatch] kept a stuttered observation after retries sample_id={}: {}",
+            sample_id,
+            stuttered_lines(observation),
         )
     if META_LEAK_RE.search(observation):
         logger.warning(
