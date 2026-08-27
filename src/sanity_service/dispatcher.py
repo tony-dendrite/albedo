@@ -818,6 +818,38 @@ def _apply_turn_result(states: list[_TrajectoryState], result: dict[str, Any]) -
         )
 
 
+async def _confirm_silence(
+    settings: JudgeSettings, state: _TrajectoryState, assistant_output: str
+) -> str:
+    fmt = detect_format(state.sample_id, state.messages)
+    transcript = _simulation_transcript(
+        messages=state.messages, prompt=state.prompt, assistant_output=assistant_output
+    )
+    client = make_client(settings)
+    try:
+        response = await client.complete(
+            model=settings.evaluator_model,
+            messages=[
+                {"role": "system", "content": simulation_system_prompt(fmt)},
+                {"role": "user", "content": transcript},
+            ],
+            temperature=0.0,
+            max_tokens=settings.simulation_max_tokens,
+            provider=_evaluator_provider(settings),
+        )
+    finally:
+        await client.aclose()
+    candidate = "" if response.error else repair_output(response.raw.strip(), fmt)
+    recovered = (
+        valid_output(candidate, fmt)
+        and not silent_observation(candidate)
+        and not degenerate_observation(candidate)
+        and not stuttered_lines(candidate)
+        and not leaked_turn(candidate)
+    )
+    return candidate if recovered else ""
+
+
 async def _append_observations(
     states: list[_TrajectoryState], eval_run_id: str, turn_index: int
 ) -> None:
@@ -871,8 +903,21 @@ async def _append_observations(
         if isinstance(result, Exception):
             state.error = f"{type(result).__name__}: {result}"
             continue
-        _append_observation(state, result)
         quiet_by_design = prints_nothing_on_success(first_bash_command(assistant_output))
+        if (
+            silent_observation(result)
+            and not quiet_by_design
+            and state.consecutive_silent_observations + 1 >= MAX_CONSECUTIVE_SILENT_OBSERVATIONS
+        ):
+            recovered = await _confirm_silence(settings, state, assistant_output)
+            if recovered:
+                logger.info(
+                    "[sanity-dispatch] silence run broken by rescue model sample_id={} turn={}",
+                    state.sample_id,
+                    turn_index,
+                )
+                result = recovered
+        _append_observation(state, result)
         state.consecutive_silent_observations = (
             state.consecutive_silent_observations + 1
             if silent_observation(result) and not quiet_by_design

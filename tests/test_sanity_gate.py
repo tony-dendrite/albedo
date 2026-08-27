@@ -499,7 +499,7 @@ def test_multiturn_samples_advance_independently(monkeypatch):
     async def _fake_remote(_client, request, _claimed):
         run_id = request.run_id
         if ":s2-" in run_id:
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.4)
         order.append(run_id.split(":", 1)[1])
         return {
             "state": "succeeded",
@@ -591,3 +591,30 @@ def test_multiturn_veto_halts_other_samples(monkeypatch):
     # sample-1 burns its bad-turn budget and vetoes; sample-2 never reaches turn 32
     assert "3 consecutive turns" in result["heuristics"][0]["reason"]
     assert not any(c == "s2-turn-32" for c in calls)
+
+
+def test_teardown_is_skipped_while_runs_are_active(monkeypatch):
+    """A stale teardown (dispatcher retries it with delays) must never kill vLLM under the
+    next attempt's live generations."""
+    import sanity_remote.api as api
+
+    torn: list[bool] = []
+
+    async def _fake_teardown():
+        torn.append(True)
+
+    monkeypatch.setattr(api, "teardown", _fake_teardown)
+    monkeypatch.setattr(api, "store", SanityRunStore())
+
+    req = SanityRunRequest(run_id="live-1", model_uri="m", digest="d", prompts=["p"])
+    api.store.start(req)
+    api.store.mark_worker_started("live-1")
+
+    result = asyncio.run(api.teardown_worker())
+    assert result == {"state": "skipped_active_runs"}
+    assert torn == []
+
+    api.store.get("live-1").succeed(responses=["x"], heuristics=[{"passed": True, "reason": ""}])
+    result = asyncio.run(api.teardown_worker())
+    assert result == {"state": "ok"}
+    assert torn == [True]
