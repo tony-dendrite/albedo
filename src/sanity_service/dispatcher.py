@@ -1076,6 +1076,7 @@ async def _simulate_observation_uncached(
             temperature=0.0 if attempt == 0 else _DEGENERATE_RETRY_TEMPERATURE,
             max_tokens=settings.simulation_max_tokens,
             provider=_evaluator_provider(settings) if rescue else _simulation_provider(settings),
+            parse_retries=None if rescue else 1,
             accept=lambda raw: (
                 valid_output(raw, fmt)
                 and not degenerate_observation(raw)
