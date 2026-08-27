@@ -110,6 +110,10 @@ def cancel_run(run_id: str, _: None = Depends(require_auth)) -> dict[str, str]:
 
 @app.post("/teardown")
 async def teardown_worker(_: None = Depends(require_auth)) -> dict[str, str]:
+    active = store.list_active()
+    if active:
+        logger.info("[sanity-remote-api] teardown skipped: {} active run(s)", len(active))
+        return {"state": "skipped_active_runs"}
     await teardown()
     return {"state": "ok"}
 
