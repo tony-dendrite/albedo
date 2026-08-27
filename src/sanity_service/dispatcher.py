@@ -1064,15 +1064,18 @@ async def _simulate_observation_uncached(
     observation = ""
     for attempt in range(MAX_CONSECUTIVE_DEGENERATE_OBSERVATIONS):
         ask = transcript if attempt == 0 else f"{transcript}\n\n{DEGENERATE_RETRY}"
+        rescue = attempt == MAX_CONSECUTIVE_DEGENERATE_OBSERVATIONS - 1
         response = await client.complete(
-            model=settings.simulation_model or settings.evaluator_model,
+            model=settings.evaluator_model
+            if rescue
+            else (settings.simulation_model or settings.evaluator_model),
             messages=[
                 {"role": "system", "content": simulation_system_prompt(fmt)},
                 {"role": "user", "content": ask},
             ],
             temperature=0.0 if attempt == 0 else _DEGENERATE_RETRY_TEMPERATURE,
             max_tokens=settings.simulation_max_tokens,
-            provider=_simulation_provider(settings),
+            provider=_evaluator_provider(settings) if rescue else _simulation_provider(settings),
             accept=lambda raw: (
                 valid_output(raw, fmt)
                 and not degenerate_observation(raw)
