@@ -19,7 +19,10 @@ class SanityRemoteClient:
     ) -> None:
         headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
         self._client = httpx.AsyncClient(
-            base_url=base_url.rstrip("/"), headers=headers, timeout=timeout_seconds
+            base_url=base_url.rstrip("/"),
+            headers=headers,
+            timeout=timeout_seconds,
+            limits=httpx.Limits(keepalive_expiry=4.0),
         )
 
     async def aclose(self) -> None:
@@ -36,7 +39,7 @@ class SanityRemoteClient:
                 if exc.response.status_code < 500 or attempt >= _RETRY_COUNT - 1:
                     raise
                 last_exc = exc
-            except (httpx.ConnectError, httpx.TimeoutException) as exc:
+            except (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError) as exc:
                 if attempt >= _RETRY_COUNT - 1:
                     raise
                 last_exc = exc
