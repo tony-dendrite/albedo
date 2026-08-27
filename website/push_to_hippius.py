@@ -76,7 +76,7 @@ def content_type_for(path: Path) -> str:
 
 
 def cache_for(key: str) -> str:
-    return NO_CACHE if key.endswith((".json", ".html")) else ASSET_CACHE
+    return NO_CACHE if key.endswith((".json", ".html", ".js", ".css")) else ASSET_CACHE
 
 
 def upload(client, bucket: str, key: str, path: Path, *, dry_run: bool) -> None:
