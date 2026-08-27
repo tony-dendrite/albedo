@@ -271,68 +271,68 @@ class SanityDispatcher:
         await _inject_microtasks(states)
         kept_warm = False
         decided_early = False
-        try:
+        halt = asyncio.Event()
+        failed_results: list[dict[str, Any]] = []
+
+        async def _drive(index: int, state: _TrajectoryState) -> None:
+            nonlocal kept_warm, decided_early
             for turn_index in range(turn_count):
-                active = [
-                    state
-                    for state in states
-                    if not state.stopped and not state.error and not state.heuristic_reason
-                ]
-
-                if not self.settings.consensus and any(s.heuristic_reason for s in states):
-                    decided_early = True
-                    break
-                if not active:
-                    break
-
+                if state.stopped or state.error or state.heuristic_reason or halt.is_set():
+                    if state.heuristic_reason and not self.settings.consensus:
+                        decided_early = True
+                        halt.set()
+                    return
+                run_id = f"{claimed.attempt_id}:s{index + 1}-turn-{turn_index + 1}"
                 turn_request = request.model_copy(
                     update={
-                        "run_id": f"{claimed.attempt_id}:turn-{turn_index + 1}",
-                        "prompts": [state.prompt for state in active],
-                        "sample_ids": [state.sample_id for state in active],
-                        "prompt_messages": [state.messages for state in active]
-                        if turn_index == 0
-                        else None,
+                        "run_id": run_id,
+                        "prompts": [state.prompt],
+                        "sample_ids": [state.sample_id],
+                        "prompt_messages": [state.messages] if turn_index == 0 else None,
                         "teardown_after_run": False,
                     }
                 )
                 kept_warm = True
                 logger.info(
-                    "[sanity-dispatch] trajectory turn {}/{} samples={}",
+                    "[sanity-dispatch] trajectory turn {}/{} sample={}",
                     turn_index + 1,
                     turn_count,
-                    len(active),
+                    state.sample_id,
                 )
                 result = await self._run_remote_request(client, turn_request, claimed)
                 if result.get("state") == "failed":
-                    return result
-                _apply_turn_result(active, result)
+                    failed_results.append(result)
+                    halt.set()
+                    return
+                _apply_turn_result([state], result)
                 for _ in range(MAX_CONSECUTIVE_BAD_TURNS - 1):
-                    redo = [state for state in active if state.retry_reason]
-                    if not redo:
+                    if not state.retry_reason or halt.is_set():
                         break
                     redo_request = request.model_copy(
                         update={
-                            "run_id": (
-                                f"{claimed.attempt_id}:turn-{turn_index + 1}"
-                                f"-retry{redo[0].consecutive_bad_turns}"
-                            ),
-                            "prompts": [state.prompt for state in redo],
-                            "sample_ids": [state.sample_id for state in redo],
+                            "run_id": f"{run_id}-retry{state.consecutive_bad_turns}",
+                            "prompts": [state.prompt],
+                            "sample_ids": [state.sample_id],
                             "prompt_messages": None,
                             "teardown_after_run": False,
                         }
                     )
-                    kept_warm = True
                     redo_result = await self._run_remote_request(client, redo_request, claimed)
                     if redo_result.get("state") == "failed":
-                        return redo_result
-                    _apply_turn_result(redo, redo_result)
+                        failed_results.append(redo_result)
+                        halt.set()
+                        return
+                    _apply_turn_result([state], redo_result)
                 if turn_index == turn_count - 1:
-                    break
-                await _append_observations(active, str(claimed.attempt_id), turn_index + 1)
+                    return
+                await _append_observations([state], str(claimed.attempt_id), turn_index + 1)
                 if turn_index >= turn_count - 8 and (turn_count - turn_index) % 4 == 0:
-                    await _inject_submit_nudges(active)
+                    await _inject_submit_nudges([state])
+
+        try:
+            await asyncio.gather(*(_drive(i, state) for i, state in enumerate(states)))
+            if failed_results:
+                return failed_results[0]
             if not decided_early:
                 _run_chain_checks(states, turn_count)
                 await run_tail_check(states)

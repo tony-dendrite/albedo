@@ -66,9 +66,10 @@ async def start_run(
     active = store.list_active()
     incoming = getattr(request, "run_id", None)
     if active and (incoming is None or all(r.run_id != incoming for r in active)):
-        raise HTTPException(
-            status_code=409, detail=f"sanity worker busy: {len(active)} active run(s)"
-        )
+        if incoming is None or any(r.request.digest != request.digest for r in active):
+            raise HTTPException(
+                status_code=409, detail=f"sanity worker busy: {len(active)} active run(s)"
+            )
     run = store.start(request)
     queued = store.mark_worker_started(run.run_id)
     if queued is not None:

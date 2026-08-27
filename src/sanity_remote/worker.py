@@ -247,7 +247,7 @@ class VllmEngine:
                 prompts = await asyncio.to_thread(
                     _format_prompt_messages, self._loaded_dir, prompt_messages
                 )
-            return await self._run_prompts(digest, prompts, max_tokens)
+        return await self._run_prompts(digest, prompts, max_tokens)
 
     async def teardown(self) -> None:
         async with self._lock:

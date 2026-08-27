@@ -489,3 +489,105 @@ def test_veto_chain_stops_early_once_a_sample_fails(monkeypatch):
     assert "token limit" in result["heuristics"][0]["reason"]
     assert "3 consecutive turns" in result["heuristics"][0]["reason"]
     assert "no submission" not in result["heuristics"][0]["reason"]
+
+
+def test_multiturn_samples_advance_independently(monkeypatch):
+    """A slow sample must not stall the others: sample-1 finishes all its turns while
+    sample-2 is still crawling, and both trajectories stay complete."""
+    order: list[str] = []
+
+    async def _fake_remote(_client, request, _claimed):
+        run_id = request.run_id
+        if ":s2-" in run_id:
+            await asyncio.sleep(0.05)
+        order.append(run_id.split(":", 1)[1])
+        return {
+            "state": "succeeded",
+            "responses": ["```bash\nls\n```"],
+            "heuristics": [{"passed": True, "reason": ""}],
+        }
+
+    async def _noop(*_args, **_kwargs):
+        return None
+
+    request = SanityRunRequest(
+        run_id="run",
+        model_uri="model",
+        digest="digest",
+        prompts=["p1", "p2"],
+        sample_ids=["sample-1", "sample-2"],
+        prompt_messages=[
+            [{"role": "user", "content": "task one"}],
+            [{"role": "user", "content": "task two"}],
+        ],
+        assistant_turns=4,
+    )
+    dispatcher = D.SanityDispatcher(settings=SanitySettings(), repository=_FakeRepo())
+    monkeypatch.setattr(dispatcher, "_run_remote_request", _fake_remote)
+    monkeypatch.setattr(D, "_append_observations", _noop)
+    monkeypatch.setattr(D, "_inject_microtasks", _noop)
+    monkeypatch.setattr(D, "_run_chain_checks", lambda *_a, **_k: None)
+    monkeypatch.setattr(D, "run_tail_check", _noop)
+
+    asyncio.run(
+        dispatcher._run_multiturn(
+            SimpleNamespace(),
+            SimpleNamespace(request=request, attempt_id=uuid4(), submission_id=uuid4()),
+        )
+    )
+
+    assert order.count("s1-turn-4") == 1 and order.count("s2-turn-4") == 1
+    # under the old lock-step barrier every sample finished turn 3 before anyone ran turn 4;
+    # decoupled, the fast sample's last turn lands while the slow one is still early
+    assert order.index("s1-turn-4") < order.index("s2-turn-3")
+
+
+def test_multiturn_veto_halts_other_samples(monkeypatch):
+    """When one sample fails a heuristic in veto mode, the others stop at their next turn."""
+    calls: list[str] = []
+
+    async def _fake_remote(_client, request, _claimed):
+        calls.append(request.run_id.split(":", 1)[1])
+        if request.run_id.split(":", 1)[1].startswith("s1-"):
+            return {
+                "state": "succeeded",
+                "responses": ["no command here at all"],
+                "heuristics": [{"passed": True, "reason": ""}],
+            }
+        await asyncio.sleep(0.02)
+        return {
+            "state": "succeeded",
+            "responses": ["```bash\nls\n```"],
+            "heuristics": [{"passed": True, "reason": ""}],
+        }
+
+    async def _noop(*_args, **_kwargs):
+        return None
+
+    request = SanityRunRequest(
+        run_id="run",
+        model_uri="model",
+        digest="digest",
+        prompts=["p1", "p2"],
+        sample_ids=["sample-1", "sample-2"],
+        prompt_messages=[
+            [{"role": "user", "content": "task one"}],
+            [{"role": "user", "content": "task two"}],
+        ],
+        assistant_turns=32,
+    )
+    dispatcher = D.SanityDispatcher(settings=SanitySettings(), repository=_FakeRepo())
+    monkeypatch.setattr(dispatcher, "_run_remote_request", _fake_remote)
+    monkeypatch.setattr(D, "_append_observations", _noop)
+    monkeypatch.setattr(D, "_inject_microtasks", _noop)
+
+    result = asyncio.run(
+        dispatcher._run_multiturn(
+            SimpleNamespace(),
+            SimpleNamespace(request=request, attempt_id=uuid4(), submission_id=uuid4()),
+        )
+    )
+
+    # sample-1 burns its bad-turn budget and vetoes; sample-2 never reaches turn 32
+    assert "3 consecutive turns" in result["heuristics"][0]["reason"]
+    assert not any(c == "s2-turn-32" for c in calls)
