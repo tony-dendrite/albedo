@@ -16,4 +16,9 @@ EVALUATOR_PROVIDERS = "baidu,streamlake"
 SOTA_MODELS = "z-ai/glm-5.2"
 SIMULATION_MODEL = "deepseek/deepseek-v4-flash-0731"
 SIMULATION_PROVIDERS = "baidu,streamlake,deepinfra"
+
+JUDGE_PROVIDER_PINS[SIMULATION_MODEL] = {
+    "allow_fallbacks": False,
+    "order": ["baidu", "streamlake", "deepinfra"],
+}
 ENGY_MODELS = "z-ai/glm-5.2,deepseek/deepseek-v4-flash-0731"

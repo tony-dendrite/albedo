@@ -1065,14 +1065,14 @@ async def _simulate_observation_uncached(
     for attempt in range(MAX_CONSECUTIVE_DEGENERATE_OBSERVATIONS):
         ask = transcript if attempt == 0 else f"{transcript}\n\n{DEGENERATE_RETRY}"
         response = await client.complete(
-            model=settings.evaluator_model,
+            model=settings.simulation_model or settings.evaluator_model,
             messages=[
                 {"role": "system", "content": simulation_system_prompt(fmt)},
                 {"role": "user", "content": ask},
             ],
             temperature=0.0 if attempt == 0 else _DEGENERATE_RETRY_TEMPERATURE,
             max_tokens=settings.simulation_max_tokens,
-            provider=_evaluator_provider(settings),
+            provider=_simulation_provider(settings),
             accept=lambda raw: (
                 valid_output(raw, fmt)
                 and not degenerate_observation(raw)
@@ -1205,14 +1205,14 @@ async def _retry_for_output(
     observation: str,
 ) -> str:
     response = await client.complete(
-        model=settings.evaluator_model,
+        model=settings.simulation_model or settings.evaluator_model,
         messages=[
             {"role": "system", "content": simulation_system_prompt(fmt)},
             {"role": "user", "content": f"{transcript}\n\n{MUST_PRINT_RETRY}"},
         ],
         temperature=0.0,
         max_tokens=settings.simulation_max_tokens,
-        provider=_evaluator_provider(settings),
+        provider=_simulation_provider(settings),
         accept=lambda raw: (
             valid_output(raw, fmt) and has_content(raw, fmt) and not degenerate_observation(raw)
         ),
@@ -1309,6 +1309,13 @@ def _evaluator_provider(settings: JudgeSettings) -> dict[str, Any]:
         block["order"] = order
         block["allow_fallbacks"] = False
     return block
+
+
+def _simulation_provider(settings: JudgeSettings) -> dict[str, Any] | None:
+    allowed = [p.strip() for p in settings.simulation_providers.split(",") if p.strip()]
+    if not allowed:
+        return None
+    return {"order": allowed, "allow_fallbacks": False}
 
 
 def _has_bash_command(output: str) -> bool:
