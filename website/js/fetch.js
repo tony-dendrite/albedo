@@ -97,36 +97,47 @@ async function readPredsTail(url, offset) {
   };
 }
 
-export async function fetchPredsProgress(runId) {
-  if (!runId) return null;
-  for (const base of PREDS_ENDPOINTS) {
-    const url = `${base}/${runId}/preds.json`;
-    try {
-      const head = await fetch(url, { method: "HEAD", cache: "no-store" });
-      if (!head.ok) continue;
-      const size = Number(head.headers.get("content-length"));
-      if (!Number.isFinite(size) || size <= 0) continue;
-      const prev = predsState.get(url);
-      const state = prev && size >= prev.offset ? prev : { offset: 0, count: 0, first: null };
-      if (size > state.offset) {
-        const tail = await readPredsTail(url, state.offset);
-        if (!tail) continue;
-        state.count = tail.partial ? state.count + tail.found : tail.found;
-        state.offset = tail.offset;
-      }
-      state.first ||= { at: Date.now(), count: state.count };
-      predsState.set(url, state);
-      const elapsed = Date.now() - state.first.at;
-      const gained = state.count - state.first.count;
-      return {
-        runId,
-        count: state.count,
-        updatedAt: head.headers.get("last-modified") || null,
-        rate: elapsed > 30000 && gained > 0 ? gained / elapsed : null,
-      };
-    } catch {}
+export async function fetchPredsProgress(runIds) {
+  const ids = (Array.isArray(runIds) ? runIds : [runIds]).filter(Boolean);
+  const heads = [];
+  for (const runId of ids) {
+    for (const base of PREDS_ENDPOINTS) {
+      const url = `${base}/${runId}/preds.json`;
+      try {
+        const head = await fetch(url, { method: "HEAD", cache: "no-store" });
+        if (!head.ok) continue;
+        const size = Number(head.headers.get("content-length"));
+        if (!Number.isFinite(size) || size <= 0) continue;
+        const updatedAt = head.headers.get("last-modified") || null;
+        const modified = new Date(updatedAt || 0).getTime();
+        heads.push({ runId, url, size, updatedAt, modified: Number.isFinite(modified) ? modified : 0 });
+        break;
+      } catch {}
+    }
   }
-  return null;
+  if (!heads.length) return null;
+  // the run being generated right now is the one whose preds file was written most recently
+  const target = heads.sort((a, b) => b.modified - a.modified)[0];
+  try {
+    const prev = predsState.get(target.url);
+    const state = prev && target.size >= prev.offset ? prev : { offset: 0, count: 0, first: null };
+    if (target.size > state.offset) {
+      const tail = await readPredsTail(target.url, state.offset);
+      if (!tail) return null;
+      state.count = tail.partial ? state.count + tail.found : tail.found;
+      state.offset = tail.offset;
+    }
+    state.first ||= { at: Date.now(), count: state.count };
+    predsState.set(target.url, state);
+    const elapsed = Date.now() - state.first.at;
+    const gained = state.count - state.first.count;
+    return {
+      runId: target.runId,
+      count: state.count,
+      updatedAt: target.updatedAt,
+      rate: elapsed > 30000 && gained > 0 ? gained / elapsed : null,
+    };
+  } catch { return null; }
 }
 
 export async function fetchText(url) {

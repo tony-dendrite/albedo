@@ -5,7 +5,7 @@ import { el, mount } from "../dom.js";
 import { fmtRelative } from "../format.js";
 import { kingTitleName, hubRepoUrl, modelRepo } from "../model.js";
 import { renderReign } from "../render/reign.js";
-import { renderBenchmarks, liveScoreRunId } from "../render/benchmarks.js";
+import { renderBenchmarks, liveScoreCandidates } from "../render/benchmarks.js";
 import { renderPipeline } from "../render/pipeline.js";
 import { renderHistory, renderFails, collapsePasses } from "../render/history.js";
 import { renderDatasets } from "../render/datasets.js";
@@ -96,14 +96,14 @@ async function tickBenchmarks() {
 }
 
 async function tickPreds() {
-  const runId = benchmarkData && liveScoreRunId(benchmarkData, benchmarkScores);
-  if (!runId) {
+  const runIds = benchmarkData ? liveScoreCandidates(benchmarkData, benchmarkScores) : [];
+  if (!runIds.length) {
     if (!predsProgress) return;
     predsProgress = null;
     paintBenchmarks();
     return;
   }
-  const next = await fetchPredsProgress(runId);
+  const next = await fetchPredsProgress(runIds);
   const changed = next?.runId !== predsProgress?.runId
     || next?.count !== predsProgress?.count
     || next?.updatedAt !== predsProgress?.updatedAt;

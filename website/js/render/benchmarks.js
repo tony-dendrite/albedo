@@ -177,10 +177,13 @@ function panelModels(data) {
   return { models, sorted, selected: sorted.find(model => !isGenesis(model)) || sorted[0] || null };
 }
 
-export function liveScoreRunId(data, modelScores) {
-  const { selected } = panelModels(mergeModelScores(data, modelScores));
-  if (!selected || suiteScores(selected)[MODEL_SCORE_SUITE]?.score != null) return null;
-  return modelScoreRunId(selected);
+export function liveScoreCandidates(data, modelScores) {
+  const merged = mergeModelScores(data, modelScores);
+  return sortModels(merged?.models || [])
+    .filter(model => !isGenesis(model) && suiteScores(model)[MODEL_SCORE_SUITE]?.score == null)
+    .map(modelScoreRunId)
+    .filter(Boolean)
+    .slice(0, 6);
 }
 
 function scoreTotal(modelScores) {
@@ -388,7 +391,7 @@ function renderTile(model, suite, sorted, baseline, activity, preds) {
     el("div", { class: "bench-tile-status" },
       el("span", {}, genesis.label),
       el("span", { class: `bench-delta ${genesis.cls}`, title: "delta vs genesis" }, genesis.delta)),
-    progress ? renderProgress(progress, modelLabel(model)) : runNote ? el("div", { class: "bench-tile-run-note" }, runNote) : null);
+    progress ? renderProgress(progress, progress.kingLabel || modelLabel(model)) : runNote ? el("div", { class: "bench-tile-run-note" }, runNote) : null);
 }
 
 function runningLabel(item, labelByRepo) {
@@ -494,7 +497,12 @@ export function renderBenchmarks(container, metaNode, data, modelScores = null, 
   }
   const baselineScores = suiteScores((data?.models || []).find(isGenesis));
   const activity = suiteActivity(data);
-  const preds = live?.runId === modelScoreRunId(selected) ? livePreds(live, modelScores) : null;
+  const preds = livePreds(live, modelScores);
+  if (preds && live?.runId !== modelScoreRunId(selected)) {
+    const runningModel = models.find(model => modelScoreRunId(model) === live.runId)
+      || (data?.models || []).find(model => modelScoreRunId(model) === live.runId);
+    preds.kingLabel = runningModel ? modelLabel(runningModel) : String(live.runId || "").replace(/^king-/i, "King ");
+  }
   const rerender = () => renderBenchmarks(container, metaNode, data, modelScores, live);
   const scores = suiteScores(selected);
   const done = BENCHMARK_ORDER.filter(suite => scores[suite]?.score != null).length;
