@@ -811,6 +811,7 @@ class ObservationSimulationService:
             eval_run_id=request.eval_run_id,
             max_tokens=self.settings.simulation_max_tokens,
             provider=_simulation_provider(self.settings),
+            hedge_after_seconds=self.settings.simulation_hedge_seconds or None,
         )
         candidate = (
             ""
@@ -954,6 +955,7 @@ class ObservationSimulationService:
                     max_tokens=self.settings.simulation_max_tokens,
                     provider=provider_block,
                     force_openrouter=or_only,
+                    hedge_after_seconds=self.settings.simulation_hedge_seconds or None,
                     accept=lambda raw: _usable_simulation_output(
                         repair_to_contract(repair_output(raw, fmt), fmt, contract),
                         fmt,

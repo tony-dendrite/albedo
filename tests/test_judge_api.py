@@ -74,6 +74,7 @@ class FakeClient:
         purpose="",
         eval_run_id="",
         force_openrouter=False,
+        hedge_after_seconds=None,
     ):
         questions = [{"text": f"q{i}?", "example_bad": "bad"} for i in range(self.n_questions)]
         return JudgeRawResponse(
@@ -323,6 +324,7 @@ class OneJudgeBrokenClient:
         purpose="",
         eval_run_id="",
         force_openrouter=False,
+        hedge_after_seconds=None,
     ):
         qs = [{"text": f"q{i}", "example_bad": "b"} for i in range(self.n_questions)]
         return JudgeRawResponse(model=model, provider="fake", raw=json.dumps({"questions": qs}))
@@ -636,6 +638,7 @@ class _AnchorFakeClient:
         retry_count=None,
         eval_run_id="",
         force_openrouter=False,
+        hedge_after_seconds=None,
     ):
         if response_schema is None:
             if self.fail_reference:

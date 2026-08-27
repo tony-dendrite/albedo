@@ -106,6 +106,7 @@ class JudgeSettings(BaseSettings):
     question_max_tokens: int = 20000
     simulation_max_tokens: int = 4096
     simulation_loop_reruns: int = 0
+    simulation_hedge_seconds: float = 6.0
     simulation_model: str = SIMULATION_MODEL
     simulation_providers: str = SIMULATION_PROVIDERS
     answer_max_tokens: int = 20000

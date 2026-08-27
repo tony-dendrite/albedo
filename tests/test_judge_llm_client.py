@@ -612,3 +612,74 @@ def test_stream_dying_without_finish_reason_is_a_transport_error():
     assert result.error is not None
     assert "finish_reason" in result.error
     assert result.raw == ""
+
+
+def _hedge_client() -> JudgeLLMClient:
+    return JudgeLLMClient(JudgeSettings(openrouter_api_key="test-key"))
+
+
+def _response(provider: str):
+    from albedo_eval_service.judge_llm_client import JudgeRawResponse
+
+    return JudgeRawResponse(model="m", provider=provider, raw=f"answer-from-{provider}")
+
+
+def test_hedge_fast_primary_never_fires_backup(monkeypatch):
+    client = _hedge_client()
+    calls: list[int] = []
+
+    async def _fast(**kwargs):
+        calls.append(kwargs["provider_shift"])
+        return _response("fast")
+
+    monkeypatch.setattr(client, "_score_once", _fast)
+    out = asyncio.run(client._score_once_hedged(0.2, provider_shift=0, purpose="simulate"))
+    assert out.raw == "answer-from-fast"
+    assert calls == [0]
+
+
+def test_hedge_slow_primary_loses_to_backup(monkeypatch):
+    client = _hedge_client()
+    calls: list[int] = []
+
+    async def _score(**kwargs):
+        calls.append(kwargs["provider_shift"])
+        if kwargs["provider_shift"] == 0:
+            await asyncio.sleep(0.5)
+            return _response("slow-primary")
+        return _response("backup")
+
+    monkeypatch.setattr(client, "_score_once", _score)
+    out = asyncio.run(client._score_once_hedged(0.05, provider_shift=0, purpose="simulate"))
+    assert out.raw == "answer-from-backup"
+    assert calls == [0, 1]  # backup ran on the next provider in the rotation
+
+
+def test_hedge_survives_a_failing_primary(monkeypatch):
+    client = _hedge_client()
+
+    async def _score(**kwargs):
+        if kwargs["provider_shift"] == 0:
+            await asyncio.sleep(0.1)
+            raise RuntimeError("provider exploded")
+        await asyncio.sleep(0.2)
+        return _response("backup")
+
+    monkeypatch.setattr(client, "_score_once", _score)
+    out = asyncio.run(client._score_once_hedged(0.05, provider_shift=0, purpose="simulate"))
+    assert out.raw == "answer-from-backup"
+
+
+def test_hedge_raises_when_both_fail(monkeypatch):
+    client = _hedge_client()
+
+    async def _score(**_kwargs):
+        await asyncio.sleep(0.1)
+        raise RuntimeError("both lanes down")
+
+    monkeypatch.setattr(client, "_score_once", _score)
+    try:
+        asyncio.run(client._score_once_hedged(0.05, provider_shift=0, purpose="simulate"))
+        raise AssertionError("expected the hedge to surface the failure")
+    except RuntimeError as exc:
+        assert "both lanes down" in str(exc)

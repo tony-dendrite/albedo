@@ -128,6 +128,7 @@ class JudgeLLMClient:
         retry_count: int | None = None,
         eval_run_id: str = "",
         force_openrouter: bool = False,
+        hedge_after_seconds: float | None = None,
     ) -> JudgeRawResponse:
         return await self._call(
             model=model,
@@ -142,6 +143,7 @@ class JudgeLLMClient:
             retry_count=retry_count,
             eval_run_id=eval_run_id,
             force_openrouter=force_openrouter,
+            hedge_after_seconds=hedge_after_seconds,
         )
 
     async def _call(
@@ -160,6 +162,7 @@ class JudgeLLMClient:
         retry_count: int | None = None,
         eval_run_id: str = "",
         force_openrouter: bool = False,
+        hedge_after_seconds: float | None = None,
     ) -> JudgeRawResponse:
         sem = self._semaphores.setdefault(
             model, asyncio.Semaphore(max(1, self.settings.max_concurrency_per_model))
@@ -185,6 +188,7 @@ class JudgeLLMClient:
                     retry_count=transport_budget,
                     eval_run_id=eval_run_id,
                     force_openrouter=engy_spent,
+                    hedge_after_seconds=hedge_after_seconds,
                 )
                 if _usable(last, accept):
                     return last
@@ -228,12 +232,16 @@ class JudgeLLMClient:
         retry_count: int | None = None,
         eval_run_id: str = "",
         force_openrouter: bool = False,
+        hedge_after_seconds: float | None = None,
     ) -> JudgeRawResponse:
         transport_budget = self.settings.retry_count if retry_count is None else retry_count
+        hedged = hedge_after_seconds is not None and (
+            force_openrouter or not self._use_engy(purpose, model, eval_run_id)
+        )
         last_error = ""
         for attempt in range(transport_budget + 1):
             try:
-                return await self._score_once(
+                kwargs: dict[str, Any] = dict(
                     model=model,
                     messages=messages,
                     response_schema=response_schema,
@@ -246,6 +254,9 @@ class JudgeLLMClient:
                     eval_run_id=eval_run_id,
                     force_openrouter=force_openrouter,
                 )
+                if hedged:
+                    return await self._score_once_hedged(hedge_after_seconds, **kwargs)
+                return await self._score_once(**kwargs)
             except Exception as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
                 if attempt >= transport_budget:
@@ -260,6 +271,43 @@ class JudgeLLMClient:
         return JudgeRawResponse(
             model=model, provider=_provider_name(model), raw="", error=last_error
         )
+
+    async def _score_once_hedged(self, hedge_after: float, **kwargs: Any) -> JudgeRawResponse:
+        """One request, plus a second on the next provider if the first is slow.
+
+        The latency tail is provider inconsistency, not workload (same-size outputs span
+        2s to 60s+), so two independent draws take min of the two; the first response to
+        arrive wins and the loser is cancelled. The delayed start keeps the double-spend
+        limited to calls that are already slow."""
+        primary = asyncio.create_task(self._score_once(**kwargs))
+        done, _ = await asyncio.wait({primary}, timeout=hedge_after)
+        if primary in done:
+            return primary.result()
+        backup = asyncio.create_task(
+            self._score_once(**{**kwargs, "provider_shift": kwargs.get("provider_shift", 0) + 1})
+        )
+        logger.info(
+            "[judge-llm] hedging slow call purpose={} model={} after {:.0f}s",
+            kwargs.get("purpose"),
+            kwargs.get("model"),
+            hedge_after,
+        )
+        pending: set[asyncio.Task[JudgeRawResponse]] = {primary, backup}
+        error: BaseException | None = None
+        try:
+            while pending:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    if task.exception() is None:
+                        return task.result()
+                    error = task.exception()
+            assert error is not None
+            raise error
+        finally:
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
 
     async def _exchange(self, client: httpx.AsyncClient, payload: dict[str, Any]) -> dict[str, Any]:
         if not self.settings.stream_enabled:
