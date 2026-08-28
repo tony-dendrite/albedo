@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from config_validation.models import BACKEND_HF, BACKEND_HIPPIUS, ModelRef
-from config_validation.storage import _hf, _hippius
+from config_validation.models import BACKEND_HF, BACKEND_HIPPIUS, BACKEND_S3, ModelRef
+from config_validation.storage import _hf, _hippius, _s3
 from config_validation.storage._paths import cache_dir
 
-_IMPL = {BACKEND_HF: _hf, BACKEND_HIPPIUS: _hippius}
+_IMPL = {BACKEND_HF: _hf, BACKEND_HIPPIUS: _hippius, BACKEND_S3: _s3}
 
 
 def _impl(ref: ModelRef):

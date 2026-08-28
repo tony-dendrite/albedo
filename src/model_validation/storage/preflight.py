@@ -5,7 +5,7 @@ import os
 
 import httpx
 
-from config_validation.models import BACKEND_HF, ModelRef
+from config_validation.models import BACKEND_HF, BACKEND_S3, ModelRef
 
 _HUB_TOKEN_ENV = "HIPPIUS_HUB_TOKEN"
 _HF_TOKEN_ENVS = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACEHUB_API_TOKEN")
@@ -126,6 +126,10 @@ def _hf_dtypes(ref: ModelRef) -> dict[str, set[str]]:
 
 
 def safetensors_dtypes(ref: ModelRef) -> dict[str, set[str]]:
+    if ref.backend == BACKEND_S3:
+        from config_validation.storage import _s3
+
+        return _s3.safetensors_dtypes(ref)
     if ref.backend == BACKEND_HF:
         return _hf_dtypes(ref)
     return _hippius_dtypes(ref)

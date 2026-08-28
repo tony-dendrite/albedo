@@ -187,7 +187,10 @@ class ModelArtifactResolver:
         )
 
     def _resolve_s3(self, model_ref: str) -> ResolvedModel:
-        bucket, prefix = split_s3_uri(model_ref)
+        # private-store refs carry a chain-pinned digest: s3://bucket/prefix@sha256:<hex>
+        location, _, pin = model_ref.partition("@")
+        digest = pin.removeprefix("sha256:") if pin.startswith("sha256:") else ""
+        bucket, prefix = split_s3_uri(location)
         cache_dir = self.cache_root / "s3" / bucket / prefix.strip("/")
         done_marker = cache_dir / ".albedo-model-cache.json"
         if done_marker.exists():
@@ -207,17 +210,24 @@ class ModelArtifactResolver:
 
         cache_dir.mkdir(parents=True, exist_ok=True)
         session_kwargs: dict[str, str] = {}
-        if self.settings.s3_access_key_id:
-            session_kwargs["aws_access_key_id"] = self.settings.s3_access_key_id
-        if self.settings.s3_secret_access_key:
-            session_kwargs["aws_secret_access_key"] = self.settings.s3_secret_access_key
-        if self.settings.s3_session_token:
-            session_kwargs["aws_session_token"] = self.settings.s3_session_token
-        if self.settings.s3_region:
-            session_kwargs["region_name"] = self.settings.s3_region
         client_kwargs: dict[str, str] = {}
-        if self.settings.s3_endpoint_url:
-            client_kwargs["endpoint_url"] = self.settings.s3_endpoint_url
+        if digest and os.environ.get("R2_ENDPOINT"):
+            # the private model store lives on R2, not the artifact S3
+            session_kwargs["aws_access_key_id"] = os.environ["R2_ACCESS_KEY_ID"]
+            session_kwargs["aws_secret_access_key"] = os.environ["R2_SECRET_ACCESS_KEY"]
+            session_kwargs["region_name"] = "auto"
+            client_kwargs["endpoint_url"] = os.environ["R2_ENDPOINT"]
+        else:
+            if self.settings.s3_access_key_id:
+                session_kwargs["aws_access_key_id"] = self.settings.s3_access_key_id
+            if self.settings.s3_secret_access_key:
+                session_kwargs["aws_secret_access_key"] = self.settings.s3_secret_access_key
+            if self.settings.s3_session_token:
+                session_kwargs["aws_session_token"] = self.settings.s3_session_token
+            if self.settings.s3_region:
+                session_kwargs["region_name"] = self.settings.s3_region
+            if self.settings.s3_endpoint_url:
+                client_kwargs["endpoint_url"] = self.settings.s3_endpoint_url
         client = boto3.session.Session(**session_kwargs).client("s3", **client_kwargs)
 
         paginator = client.get_paginator("list_objects_v2")
@@ -230,13 +240,28 @@ class ModelArtifactResolver:
                         continue
                     found = True
                     rel = key[len(prefix) :].lstrip("/") if prefix else key
-                    if not _is_model_payload_file(Path(rel).name):
+                    if digest:
+                        # digest covers every manifest file, so fetch them all
+                        if rel == "manifest.json":
+                            continue
+                    elif not _is_model_payload_file(Path(rel).name):
                         continue
-                    destination = cache_dir / rel
+                    destination = (cache_dir / rel).resolve()
+                    root = cache_dir.resolve()
+                    if destination != root and not str(destination).startswith(str(root) + os.sep):
+                        raise ValueError(f"object key escapes the model cache: {rel!r}")
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     client.download_file(bucket, key, str(destination))
         if not found:
             raise FileNotFoundError(f"no model objects found under {model_ref}")
+        if digest:
+            from private_store.digests import ArtifactIntegrityError, verify_snapshot
+
+            try:
+                verify_snapshot(cache_dir, digest)
+            except ArtifactIntegrityError:
+                shutil.rmtree(cache_dir, ignore_errors=True)
+                raise
         _require_loadable_model_files(cache_dir, source="s3")
         done_marker.write_text(
             json.dumps({"source": model_ref}, sort_keys=True) + "\n", encoding="utf-8"

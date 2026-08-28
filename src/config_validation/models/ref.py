@@ -8,10 +8,20 @@ _REPO_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._/-]*$")
 
 BACKEND_HF = "hf"
 BACKEND_HIPPIUS = "hippius"
+BACKEND_S3 = "s3"
 
 _HIPPIUS_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GIT_SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
 _GIT_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_S3_REPO_RE = re.compile(r"^s3://[a-z0-9][a-z0-9.-]*/models/registrations/[0-9a-f]{64}$")
+
+
+def cache_repo(repo: str) -> str:
+    """Two-level cache path key: s3 prefixes flatten to '<bucket>/<registration>'."""
+    if repo.startswith("s3://"):
+        bucket, _, rest = repo.removeprefix("s3://").partition("/")
+        return f"{bucket}/{rest.rstrip('/').rpartition('/')[2]}"
+    return repo
 
 
 def detect_backend(digest: str) -> str | None:
@@ -38,6 +48,19 @@ class ModelRef:
     backend: str = ""
 
     def __post_init__(self) -> None:
+        if self.repo.startswith("s3://"):
+            if not _S3_REPO_RE.match(self.repo):
+                raise ValueError(
+                    f"ModelRef.repo {self.repo!r} is not a canonical private-store prefix"
+                )
+            if not _HIPPIUS_DIGEST_RE.match(self.digest):
+                raise ValueError("private-store refs require a 'sha256:<hex64>' model digest")
+            if self.backend and self.backend != BACKEND_S3:
+                raise ValueError(
+                    f"ModelRef.backend {self.backend!r} contradicts the s3:// repo scheme"
+                )
+            object.__setattr__(self, "backend", BACKEND_S3)
+            return
         if not _REPO_RE.match(self.repo):
             raise ValueError(
                 f"ModelRef.repo {self.repo!r} is not a valid lowercase '<namespace>/<name>' id"

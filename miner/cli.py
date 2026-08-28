@@ -75,6 +75,39 @@ def _build_parser() -> argparse.ArgumentParser:
     pub.add_argument("--network", default=_NETWORK)
     pub.add_argument("--yes", action="store_true")
     pub.add_argument("--skip-commit", action="store_true", help="stop after upload + checks")
+
+    sp = sub.add_parser(
+        "submit-private", help="private R2 submit: activate → upload → ready (end to end)"
+    )
+    sp.add_argument("--path", required=True, help="local model directory")
+    sp.add_argument("--name", required=True, help="model name recorded in the manifest")
+    _wallet_arg(sp, "coldkey", _COLDKEY, "wallet (coldkey) name")
+    _wallet_arg(sp, "hotkey", _HOTKEY, "hotkey name")
+    sp.add_argument("--netuid", type=int, default=_NETUID)
+    sp.add_argument("--network", default=_NETWORK)
+    sp.add_argument("--yes", action="store_true")
+
+    for name, help_ in (
+        ("activate", "commit r2activate to request upload credentials"),
+        ("upload-private", "poll credentials and upload the model + signed manifest"),
+    ):
+        step = sub.add_parser(name, help=help_)
+        _wallet_arg(step, "coldkey", _COLDKEY, "wallet (coldkey) name")
+        _wallet_arg(step, "hotkey", _HOTKEY, "hotkey name")
+        step.add_argument("--netuid", type=int, default=_NETUID)
+        step.add_argument("--network", default=_NETWORK)
+        step.add_argument("--yes", action="store_true")
+        if name == "upload-private":
+            step.add_argument("--path", required=True)
+            step.add_argument("--name", required=True)
+
+    rd = sub.add_parser("ready", help="commit r2ready to freeze the upload and start verification")
+    _wallet_arg(rd, "coldkey", _COLDKEY, "wallet (coldkey) name")
+    _wallet_arg(rd, "hotkey", _HOTKEY, "hotkey name")
+    rd.add_argument("--netuid", type=int, default=_NETUID)
+    rd.add_argument("--network", default=_NETWORK)
+    rd.add_argument("--manifest-sha256", required=True)
+    rd.add_argument("--yes", action="store_true")
     return p
 
 
@@ -178,6 +211,70 @@ def _run(args, parser) -> int:
             skip_commit=args.skip_commit,
         )
         return 0 if ok else 1
+
+    if args.cmd == "submit-private":
+        from miner import private_store
+
+        private_store.submit_private(
+            coldkey=args.coldkey,
+            hotkey=args.hotkey,
+            netuid=args.netuid,
+            network=args.network,
+            local_dir=args.path,
+            model_name=args.name,
+            assume_yes=args.yes,
+        )
+        return 0
+
+    if args.cmd == "activate":
+        from miner import private_store
+        from miner.commit import build_wallet
+
+        wallet = build_wallet(args.coldkey, args.hotkey)
+        rid = private_store.activate(
+            wallet, netuid=args.netuid, network=args.network, assume_yes=args.yes
+        )
+        print("registration_id:", rid)
+        return 0
+
+    if args.cmd == "upload-private":
+        from miner import private_store
+        from miner.commit import build_wallet
+
+        wallet = build_wallet(args.coldkey, args.hotkey)
+        key = private_store.submission_key(wallet.hotkey.ss58_address)
+        rid = private_store.registration_id(
+            netuid=args.netuid,
+            hotkey=wallet.hotkey.ss58_address,
+            chain_generation=private_store.CHAIN_GENERATION,
+        )
+        private_store.fetch_credentials(
+            hotkey_ss58=wallet.hotkey.ss58_address, registration_id=rid, signing_key=key
+        )
+        manifest_sha256 = private_store.upload(
+            hotkey_ss58=wallet.hotkey.ss58_address,
+            registration_id=rid,
+            signing_key=key,
+            local_dir=args.path,
+            model_name=args.name,
+        )
+        print("manifest_sha256:", manifest_sha256)
+        print("next: albedo ready --manifest-sha256", manifest_sha256)
+        return 0
+
+    if args.cmd == "ready":
+        from miner import private_store
+        from miner.commit import build_wallet
+
+        wallet = build_wallet(args.coldkey, args.hotkey)
+        private_store.ready(
+            wallet,
+            netuid=args.netuid,
+            network=args.network,
+            manifest_sha256=args.manifest_sha256,
+            assume_yes=args.yes,
+        )
+        return 0
 
     return 0
 

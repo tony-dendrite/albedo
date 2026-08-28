@@ -9,6 +9,7 @@ from chain_guard import db as guard_db
 from chain_guard import scan as guard_scan
 from chain_guard import swap as guard_swap
 from chain_reader import chain, db
+from private_store import intake
 
 config = get_chain_reader_settings()
 
@@ -75,7 +76,7 @@ async def run() -> None:
                     await guard_db.refresh_registration_blocks(pool, snapshot)
 
                     uid_map = {hotkey: uid for uid, hotkey, _reg in snapshot}
-                    commits = await asyncio.to_thread(
+                    commits, signals = await asyncio.to_thread(
                         chain.scan_commitments,
                         subtensor,
                         config.NETUID,
@@ -84,7 +85,14 @@ async def run() -> None:
                         at_block,
                     )
                     n_new = await db.insert_new_commits(pool, commits)
-                    log.info("block={} scanned={} new={}", cur, len(commits), n_new)
+                    n_signals = await intake.handle_signals(pool, signals)
+                    log.info(
+                        "block={} scanned={} new={} signals_applied={}",
+                        cur,
+                        len(commits),
+                        n_new,
+                        n_signals,
+                    )
                     last_block = cur
             except Exception as exc:
                 log.opt(exception=True).warning("tick failed ({}) — retrying", exc)

@@ -33,6 +33,7 @@ dependencies = [
     "transformers==5.11.0",
     "uvicorn[standard]>=0.30.0",
     "vllm==0.23.0",
+    "pynacl>=1.6.2",
 ]
 
 [project.optional-dependencies]
@@ -50,6 +51,7 @@ albedo-judge-api = "albedo_eval_service.judge_api:main"
 albedo-repo-context-api = "repo_context_service.api:main"
 albedo-score-bridge = "albedo_eval_service.scoring.score_bridge_client:main"
 chain-reader = "chain_reader.reader:main"
+access-controller = "private_store.controller:main"
 model-validation = "model_validation.validate_worker:main"
 sanity-remote = "sanity_remote.api:main"
 sanity-dispatcher = "sanity_service.dispatcher:main"
@@ -70,6 +72,7 @@ packages = [
     "src/chain_guard",
     "src/config_validation",
     "src/model_validation",
+    "src/private_store",
     "src/sanity_service",
     "src/sanity_remote",
     "miner",

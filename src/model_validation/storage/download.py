@@ -9,7 +9,7 @@ from pathlib import Path
 from loguru import logger as log
 
 from albedo_config.chain_spec import MODEL_CACHE_DIR
-from config_validation.models import ModelRef
+from config_validation.models import ModelRef, cache_repo
 from config_validation.storage import cache_dir as _cache_dir
 from config_validation.storage import download_config as _download_config
 from config_validation.storage import download_full as _download_full
@@ -22,7 +22,7 @@ def make_room(ref: ModelRef, protected_repos: Iterable[str] = ()) -> None:
     """Evict newest cached models until `ref` fits within MAX_CACHED_MODELS."""
     root = Path(MODEL_CACHE_DIR).resolve()
     keep = _cache_dir(ref)
-    guarded = set(protected_repos)
+    guarded = {cache_repo(repo) for repo in protected_repos}
     models: list[tuple[float, Path]] = []
     for digest_dir in root.glob("*/*/*/*"):  # <backend>/<owner>/<name>/<digest>
         if not digest_dir.is_dir() or digest_dir == keep:

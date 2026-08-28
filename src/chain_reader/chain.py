@@ -26,6 +26,16 @@ class Commit:
     payload_hash: str
 
 
+@dataclass(frozen=True)
+class PrivateSignal:
+    kind: str  # "activate" | "ready"
+    netuid: int
+    block_number: int
+    uid: int | None
+    hotkey: str
+    payload: str
+
+
 def connect(network: str) -> Any:
     import bittensor as bt
 
@@ -165,16 +175,21 @@ def scan_commitments(
     start_block: int = 0,
     uids: dict[str, int] | None = None,
     at_block: int | None = None,
-) -> list[Commit]:
+) -> tuple[list[Commit], list[PrivateSignal]]:
     if uids is None:
         uids = _uid_map(subtensor, netuid)
 
     commits: list[Commit] = []
+    signals: list[PrivateSignal] = []
     n_total = n_skipped = 0
     for hotkey, block, data in _iter_revealed(subtensor, netuid, at_block):
         n_total += 1
         if block < start_block:
             n_skipped += 1
+            continue
+        if data.startswith(("r2activate:", "r2ready:")):
+            kind = "activate" if data.startswith("r2activate:") else "ready"
+            signals.append(PrivateSignal(kind, netuid, block, uids.get(hotkey), hotkey, data))
             continue
         payload = _parse_v7(data, hotkey)
         if payload is None:
@@ -201,5 +216,11 @@ def scan_commitments(
             )
         )
 
-    log.info("scan: total={} v7_commits={} skipped={}", n_total, len(commits), n_skipped)
-    return commits
+    log.info(
+        "scan: total={} v7_commits={} private_signals={} skipped={}",
+        n_total,
+        len(commits),
+        len(signals),
+        n_skipped,
+    )
+    return commits, signals

@@ -430,3 +430,29 @@ CREATE TABLE IF NOT EXISTS sanity_results (
 
 CREATE INDEX IF NOT EXISTS sanity_results_passed_checked_idx
     ON sanity_results (passed, checked_at DESC);
+
+CREATE TABLE IF NOT EXISTS private_registrations (
+    id BIGSERIAL PRIMARY KEY,
+    netuid INTEGER NOT NULL,
+    uid INTEGER,
+    hotkey TEXT NOT NULL,
+    registration_id TEXT NOT NULL UNIQUE,
+    state TEXT NOT NULL DEFAULT 'ACTIVATED',
+    activation_block BIGINT NOT NULL,
+    submission_pubkey TEXT NOT NULL,
+    ready_block BIGINT,
+    manifest_sha256 TEXT,
+    model_digest TEXT,
+    parent_token_id TEXT,
+    credential_expires_at TIMESTAMPTZ,
+    fault_message TEXT,
+    submission_id UUID REFERENCES model_submissions(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT private_registrations_state_ck CHECK (state IN
+        ('ACTIVATED', 'CREDENTIALED', 'READY', 'REVOKED', 'SUBMITTED', 'FAILED', 'REAPED')),
+    CONSTRAINT private_registrations_hotkey_uk UNIQUE (netuid, hotkey)
+);
+
+CREATE INDEX IF NOT EXISTS private_registrations_state_updated_idx
+    ON private_registrations (state, updated_at);

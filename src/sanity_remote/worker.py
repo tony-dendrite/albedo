@@ -139,7 +139,7 @@ _HIPPIUS_REGISTRY = "https://registry.hippius.com"
 
 async def _audit_hippius_blobs(model_uri: str, digest: str) -> str:
     repo, ref_digest = _model_ref_parts(model_uri, digest)
-    if not ref_digest.startswith("sha256:"):
+    if repo.startswith("s3://") or not ref_digest.startswith("sha256:"):
         return ""
     try:
         async with asyncio.timeout(60):
