@@ -338,5 +338,6 @@ CHAIN_NETWORK=test albedo check-commit
 
 | document | covers |
 |---|---|
+| [PRIVATE_UPLOADS.md](PRIVATE_UPLOADS.md) | private submission flow: `submit-private`, the `r2activate`/`r2ready` commitments, credentials mailbox, local state, upload window |
 | [SCORING.md](SCORING.md) | checklist construction, measurement gate, loop short-circuit, win margin, anti-gaming |
 | [DATASETS.md](DATASETS.md) | the four corpora, trajectory rendering, observation formats, grounded execution + the simulator ladder, sampling and the manifest pin |
