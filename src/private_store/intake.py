@@ -83,13 +83,15 @@ async def _apply_ready(pool: asyncpg.Pool, signal: PrivateSignal) -> int:
         updated = await conn.fetchval(
             """
             UPDATE private_registrations
-            SET state = 'READY', manifest_sha256 = $2, ready_block = $3, updated_at = now()
+            SET state = 'READY', manifest_sha256 = $2, ready_block = $3,
+                ready_block_hash = $4, updated_at = now()
             WHERE registration_id = $1 AND state = 'CREDENTIALED'
             RETURNING id
             """,
             rid,
             manifest_sha256,
             signal.block_number,
+            signal.block_hash,
         )
     if updated is not None:
         log.info("[private-store] ready for registration {} manifest {}", rid, manifest_sha256)

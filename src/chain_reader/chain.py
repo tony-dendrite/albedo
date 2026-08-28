@@ -34,6 +34,7 @@ class PrivateSignal:
     uid: int | None
     hotkey: str
     payload: str
+    block_hash: str | None = None
 
 
 def connect(network: str) -> Any:
@@ -189,7 +190,10 @@ def scan_commitments(
             continue
         if data.startswith(("r2activate:", "r2ready:")):
             kind = "activate" if data.startswith("r2activate:") else "ready"
-            signals.append(PrivateSignal(kind, netuid, block, uids.get(hotkey), hotkey, data))
+            # 'ready' becomes a synthetic chain commit downstream; capture the real
+            # block hash so private submissions seed dataset sampling exactly like public.
+            bh = _block_hash(subtensor, block) if kind == "ready" else None
+            signals.append(PrivateSignal(kind, netuid, block, uids.get(hotkey), hotkey, data, bh))
             continue
         payload = _parse_v7(data, hotkey)
         if payload is None:

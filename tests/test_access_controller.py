@@ -89,6 +89,7 @@ class FakeConn:
                 "submission_pubkey": args[5],
                 "state": "ACTIVATED",
                 "ready_block": None,
+                "ready_block_hash": None,
                 "manifest_sha256": None,
                 "model_digest": None,
                 "parent_token_id": None,
@@ -99,7 +100,12 @@ class FakeConn:
         if "SET state = 'READY'" in sql:
             row = self.registration
             if row and row["state"] == "CREDENTIALED" and row["registration_id"] == args[0]:
-                row.update(state="READY", manifest_sha256=args[1], ready_block=args[2])
+                row.update(
+                    state="READY",
+                    manifest_sha256=args[1],
+                    ready_block=args[2],
+                    ready_block_hash=args[3],
+                )
                 return row["id"]
             return None
         if "SELECT submission_id FROM chain_commits" in sql:
@@ -216,7 +222,7 @@ def test_intake_rejects_malformed_used_hotkeys_and_unregistered():
 
 
 def test_intake_applies_ready_only_after_credentials():
-    ready = PrivateSignal("ready", 97, 200, 5, HOTKEY, ready_signal_payload("c" * 64))
+    ready = PrivateSignal("ready", 97, 200, 5, HOTKEY, ready_signal_payload("c" * 64), "0xdead200")
     conn = FakeConn()
     assert _apply(conn, [ready]) == 0  # unknown registration
     conn.registration = {"id": 1, "registration_id": RID, "state": "ACTIVATED"}
@@ -225,6 +231,7 @@ def test_intake_applies_ready_only_after_credentials():
     assert _apply(conn, [ready]) == 1
     assert conn.registration["manifest_sha256"] == "c" * 64
     assert conn.registration["ready_block"] == 200
+    assert conn.registration["ready_block_hash"] == "0xdead200"
 
 
 # --- controller lifecycle ----------------------------------------------------
@@ -241,6 +248,7 @@ def _seeded_row() -> dict:
         "submission_pubkey": SUBMISSION_PUBKEY.hex(),
         "state": "ACTIVATED",
         "ready_block": None,
+        "ready_block_hash": None,
         "manifest_sha256": None,
         "model_digest": None,
         "parent_token_id": None,
@@ -273,7 +281,10 @@ def test_controller_runs_the_full_lifecycle(monkeypatch):
 
     # ready signal arrives on chain
     conn.registration.update(
-        state="READY", manifest_sha256=manifest.manifest_sha256, ready_block=200
+        state="READY",
+        manifest_sha256=manifest.manifest_sha256,
+        ready_block=200,
+        ready_block_hash="0xabc200",
     )
 
     # READY -> REVOKED: token dead, mailbox wiped before anything is verified
@@ -300,6 +311,7 @@ def test_controller_runs_the_full_lifecycle(monkeypatch):
     )
     assert commit.commit_payload["digest"] == f"sha256:{manifest.model_digest}"
     assert commit.uid == 5 and commit.hotkey == HOTKEY and commit.block_number == 200
+    assert commit.block_hash == "0xabc200"  # same seed logic as public commits
 
     # nothing left to do
     assert not asyncio.run(controller.tick(pool, deps))

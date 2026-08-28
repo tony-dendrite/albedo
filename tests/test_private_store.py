@@ -515,6 +515,16 @@ def test_cleanup_model_prefix_removes_everything_once():
     assert controller.cleanup_model_prefix(prefix) == 0
 
 
+def test_cleanup_model_prefix_also_aborts_multipart_uploads():
+    # a verify-FAILED prefix can hold an unfinished multipart with no completed objects;
+    # cleanup must abort it so the miner cannot leak R2 storage.
+    s3, controller, _manifest, _registration_id, _hotkey, prefix = seeded_controller()
+    s3.multipart.append({"Key": f"{prefix}model-inflight", "UploadId": "u1"})
+    assert controller.cleanup_model_prefix(prefix) == 6  # 5 objects + 1 aborted multipart
+    assert s3.multipart == []
+    assert controller.cleanup_model_prefix(prefix) == 0
+
+
 def test_cleanup_refuses_non_registration_prefixes():
     # the one mass-delete must never fire on "" (whole bucket) or a stray prefix
     _, controller, _m, _r, _h, prefix = seeded_controller()

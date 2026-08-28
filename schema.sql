@@ -441,6 +441,7 @@ CREATE TABLE IF NOT EXISTS private_registrations (
     activation_block BIGINT NOT NULL,
     submission_pubkey TEXT NOT NULL,
     ready_block BIGINT,
+    ready_block_hash TEXT,
     manifest_sha256 TEXT,
     model_digest TEXT,
     parent_token_id TEXT,

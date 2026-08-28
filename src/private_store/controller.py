@@ -176,7 +176,7 @@ async def _verify(
     commit = Commit(
         netuid=row["netuid"],
         block_number=row["ready_block"],
-        block_hash=None,
+        block_hash=row["ready_block_hash"],
         extrinsic_hash=None,
         uid=row["uid"],
         hotkey=row["hotkey"],

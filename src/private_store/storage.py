@@ -349,6 +349,8 @@ class R2UploadController:
         return VerifiedManifest(manifest=manifest, manifest_sha256=manifest_digest)
 
     def abort_multipart_uploads(self, model_prefix: str) -> int:
+        if not _CANONICAL_PREFIX.fullmatch(model_prefix):
+            raise ValueError(f"refusing to bulk-abort a non-registration prefix: {model_prefix!r}")
         aborted = 0
         for upload in self._multipart_uploads(model_prefix):
             self.s3.abort_multipart_upload(
@@ -362,9 +364,12 @@ class R2UploadController:
     def cleanup_model_prefix(self, model_prefix: str) -> int:
         if not _CANONICAL_PREFIX.fullmatch(model_prefix):
             raise ValueError(f"refusing to bulk-delete a non-registration prefix: {model_prefix!r}")
+        # Abort dangling multipart uploads too — otherwise a prefix whose only content is an
+        # unfinished multipart (e.g. a verify-FAILED submission) leaks R2 storage forever.
+        aborted = self.abort_multipart_uploads(model_prefix)
         objects = self._list_objects(self.private_model_bucket, model_prefix)
         if not objects:
-            return 0
+            return aborted
         keys = sorted(objects)
         for offset in range(0, len(keys), 1000):
             self.s3.delete_objects(
@@ -374,4 +379,4 @@ class R2UploadController:
                     "Quiet": True,
                 },
             )
-        return len(keys)
+        return len(keys) + aborted
