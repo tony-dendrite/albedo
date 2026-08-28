@@ -648,7 +648,11 @@ def _trajectory_states(request: SanityRunRequest) -> list[_TrajectoryState]:
         states.append(
             _TrajectoryState(
                 sample_id=sample_id,
-                prompt=prompt,
+                prompt=format_messages(
+                    rewritten,
+                    tokenizer_path=str(_CANONICAL_TOKENIZER_PATH),
+                    enable_thinking=True,
+                ),
                 messages=rewritten,
                 turns=[
                     {"role": message["role"], "content": message["content"]}

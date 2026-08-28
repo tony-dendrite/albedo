@@ -164,6 +164,24 @@ def test_pre_eval_worker_formats_messages_with_thinking_template(monkeypatch):
     }
 
 
+def test_first_turn_prompt_uses_the_thinking_tokenizer_template_like_eval():
+    request = SanityRunRequest(
+        run_id="r",
+        model_uri="m",
+        digest="d",
+        prompts=["Fix the bug in utils.go"],
+        sample_ids=["sanity-fallback:0"],
+        prompt_messages=[
+            [
+                {"role": "system", "content": "You are a coding agent."},
+                {"role": "user", "content": "Fix the bug in utils.go"},
+            ]
+        ],
+    )
+    states = sanity_dispatcher._trajectory_states(request)
+    assert states[0].prompt.endswith("<|im_start|>assistant\n<think>\n")
+
+
 def test_trajectory_followup_prompt_uses_thinking_template(monkeypatch):
     captured = {}
 
