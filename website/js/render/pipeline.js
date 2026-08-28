@@ -1,6 +1,6 @@
 import { el, mount, link } from "../dom.js";
 import { fmtRelative, fmtDateTime } from "../format.js";
-import { hubRepoUrl, modelRepo, modelName, taoMinerUrl } from "../model.js";
+import { hubRepoUrl, modelRepo, modelCellText, taoMinerUrl } from "../model.js";
 
 const STAGES = [
   { key: "eval", label: "eval" },
@@ -32,7 +32,7 @@ function collectRows(stages) {
 
 function queueRow(row, netuid) {
   const item = row.item;
-  const name = modelName(item);
+  const name = modelCellText(item);
   const repo = modelRepo(item.model_uri);
   const repoUrl = hubRepoUrl(item.model_uri);
   const tao = taoMinerUrl(netuid, item.hotkey);

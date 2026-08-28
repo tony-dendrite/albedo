@@ -72,8 +72,22 @@ export function modelName(item) {
   return hk ? `ALBEDO-${hk.slice(0, 6)}` : "—";
 }
 
+// Private-store submissions live in our R2 bucket (s3://…). Their repo path is an
+// opaque registration id, not a public repo, so they render as PRIVATE with no link.
+export function isPrivateUri(uri) {
+  return typeof uri === "string" && uri.startsWith("s3://");
+}
+
+// MODEL-cell label for views that show the friendly name (fails/history/pipeline):
+// keep the identity but mark private submissions so it's visible, not just in the tooltip.
+export function modelCellText(item) {
+  const name = modelName(item);
+  return isPrivateUri(item?.model_uri) ? `${name} · PRIVATE` : name;
+}
+
 export function modelRepo(uri) {
   if (!uri) return "—";
+  if (isPrivateUri(uri)) return "PRIVATE";
   let s = uri.replace(/^[a-z][a-z0-9+.-]*:\/\//i, ""); // strip scheme:// (oci://, https://…)
   s = s.replace(/@[^/]*$/, "");                         // strip @sha256:… digest suffix
   const i = s.indexOf("/");
@@ -90,6 +104,7 @@ function isHfUri(uri) {
 }
 
 export function hubRepoUrl(uri) {
+  if (isPrivateUri(uri)) return null; // private models have no public page
   const repo = modelRepo(uri);
   if (!repo || repo === "—") return null;
   if (isHfUri(uri)) return `https://huggingface.co/${repo}`;
