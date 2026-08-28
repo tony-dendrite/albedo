@@ -35,7 +35,8 @@ from private_store.contracts import (
 from private_store.crypto import MailboxCipher, encode_signature
 
 CHAIN_GENERATION = os.environ.get("R2_CHAIN_GENERATION", "albedo-mainnet-1")
-MAILBOX_BASE_URL = os.environ.get("R2_MAILBOX_PUBLIC_BASE_URL", "")
+_DEFAULT_MAILBOX_BASE_URL = "https://pub-713d89b84ef44529925592f6cc947b1a.r2.dev"
+MAILBOX_BASE_URL = os.environ.get("R2_MAILBOX_PUBLIC_BASE_URL", _DEFAULT_MAILBOX_BASE_URL)
 _UPLOAD_AUTH = "upload-auth.json"
 _SUBMISSION_KEY = "submission-key"
 

@@ -48,13 +48,14 @@ This runs the whole flow end to end: `activate` → wait for credentials → `up
 
 ## Configuration the agent must set
 
-Two public values, published by the subnet operator (announcement / pinned config). The
-CLI needs them in the environment or `.env`:
+Both of these ship with sensible defaults in the CLI, so **normally you set nothing** — they
+are public values, not secrets, and only need overriding if the subnet operator announces a
+change:
 
-| env var | what it is |
-| --- | --- |
-| `R2_MAILBOX_PUBLIC_BASE_URL` | public URL of the credential mailbox the CLI polls |
-| `R2_CHAIN_GENERATION` | submission-round identifier; **must match the validator** (default `albedo-mainnet-1`) |
+| env var | what it is | default |
+| --- | --- | --- |
+| `R2_MAILBOX_PUBLIC_BASE_URL` | public read-only URL of the credential mailbox the CLI polls (every object is a sealed envelope encrypted to your key, so the URL is safe to publish) | baked into the CLI |
+| `R2_CHAIN_GENERATION` | submission-round identifier; **must match the validator** | `albedo-mainnet-1` |
 
 Plus the usual wallet config (`ALBEDO_COLDKEY`, `ALBEDO_HOTKEY`, optionally
 `ALBEDO_WALLET_PATH`). You do **not** configure the bucket, endpoint, or your folder path —
