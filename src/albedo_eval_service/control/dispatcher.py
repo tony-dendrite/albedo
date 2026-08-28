@@ -30,9 +30,8 @@ def build_eval_request(
     artifact_prefix = (
         f"{settings.artifact_prefix.rstrip('/')}/submissions/{submission['id']}/eval/{eval_run_id}"
     )
-    sample_ids = submission.get("dataset_sample_ids") or _build_sample_ids(
-        settings, submission["block_hash"]
-    )
+    sample_seed = f"{submission['block_hash']}:{eval_run_id}"
+    sample_ids = _build_sample_ids(settings, sample_seed)
     return EvalRequest(
         eval_run_id=eval_run_id,
         submission_id=submission["id"],
@@ -50,7 +49,7 @@ def build_eval_request(
             manifest_uri=settings.dataset_manifest_uri,
             manifest_hash=settings.dataset_manifest_hash,
             sample_count=settings.sample_count,
-            sample_seed=submission["block_hash"],
+            sample_seed=sample_seed,
             sampling_algo=settings.sampling_algo,
             sample_ids=sample_ids,
         ),
@@ -62,7 +61,7 @@ def build_eval_request(
     )
 
 
-def _build_sample_ids(settings: Settings, block_hash: str) -> list[str]:
+def _build_sample_ids(settings: Settings, seed: str) -> list[str]:
     if not settings.dataset_manifest_path:
         return []
     manifest = load_manifest_file(
@@ -71,7 +70,7 @@ def _build_sample_ids(settings: Settings, block_hash: str) -> list[str]:
     )
     return multi_source_manifest_sample_ids(
         manifest,
-        block_hash=block_hash,
+        block_hash=seed,
         sample_count=settings.sample_count,
     )
 
