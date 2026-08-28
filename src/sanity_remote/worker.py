@@ -35,6 +35,10 @@ from sanity_service.checks import (
     check_uniform_length,
 )
 
+_CANONICAL_TOKENIZER_PATH = (
+    Path(__file__).resolve().parents[2] / "assets" / "tokenizers" / "Qwen3.6-35B-A3B"
+)
+
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 _BASH_BLOCK_RE = re.compile(
     r"```(?:bash|sh|shell)\s*\n.*?```|<([a-z_]*bash[a-z_]*)>.*?</\1>",
@@ -245,7 +249,7 @@ class VllmEngine:
             await self._ensure_model(model_uri, digest)
             if prompt_messages is not None:
                 prompts = await asyncio.to_thread(
-                    _format_prompt_messages, self._loaded_dir, prompt_messages
+                    _format_prompt_messages, str(_CANONICAL_TOKENIZER_PATH), prompt_messages
                 )
         return await self._run_prompts(digest, prompts, max_tokens)
 
