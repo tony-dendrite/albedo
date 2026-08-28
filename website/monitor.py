@@ -44,6 +44,8 @@ QUEUE_STATES = (
 FAIL_STATES = ("TERMINAL_INVALID", "TERMINAL_INFRA_FAILED")
 ACTIVE_EVAL_STATES = ("QUEUED", "DISPATCHED", "GENERATING", "SCORING", "VERDICT_READY")
 
+_PRIVATE_URI_LIKE = "s3://albedo-private-models-%"
+
 STAGE_BUCKETS: dict[str, dict[str, tuple[str, ...]]] = {
     "hippius_validate": {
         "queued": ("SUBMITTED", "HIPPIUS_RETRYABLE"),
@@ -173,9 +175,12 @@ def _king_version_map(conn, *, model_filter: str) -> dict[int, int]:
                ROW_NUMBER() OVER (ORDER BY kv.version ASC) - 1 AS regnal
         FROM king_versions kv
         JOIN model_submissions ms ON ms.id = kv.submission_id
-        WHERE ms.model_uri LIKE %s
+        WHERE (ms.model_uri LIKE %s OR ms.model_uri LIKE %s)
         """,
-        (f"%{model_filter}%",),
+        (
+            f"%{model_filter}%",
+            _PRIVATE_URI_LIKE,
+        ),
     ).fetchall()
     return {int(row["version"]): int(row["regnal"]) for row in rows}
 
@@ -299,11 +304,11 @@ def _eval_runs(
             ORDER BY version DESC LIMIT 1
         ) kkv ON true
         WHERE er.state = 'SUCCEEDED'
-          AND ms.model_uri LIKE %s
+          AND (ms.model_uri LIKE %s OR ms.model_uri LIKE %s)
         ORDER BY er.finished_at DESC NULLS LAST
         LIMIT %s
         """,
-        (f"%{model_filter}%", limit),
+        (f"%{model_filter}%", _PRIVATE_URI_LIKE, limit),
     ).fetchall()
 
     artifacts = _artifacts_for(conn, [row["submission_id"] for row in rows], base)
@@ -383,11 +388,11 @@ def _current_eval(conn, *, model_filter: str) -> dict[str, Any] | None:
         FROM eval_runs er
         JOIN model_submissions ms ON ms.id = er.submission_id
         WHERE er.state = ANY(%s)
-          AND ms.model_uri LIKE %s
+          AND (ms.model_uri LIKE %s OR ms.model_uri LIKE %s)
         ORDER BY er.started_at DESC NULLS LAST
         LIMIT 1
         """,
-        (list(ACTIVE_EVAL_STATES), f"%{model_filter}%"),
+        (list(ACTIVE_EVAL_STATES), f"%{model_filter}%", _PRIVATE_URI_LIKE),
     ).fetchone()
     if not row:
         return None
@@ -415,10 +420,10 @@ def _queue(conn, *, exclude_submission_id: str | None, model_filter: str) -> lis
                   AND w.challenger_won IS TRUE) AS prior_wins
         FROM model_submissions ms
         WHERE ms.state = ANY(%s)
-          AND ms.model_uri LIKE %s
+          AND (ms.model_uri LIKE %s OR ms.model_uri LIKE %s)
         ORDER BY ms.priority ASC, ms.created_at ASC
         """,
-        (list(QUEUE_STATES), f"%{model_filter}%"),
+        (list(QUEUE_STATES), f"%{model_filter}%", _PRIVATE_URI_LIKE),
     ).fetchall()
     return [
         {
@@ -446,11 +451,11 @@ def _fails(conn, *, limit: int, base: str, model_filter: str) -> list[dict[str, 
                 ORDER BY er.started_at DESC NULLS LAST LIMIT 1) AS eval_run_id
         FROM model_submissions ms
         WHERE ms.state = ANY(%s)
-          AND ms.model_uri LIKE %s
+          AND (ms.model_uri LIKE %s OR ms.model_uri LIKE %s)
         ORDER BY ms.updated_at DESC
         LIMIT %s
         """,
-        (list(FAIL_STATES), f"%{model_filter}%", limit),
+        (list(FAIL_STATES), f"%{model_filter}%", _PRIVATE_URI_LIKE, limit),
     ).fetchall()
     artifacts = _artifacts_for(conn, [row["submission_id"] for row in rows], base)
     return [
@@ -479,9 +484,12 @@ def _stats(conn, *, model_filter: str) -> dict[str, Any]:
         FROM eval_runs er
         JOIN model_submissions ms ON ms.id = er.submission_id
         WHERE er.state = 'SUCCEEDED'
-          AND ms.model_uri LIKE %s
+          AND (ms.model_uri LIKE %s OR ms.model_uri LIKE %s)
         """,
-        (f"%{model_filter}%",),
+        (
+            f"%{model_filter}%",
+            _PRIVATE_URI_LIKE,
+        ),
     ).fetchone()
     return {"evaluated": int(row["n"]) if row else 0}
 
@@ -525,10 +533,10 @@ def build_state(conn, *, model_filter: str) -> dict[str, Any]:
                   AND w.challenger_won IS TRUE) AS prior_wins
         FROM model_submissions ms
         WHERE ms.state = ANY(%s)
-          AND ms.model_uri LIKE %s
+          AND (ms.model_uri LIKE %s OR ms.model_uri LIKE %s)
         ORDER BY ms.updated_at DESC
         """,
-        (tracked, f"%{model_filter}%"),
+        (tracked, f"%{model_filter}%", _PRIVATE_URI_LIKE),
     ).fetchall()
 
     stages: dict[str, dict[str, list]] = {
