@@ -1170,8 +1170,22 @@ async def _simulate_observation_uncached(
                 observation[:120],
             )
             return wrap(pip_success_body(command), fmt)
-        if not degenerate_observation(observation) and not stuttered_lines(observation):
+        if (
+            valid_output(observation, fmt)
+            and not degenerate_observation(observation)
+            and not stuttered_lines(observation)
+        ):
             break
+        if not valid_output(observation, fmt):
+            logger.warning(
+                "[sanity-dispatch] observation truncated or invalid format sample_id={} "
+                "attempt={}/{}: {!r}",
+                sample_id,
+                attempt + 1,
+                MAX_CONSECUTIVE_DEGENERATE_OBSERVATIONS,
+                observation[-160:],
+            )
+            continue
         logger.warning(
             "[sanity-dispatch] observation collapsed into repeated lines sample_id={} "
             "attempt={}/{}: {!r}",
@@ -1188,11 +1202,12 @@ async def _simulate_observation_uncached(
                 f"simulator collapsed into repeated lines on "
                 f"{MAX_CONSECUTIVE_DEGENERATE_OBSERVATIONS} consecutive attempts at one step"
             )
-        logger.warning(
-            "[sanity-dispatch] kept a stuttered observation after retries sample_id={}: {}",
-            sample_id,
-            stuttered_lines(observation),
-        )
+        if stuttered := stuttered_lines(observation):
+            logger.warning(
+                "[sanity-dispatch] kept a stuttered observation after retries sample_id={}: {}",
+                sample_id,
+                stuttered,
+            )
     if META_LEAK_RE.search(observation):
         logger.warning(
             "[sanity-dispatch] observation broke character sample_id={}: {!r}",
