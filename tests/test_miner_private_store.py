@@ -49,6 +49,21 @@ def test_plan_upload_inventories_files_and_skips_manifest(tmp_path):
         assert sha == hashlib.sha256(files[rel]).hexdigest()
 
 
+def test_plan_upload_skips_hidden_and_junk(tmp_path):
+    files = _model_dir(tmp_path)
+    (tmp_path / ".cache" / "huggingface").mkdir(parents=True)
+    (tmp_path / ".cache" / "huggingface" / ".gitignore").write_bytes(b"*")
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_bytes(b"[core]")
+    (tmp_path / ".DS_Store").write_bytes(b"junk")
+    (tmp_path / "__pycache__").mkdir()
+    (tmp_path / "__pycache__" / "x.pyc").write_bytes(b"junk")
+    plan = mp.plan_upload(str(tmp_path))
+    rels = {rel for rel, _s, _d, _p in plan}
+    assert rels == set(files)  # only real model files; no .cache/.git/.DS_Store/__pycache__
+    assert not any(r.startswith(".") or "__pycache__" in r for r in rels)
+
+
 def test_plan_upload_rejects_empty_or_missing_dirs(tmp_path):
     with pytest.raises(SystemExit, match="not a directory"):
         mp.plan_upload(str(tmp_path / "nope"))

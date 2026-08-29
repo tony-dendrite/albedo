@@ -135,8 +135,13 @@ def plan_upload(local_dir: str) -> list[tuple[str, int, str, Path]]:
     if not root.is_dir():
         raise SystemExit(f"model path is not a directory: {local_dir}")
     plan: list[tuple[str, int, str, Path]] = []
+    skipped = 0
     for path in sorted(p for p in root.rglob("*") if p.is_file()):
-        rel = path.relative_to(root).as_posix()
+        relpath = path.relative_to(root)
+        if any(part.startswith(".") or part == "__pycache__" for part in relpath.parts):
+            skipped += 1
+            continue
+        rel = relpath.as_posix()
         if rel == "manifest.json":
             continue
         digest = hashlib.sha256()
@@ -144,6 +149,8 @@ def plan_upload(local_dir: str) -> list[tuple[str, int, str, Path]]:
             while chunk := handle.read(8 * 1024 * 1024):
                 digest.update(chunk)
         plan.append((rel, path.stat().st_size, digest.hexdigest(), path))
+    if skipped:
+        logger.info("skipped {} hidden/junk file(s) not part of the model", skipped)
     if not plan:
         raise SystemExit("model directory has no files to upload")
     return plan
