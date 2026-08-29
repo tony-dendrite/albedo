@@ -86,6 +86,7 @@ async def _apply_ready(pool: asyncpg.Pool, signal: PrivateSignal) -> int:
             SET state = 'READY', manifest_sha256 = $2, ready_block = $3,
                 ready_block_hash = $4, updated_at = now()
             WHERE registration_id = $1 AND state = 'CREDENTIALED'
+              AND $3 > activation_block
             RETURNING id
             """,
             rid,

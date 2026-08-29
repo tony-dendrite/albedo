@@ -99,7 +99,12 @@ class FakeConn:
             return 1
         if "SET state = 'READY'" in sql:
             row = self.registration
-            if row and row["state"] == "CREDENTIALED" and row["registration_id"] == args[0]:
+            if (
+                row
+                and row["state"] == "CREDENTIALED"
+                and row["registration_id"] == args[0]
+                and args[2] > row.get("activation_block", 0)
+            ):
                 row.update(
                     state="READY",
                     manifest_sha256=args[1],
@@ -225,13 +230,38 @@ def test_intake_applies_ready_only_after_credentials():
     ready = PrivateSignal("ready", 97, 200, 5, HOTKEY, ready_signal_payload("c" * 64), "0xdead200")
     conn = FakeConn()
     assert _apply(conn, [ready]) == 0  # unknown registration
-    conn.registration = {"id": 1, "registration_id": RID, "state": "ACTIVATED"}
+    conn.registration = {
+        "id": 1,
+        "registration_id": RID,
+        "state": "ACTIVATED",
+        "activation_block": 100,
+    }
     assert _apply(conn, [ready]) == 0  # not credentialed yet
     conn.registration["state"] = "CREDENTIALED"
     assert _apply(conn, [ready]) == 1
     assert conn.registration["manifest_sha256"] == "c" * 64
     assert conn.registration["ready_block"] == 200
     assert conn.registration["ready_block_hash"] == "0xdead200"
+
+
+def test_intake_ignores_ready_older_than_activation():
+    # after a reset bumps activation_block past the old ready block, a stale r2ready
+    # re-yielded from the chain must NOT re-fire the old submission.
+    conn = FakeConn()
+    conn.registration = {
+        "id": 1,
+        "registration_id": RID,
+        "state": "CREDENTIALED",
+        "activation_block": 500,
+    }
+    stale = PrivateSignal("ready", 97, 200, 5, HOTKEY, ready_signal_payload("c" * 64), "0xstale200")
+    assert _apply(conn, [stale]) == 0  # ready block 200 <= activation 500 -> ignored
+    assert conn.registration["state"] == "CREDENTIALED"  # unchanged
+    # a fresh ready committed after the re-activation still applies
+    fresh = PrivateSignal("ready", 97, 600, 5, HOTKEY, ready_signal_payload("d" * 64), "0xfresh600")
+    assert _apply(conn, [fresh]) == 1
+    assert conn.registration["state"] == "READY"
+    assert conn.registration["ready_block"] == 600
 
 
 # --- controller lifecycle ----------------------------------------------------
