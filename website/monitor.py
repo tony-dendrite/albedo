@@ -458,7 +458,7 @@ def _fails(conn, *, limit: int, base: str, model_filter: str) -> list[dict[str, 
         (list(FAIL_STATES), f"%{model_filter}%", _PRIVATE_URI_LIKE, limit),
     ).fetchall()
     artifacts = _artifacts_for(conn, [row["submission_id"] for row in rows], base)
-    return [
+    fails = [
         {
             "submission_id": str(row["submission_id"]),
             "eval_run_id": str(row["eval_run_id"]) if row["eval_run_id"] else None,
@@ -472,6 +472,42 @@ def _fails(conn, *, limit: int, base: str, model_filter: str) -> list[dict[str, 
             "model_hash": row["model_hash"],
             "updated_at": row["updated_at"],
             "artifacts": artifacts.get(str(row["submission_id"]), {}),
+        }
+        for row in rows
+    ]
+    fails.extend(_private_verification_fails(conn, limit=limit))
+    fails.sort(key=lambda f: f["updated_at"], reverse=True)
+    return fails[:limit]
+
+
+def _private_verification_fails(conn, *, limit: int) -> list[dict[str, Any]]:
+    """Private uploads that fail the R2-verification gate never become model_submissions,
+    so surface them here from private_registrations so they show in the dashboard fails."""
+    bucket = os.environ.get("R2_PRIVATE_MODELS_BUCKET_NAME", "albedo-private-models")
+    rows = conn.execute(
+        """
+        SELECT registration_id, hotkey, uid, fault_message, updated_at
+        FROM private_registrations
+        WHERE state = 'FAILED'
+        ORDER BY updated_at DESC
+        LIMIT %s
+        """,
+        (limit,),
+    ).fetchall()
+    return [
+        {
+            "submission_id": row["registration_id"],
+            "eval_run_id": None,
+            "model_uri": f"s3://{bucket}/models/registrations/{row['registration_id']}",
+            "hotkey": row["hotkey"],
+            "uid": row["uid"],
+            "state": "TERMINAL_INVALID",
+            "fault_class": "MINER_FAULT",
+            "fault_code": None,
+            "fault_message": row["fault_message"],
+            "model_hash": None,
+            "updated_at": row["updated_at"],
+            "artifacts": {},
         }
         for row in rows
     ]

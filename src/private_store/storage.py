@@ -217,12 +217,6 @@ class R2UploadController:
             if not continuation:
                 raise ArtifactIntegrityError("truncated R2 listing omitted continuation token")
 
-    def _assert_no_multipart_uploads(self, prefix: str) -> None:
-        if self._multipart_uploads(prefix):
-            raise ArtifactIntegrityError(
-                "private model prefix contains unfinished multipart uploads"
-            )
-
     def _read_and_hash(
         self, bucket: str, key: str, *, capture: bool = False
     ) -> tuple[bytes | None, int, str, str | None, str | None]:
@@ -270,7 +264,7 @@ class R2UploadController:
     ) -> VerifiedManifest:
         if model_prefix != f"models/registrations/{registration_id}/":
             raise ArtifactIntegrityError("registration model prefix is not canonical")
-        self._assert_no_multipart_uploads(model_prefix)
+        self.abort_multipart_uploads(model_prefix)
         objects = self._list_objects(self.private_model_bucket, model_prefix)
         if len(objects) > MAX_MINER_UPLOAD_OBJECTS:
             raise UploadQuotaExceeded(

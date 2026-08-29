@@ -485,7 +485,7 @@ def test_verify_manifest_rejects_bad_object_metadata_and_genesis_drift():
         )
 
 
-def test_verify_manifest_enforces_quota_and_frozen_multipart():
+def test_verify_manifest_enforces_quota_and_aborts_leftover_multipart():
     s3, controller, manifest, registration, hotkey, prefix = seeded_controller(max_upload_bytes=10)
     with pytest.raises(UploadQuotaExceeded):
         controller.verify_manifest(
@@ -495,18 +495,19 @@ def test_verify_manifest_enforces_quota_and_frozen_multipart():
             submission_pubkey=SUBMISSION_PUBKEY,
             expected_manifest_sha256=manifest.manifest_sha256,
         )
+    # a leftover incomplete multipart (killed/retried upload) must NOT fail an otherwise
+    # complete submission — verify aborts the garbage and proceeds to accept the upload.
     s3b, controller_b, manifest_b, registration_b, hotkey_b, prefix_b = seeded_controller()
     s3b.multipart.append({"Key": f"{prefix_b}model-inflight", "UploadId": "u1"})
-    with pytest.raises(ArtifactIntegrityError, match="unfinished multipart"):
-        controller_b.verify_manifest(
-            model_prefix=prefix_b,
-            registration_id=registration_b,
-            hotkey=hotkey_b,
-            submission_pubkey=SUBMISSION_PUBKEY,
-            expected_manifest_sha256=manifest_b.manifest_sha256,
-        )
-    assert controller_b.abort_multipart_uploads(prefix_b) == 1
-    assert s3b.multipart == []
+    verified = controller_b.verify_manifest(
+        model_prefix=prefix_b,
+        registration_id=registration_b,
+        hotkey=hotkey_b,
+        submission_pubkey=SUBMISSION_PUBKEY,
+        expected_manifest_sha256=manifest_b.manifest_sha256,
+    )
+    assert verified.manifest.registration_id == registration_b
+    assert s3b.multipart == []  # leftover aborted during verify
 
 
 def test_cleanup_model_prefix_removes_everything_once():
