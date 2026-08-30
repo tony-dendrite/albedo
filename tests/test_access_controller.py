@@ -69,6 +69,7 @@ class FakeConn:
         self.submission_id = None
         self.reapable: list[dict] = []  # loser rows the DB's ORDER BY/OFFSET would return
         self.last_offset = None
+        self.sanity_blocked = False
 
     def transaction(self):
         return _Ctx(self)
@@ -76,6 +77,8 @@ class FakeConn:
     async def fetchval(self, sql, *args):
         if "used_hotkeys" in sql:
             return 1 if self.used else None
+        if "sanity_results" in sql:
+            return 1 if self.sanity_blocked else None
         if "INSERT INTO private_registrations" in sql:
             if self.registration is not None:
                 return None
@@ -129,6 +132,16 @@ class FakeConn:
             assert "OFFSET" in sql and "DESC" in sql  # keep N most recent
             self.last_offset = args[0]
             return self.reapable
+        if "TERMINAL_INVALID" in sql:  # resubmit_terminal query
+            row = self.registration
+            if (
+                row
+                and row["state"] == "SUBMITTED"
+                and row.get("submission_state") == "TERMINAL_INVALID"
+                and row["attempt_count"] < args[0]
+            ):
+                return [row]
+            return []
         assert "state = 'CREDENTIALED'" in sql
         row = self.registration
         if not (row and row["state"] == "CREDENTIALED"):
@@ -144,6 +157,14 @@ class FakeConn:
             self.registration.update(state="FAILED", fault_message=args[1])
         elif "SET state = 'SUBMITTED'" in sql:
             self.registration.update(state="SUBMITTED", model_digest=args[1], submission_id=args[2])
+        elif "SET state = 'ACTIVATED'" in sql:
+            self.registration.update(
+                state="ACTIVATED",
+                attempt_count=self.registration["attempt_count"] + 1,
+                submission_id=None,
+                ready_block=None,
+                manifest_sha256=None,
+            )
         elif "SET state = 'REAPED'" in sql:
             self.reaped = getattr(self, "reaped", [])
             self.reaped.append(args[0])
@@ -431,3 +452,56 @@ def test_reap_losers_noop_when_within_the_keep_window():
     conn = FakeConn()
     conn.reapable = []  # OFFSET keep returned nothing → all losses still within window
     assert asyncio.run(controller.reap_losers(FakePool(conn), make_deps(FakeS3()))) == 0
+
+
+def _submitted_row(
+    *, attempt: int = 1, sub_state: str = "TERMINAL_INVALID", fault_code: str | None = None
+) -> dict:
+    return {
+        "id": 1,
+        "registration_id": RID,
+        "hotkey": HOTKEY,
+        "state": "SUBMITTED",
+        "attempt_count": attempt,
+        "submission_state": sub_state,  # models the JOIN to model_submissions.state
+        "fault_code": fault_code,
+        "activation_block": 100,
+        "ready_block": 200,
+        "parent_token_id": None,
+    }
+
+
+def test_resubmit_terminal_grants_retry_on_invalid():
+    s3 = FakeS3()
+    s3.put(BUCKET, f"{PREFIX}model.safetensors", b"x" * 500)  # bytes from the failed attempt
+    conn = FakeConn(_submitted_row(attempt=1))
+    assert asyncio.run(controller.resubmit_terminal(FakePool(conn), make_deps(s3))) == 1
+    assert conn.registration["state"] == "ACTIVATED"  # back for another attempt
+    assert conn.registration["attempt_count"] == 2
+    assert conn.registration["submission_id"] is None
+    assert not [k for k in s3.objects if k[1].startswith(PREFIX)]  # old bytes wiped
+
+
+def test_resubmit_terminal_stops_at_max_attempts():
+    conn = FakeConn(_submitted_row(attempt=SETTINGS.max_attempts))  # out of attempts
+    assert asyncio.run(controller.resubmit_terminal(FakePool(conn), make_deps(FakeS3()))) == 0
+    assert conn.registration["state"] == "SUBMITTED"  # not resurrected
+
+
+def test_resubmit_terminal_skips_sanity_blocked_cheaters():
+    conn = FakeConn(_submitted_row(attempt=1))
+    conn.sanity_blocked = True  # prompt-injection / low-vocab strike
+    assert asyncio.run(controller.resubmit_terminal(FakePool(conn), make_deps(FakeS3()))) == 0
+    assert conn.registration["state"] == "SUBMITTED"
+
+
+def test_resubmit_terminal_leaves_lost_duels_to_reaper():
+    conn = FakeConn(_submitted_row(attempt=1, sub_state="COMPLETE_LOSS"))
+    assert asyncio.run(controller.resubmit_terminal(FakePool(conn), make_deps(FakeS3()))) == 0
+    assert conn.registration["state"] == "SUBMITTED"  # fair loss — reaped, not retried
+
+
+def test_resubmit_terminal_skips_already_blocked_hotkeys():
+    conn = FakeConn(_submitted_row(attempt=1, fault_code="hotkey_preeval_blocked"))
+    assert asyncio.run(controller.resubmit_terminal(FakePool(conn), make_deps(FakeS3()))) == 0
+    assert conn.registration["state"] == "SUBMITTED"  # blocked hotkey — no churn

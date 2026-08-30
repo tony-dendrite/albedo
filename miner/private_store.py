@@ -196,16 +196,18 @@ def _s3_from_envelope(envelope: dict):
 
 
 def upload_objects(client, envelope: dict, manifest: Manifest, plan: list) -> str:
-    """Upload every model file, then manifest.json last, each with sha256 metadata."""
+    from concurrent.futures import ThreadPoolExecutor
+
     from boto3.s3.transfer import TransferConfig
 
     bucket = envelope["private_model_bucket"]
     prefix = envelope["allowed_prefix"]
-    config = TransferConfig(multipart_chunksize=64 * 1024 * 1024, max_concurrency=16)
+    file_workers = max(1, int(os.environ.get("R2_UPLOAD_FILE_WORKERS", "4")))
+    config = TransferConfig(multipart_chunksize=64 * 1024 * 1024, max_concurrency=8)
     by_path = {rel: (sha, path) for rel, _size, sha, path in plan}
-    for item in manifest.files:
+
+    def _put(item: ManifestFile) -> None:
         sha, path = by_path[item.path]
-        logger.info("uploading {} ({} bytes)", item.path, item.size)
         client.upload_file(
             str(path),
             bucket,
@@ -213,6 +215,12 @@ def upload_objects(client, envelope: dict, manifest: Manifest, plan: list) -> st
             ExtraArgs={"Metadata": {"sha256": sha}},
             Config=config,
         )
+        logger.info("uploaded {} ({} bytes)", item.path, item.size)
+
+    with ThreadPoolExecutor(max_workers=file_workers) as pool:
+        for future in [pool.submit(_put, item) for item in manifest.files]:
+            future.result()  # wait for all; re-raise the first failure
+
     raw = manifest.as_bytes()
     client.put_object(
         Bucket=bucket,

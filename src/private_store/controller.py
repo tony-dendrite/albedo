@@ -295,6 +295,82 @@ async def reap_losers(pool: asyncpg.Pool, deps: Deps) -> int:
     return len(rows)
 
 
+async def _sanity_blocked(pool: asyncpg.Pool, hotkey: str) -> bool:
+    async with pool.acquire() as conn:
+        return bool(
+            await conn.fetchval(
+                """
+                SELECT 1 FROM sanity_results sr
+                JOIN model_submissions ms ON ms.model_uri = sr.repo
+                WHERE ms.hotkey = $1 AND sr.passed = false
+                  AND (sr.reason ILIKE '%injection%' OR sr.reason ILIKE '%low vocab%')
+                LIMIT 1
+                """,
+                hotkey,
+            )
+        )
+
+
+async def _reset_for_retry(pool: asyncpg.Pool, deps: Deps, row: asyncpg.Record) -> None:
+    rid = row["registration_id"]
+    await asyncio.to_thread(deps.uploads.cleanup_model_prefix, model_prefix(rid))
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE private_registrations
+            SET state = 'ACTIVATED',
+                activation_block = GREATEST(
+                    activation_block,
+                    COALESCE((SELECT max(block_number) FROM chain_commits), activation_block)),
+                attempt_count = attempt_count + 1,
+                parent_token_id = NULL, credential_expires_at = NULL,
+                ready_block = NULL, ready_block_hash = NULL, manifest_sha256 = NULL,
+                model_digest = NULL, submission_id = NULL, fault_message = NULL,
+                updated_at = now()
+            WHERE id = $1
+            """,
+            row["id"],
+        )
+    log.info(
+        "[access-controller] retry granted for {} — starting attempt {}",
+        rid,
+        row["attempt_count"] + 1,
+    )
+
+
+_BLOCKED_FAULT_CODES = frozenset(
+    {
+        "hotkey_sanity_blocked",
+        "hotkey_preeval_blocked",
+        "hotkey_already_validated",
+        "hotkey_duplicate_blocked",
+    }
+)
+
+
+async def resubmit_terminal(pool: asyncpg.Pool, deps: Deps) -> int:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT pr.id, pr.registration_id, pr.hotkey, pr.attempt_count, ms.fault_code
+            FROM private_registrations pr
+            JOIN model_submissions ms ON ms.id = pr.submission_id
+            WHERE pr.state = 'SUBMITTED' AND ms.state = 'TERMINAL_INVALID'
+              AND pr.attempt_count < $1
+            """,
+            deps.settings.max_attempts,
+        )
+    reset = 0
+    for row in rows:
+        if row["fault_code"] in _BLOCKED_FAULT_CODES:
+            continue  # hotkey already blocked — a retry would just fail again
+        if await _sanity_blocked(pool, row["hotkey"]):
+            continue  # prompt-injection / low-vocab strike
+        await _reset_for_retry(pool, deps, row)
+        reset += 1
+    return reset
+
+
 async def tick(pool: asyncpg.Pool, deps: Deps) -> bool:
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -347,6 +423,7 @@ async def run() -> None:
         while True:
             if loop.time() >= next_sweep:
                 await sweep_credentialed(pool, deps)
+                await resubmit_terminal(pool, deps)
                 await reap_losers(pool, deps)
                 next_sweep = loop.time() + settings.sweep_interval_s
             if not await tick(pool, deps):
