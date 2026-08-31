@@ -6,6 +6,7 @@ import re
 import tarfile
 import time
 
+import httpx
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
@@ -13,10 +14,13 @@ import pytest
 from albedo_config import RepoContextSettings
 from repo_context_service.command_search import ParseFailure, parse_search, run_search
 from repo_context_service.core import (
+    _NEGATIVE_TTL_SECONDS,
+    _TRANSIENT_TTL_SECONDS,
     GroundingContext,
     RepoContextService,
     _filter_listing,
     _first_command,
+    _is_permanent_github_error,
     _NotFound,
     _SnapshotTooLarge,
     parse_instance,
@@ -147,6 +151,94 @@ def test_resolve_sha_negative_cache_ttl(tmp_path, monkeypatch):
     cache_file.write_text(json.dumps(stale))
     assert service._resolve_sha(ref) is None
     assert len(calls) == 2
+
+
+def test_is_permanent_github_error_classification():
+    assert _is_permanent_github_error(_NotFound("/x")) is True
+    for code in (400, 410, 422, 451):
+        resp = httpx.Response(code, request=httpx.Request("GET", "https://api.github.com/x"))
+        err = httpx.HTTPStatusError("e", request=resp.request, response=resp)
+        assert _is_permanent_github_error(err)
+    # rate-limit / transport errors are NOT permanent -> only short transient caching
+    assert _is_permanent_github_error(RuntimeError("github 403 for /x")) is False
+    assert _is_permanent_github_error(httpx.ConnectError("boom")) is False
+
+
+def test_resolve_sha_transient_failure_uses_short_ttl(tmp_path, monkeypatch):
+    """A rate-limit/transport failure is cached only for the transient TTL, so a throttled or
+    unauthenticated run self-heals on the next pass instead of staying dead for 24h."""
+    service = make_service(tmp_path)
+    calls = []
+
+    def failing(path):
+        calls.append(path)
+        raise RuntimeError("github 403 for " + path)
+
+    monkeypatch.setattr(service, "_github_json", failing)
+    ref = parse_instance("swe-zero", "own__repo-3")
+    assert service._resolve_sha(ref) is None
+    cache_file = service.cache_dir / "shas" / "own__repo-3.json"
+    assert json.loads(cache_file.read_text())["kind"] == "transient"
+
+    # aged just past the transient TTL but far inside the 24h negative TTL -> must retry
+    entry = json.loads(cache_file.read_text())
+    entry["failed_at"] = time.time() - (_TRANSIENT_TTL_SECONDS + 60)
+    cache_file.write_text(json.dumps(entry))
+    assert service._resolve_sha(ref) is None
+    assert len(calls) == 2
+
+
+def test_resolve_sha_permanent_failure_uses_long_ttl(tmp_path, monkeypatch):
+    """A genuine 404 (PR/commit gone, rename lookup also 404) stays cached for the full negative
+    TTL and is not retried on every request."""
+    service = make_service(tmp_path)
+    calls = []
+
+    def failing(path):
+        calls.append(path)
+        raise _NotFound(path)
+
+    monkeypatch.setattr(service, "_github_json", failing)
+    ref = parse_instance("swe-zero", "gone__repo-9")
+    assert service._resolve_sha(ref) is None
+    cache_file = service.cache_dir / "shas" / "gone__repo-9.json"
+    assert json.loads(cache_file.read_text())["kind"] == "permanent"
+    settled = len(calls)
+
+    # aged past the transient TTL but within the 24h negative TTL -> still suppressed
+    entry = json.loads(cache_file.read_text())
+    entry["failed_at"] = time.time() - (_TRANSIENT_TTL_SECONDS + 3600)
+    cache_file.write_text(json.dumps(entry))
+    assert service._resolve_sha(ref) is None
+    assert len(calls) == settled
+
+    # aged past the full negative TTL -> retry
+    entry["failed_at"] = time.time() - (_NEGATIVE_TTL_SECONDS + 60)
+    cache_file.write_text(json.dumps(entry))
+    assert service._resolve_sha(ref) is None
+    assert len(calls) > settled
+
+
+def test_resolve_sha_legacy_failure_entry_self_heals(tmp_path, monkeypatch):
+    """Failure entries written before ``kind`` existed (the poisoned ones from the unauthenticated
+    run) expire at the transient TTL, so a fixed/authenticated rerun re-resolves them."""
+    service = make_service(tmp_path)
+    cache_dir = service.cache_dir / "shas"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    (cache_dir / "own__repo-5.json").write_text(
+        json.dumps({"error": "boom", "failed_at": time.time() - (_TRANSIENT_TTL_SECONDS + 60)})
+    )
+
+    calls = []
+
+    def ok(path):
+        calls.append(path)
+        return {"base": {"sha": FULL_SHA}}
+
+    monkeypatch.setattr(service, "_github_json", ok)
+    ref = parse_instance("swe-zero", "own__repo-5")
+    assert service._resolve_sha(ref) == ("own", "repo", FULL_SHA)
+    assert calls  # retried instead of honoring the stale legacy failure
 
 
 def _tar_bytes() -> bytes:

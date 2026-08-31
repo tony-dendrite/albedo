@@ -250,6 +250,14 @@ class _SnapshotTooLarge(Exception):
     pass
 
 
+def _is_permanent_github_error(exc: Exception) -> bool:
+    if isinstance(exc, _NotFound):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in (400, 410, 422, 451)
+    return False
+
+
 def parse_instance(source: str, instance_id: str) -> RepoRef | None:
     try:
         if source.startswith("mini-coder"):
@@ -468,6 +476,12 @@ class RepoContextService:
         self._manifest_lock = threading.Lock()
         self._shards: dict[str, tuple[str, list]] | None = None
         self._manifest_error_logged = False
+        if not self._auth_headers():
+            logger.warning(
+                "repo_context_no_github_token: running UNAUTHENTICATED (60 req/hr) — SHA "
+                "resolution will rate-limit and PR/commit-based datasets (open-swe-traces, "
+                "swe-hero) will fail to ground. Set ALBEDO_REPO_CONTEXT_GITHUB_TOKEN."
+            )
 
     def close(self) -> None:
         self._client.close()
@@ -658,7 +672,7 @@ class RepoContextService:
         if cached is not None:
             if cached.get("sha"):
                 return cached["owner"], cached["repo"], cached["sha"]
-            if time.time() - float(cached.get("failed_at", 0)) < _NEGATIVE_TTL_SECONDS:
+            if self._negative_fresh(cached):
                 return None
         with self._key_lock(f"sha:{ref.instance_id}"):
             cached = _read_json(cache_path)
@@ -673,17 +687,29 @@ class RepoContextService:
                     owner, repo = data["full_name"].split("/", 1)
                     sha = self._sha_from_api(owner, repo, ref)
             except Exception as exc:
+                permanent = _is_permanent_github_error(exc)
                 logger.info(
-                    "repo_context_sha_unresolved instance={} error={}",
+                    "repo_context_sha_unresolved instance={} kind={} error={}",
                     ref.instance_id,
+                    "permanent" if permanent else "transient",
                     f"{type(exc).__name__}: {exc}",
                 )
                 _write_json_atomic(
-                    cache_path, {"error": f"{type(exc).__name__}: {exc}", "failed_at": time.time()}
+                    cache_path,
+                    {
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "failed_at": time.time(),
+                        "kind": "permanent" if permanent else "transient",
+                    },
                 )
                 return None
             _write_json_atomic(cache_path, {"owner": owner, "repo": repo, "sha": sha})
             return owner, repo, sha
+
+    @staticmethod
+    def _negative_fresh(cached: dict) -> bool:
+        ttl = _NEGATIVE_TTL_SECONDS if cached.get("kind") == "permanent" else _TRANSIENT_TTL_SECONDS
+        return time.time() - float(cached.get("failed_at", 0)) < ttl
 
     def git_meta(self, snapshot: Path, source: str, owner: str, repo: str, sha: str) -> GitMeta:
         return GitMeta(
