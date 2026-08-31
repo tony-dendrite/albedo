@@ -183,7 +183,7 @@ export function modelScoreRunId(model) {
 function panelModels(data) {
   const activeProgress = activeProgressByModelSuite(data);
   const models = (data?.models || []).filter(model => completedRuns(model).length || hasActiveProgress(model, activeProgress));
-  const sorted = sortModels(models).filter(hasPanelScores);
+  const sorted = sortModels(models).filter(model => hasPanelScores(model) || hasActiveProgress(model, activeProgress));
   return { models, sorted, selected: sorted.find(model => !isGenesis(model)) || sorted[0] || null };
 }
 
