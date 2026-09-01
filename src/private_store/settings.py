@@ -35,7 +35,7 @@ class PrivateStoreSettings(BaseSettings):
     credential_ttl_seconds: int = MAX_TEMPORARY_CREDENTIAL_TTL_SECONDS
     max_upload_bytes: int = MAX_MINER_UPLOAD_BYTES
     upload_window_seconds: float = 86_400.0
-    keep_recent_losers: int = 20
+    keep_recent_losers: int = 60
     max_attempts: int = 3
     poll_interval_s: float = 10.0
     sweep_interval_s: float = 120.0

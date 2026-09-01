@@ -258,7 +258,14 @@ def _vllm_worker(
 
         if request_queue is None:
             queue.put(
-                _generate_payload(llm, params, prompts or [], sample_ids or [], max_new_tokens)
+                _generate_payload(
+                    llm,
+                    params,
+                    prompts or [],
+                    sample_ids or [],
+                    max_new_tokens,
+                    max_model_len=max_model_len,
+                )
             )
             return
 
@@ -268,7 +275,12 @@ def _vllm_worker(
                 return
             try:
                 payload = _generate_payload(
-                    llm, params, request["prompts"], request["sample_ids"], max_new_tokens
+                    llm,
+                    params,
+                    request["prompts"],
+                    request["sample_ids"],
+                    max_new_tokens,
+                    max_model_len=max_model_len,
                 )
             except Exception as exc:
                 logger.exception(
@@ -282,16 +294,40 @@ def _vllm_worker(
         queue.put({"error": f"{type(exc).__name__}: {exc}"})
 
 
+_CONTEXT_SAFETY_MARGIN_TOKENS = 64
+
+
 def _generate_payload(
     llm: Any,
     params: Any,
     prompts: list[str],
     sample_ids: list[str],
     token_limit: int,
+    max_model_len: int | None = None,
 ) -> dict[str, Any]:
-    outputs = llm.generate(prompts, params)
-    results = []
-    for sample_id, output in zip(sample_ids, outputs, strict=True):
+    results_by_id: dict[str, dict[str, Any]] = {}
+    keep_prompts: list[str] = []
+    keep_ids: list[str] = []
+    if max_model_len:
+        tokenizer = llm.get_tokenizer()
+        budget = max_model_len - _CONTEXT_SAFETY_MARGIN_TOKENS
+        for sample_id, prompt in zip(sample_ids, prompts, strict=True):
+            if len(tokenizer(prompt).input_ids) >= budget:
+                results_by_id[sample_id] = {
+                    "sample_id": sample_id,
+                    "text": "",
+                    "error": None,
+                    "truncated": True,
+                }
+            else:
+                keep_ids.append(sample_id)
+                keep_prompts.append(prompt)
+    else:
+        keep_ids = list(sample_ids)
+        keep_prompts = list(prompts)
+
+    outputs = llm.generate(keep_prompts, params) if keep_prompts else []
+    for sample_id, output in zip(keep_ids, outputs, strict=True):
         completion = output.outputs[0] if output.outputs else None
         text = completion.text if completion is not None else ""
         truncated = (
@@ -299,7 +335,10 @@ def _generate_payload(
             and completion.finish_reason == "length"
             and len(completion.token_ids or ()) >= token_limit
         )
-        results.append(
-            {"sample_id": sample_id, "text": text, "error": None, "truncated": truncated}
-        )
-    return {"results": results}
+        results_by_id[sample_id] = {
+            "sample_id": sample_id,
+            "text": text,
+            "error": None,
+            "truncated": truncated,
+        }
+    return {"results": [results_by_id[sample_id] for sample_id in sample_ids]}
