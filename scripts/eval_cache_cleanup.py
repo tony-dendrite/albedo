@@ -79,11 +79,15 @@ def connect():
 
 
 _HF_REVISION_RE = re.compile(r"^([0-9a-f]{40}|[0-9a-f]{64})$")
+_S3_RID_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def digest_of(model_uri: str | None) -> str | None:
     if not model_uri:
         return None
+    if model_uri.startswith("s3://"):
+        rid = model_uri.partition("@")[0].rstrip("/").rpartition("/")[2]
+        return rid if _S3_RID_RE.match(rid) else None
     if "@sha256:" in model_uri:
         return model_uri.split("@sha256:")[-1].strip()
     tail = model_uri.rpartition("@")[2].strip()
@@ -158,6 +162,17 @@ def scan(cache_dir: Path):
             if not repo.is_dir():
                 continue
             yield from _scan_repo_dir(repo)
+    s3_base = cache_dir / "s3"
+    if s3_base.is_dir():
+        for bucket in s3_base.iterdir():
+            reg_root = bucket / "models" / "registrations"
+            if not reg_root.is_dir():
+                continue
+            for model in reg_root.iterdir():
+                if not model.is_dir() or not _S3_RID_RE.match(model.name):
+                    continue
+                is_partial = not (model / ".albedo-model-cache.json").is_file()
+                yield model, f"s3:{bucket.name}", model.name, is_partial
 
 
 def decide(repo_munged, digest, is_partial, model_dir, king, subs, grace_hours, now):
