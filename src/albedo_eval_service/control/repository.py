@@ -903,9 +903,13 @@ class EvalRepository:
         row = conn.execute(
             """
             SELECT 1
-            FROM model_submissions
-            WHERE hotkey = %s
-              AND state = ANY(%s::text[])
+            FROM model_submissions ms
+            JOIN chain_commits cc ON cc.id = ms.chain_commit_id
+            LEFT JOIN miners m ON m.hotkey = ms.hotkey
+            WHERE ms.hotkey = %s
+              AND ms.state = ANY(%s::text[])
+              AND (m.registration_block IS NULL
+                   OR cc.block_number >= m.registration_block)
             LIMIT 1
             """,
             (hotkey, list(_SCORED_OR_BEYOND)),

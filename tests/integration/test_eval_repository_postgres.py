@@ -131,6 +131,47 @@ def test_claim_next_eval_rejects_duplicate_already_scored_hotkey(db_url: str):
     assert event_type == "eval_skipped_hotkey_already_validated"
 
 
+def test_claim_next_eval_allows_scored_hotkey_from_previous_registration(db_url: str):
+    repo = EvalRepository(db_url)
+    submission_id = _seed_eval_ready_submission(db_url)
+    _seed_scored_duplicate(db_url, hotkey="miner-hotkey")
+    with psycopg.connect(db_url) as conn, conn.transaction():
+        conn.execute("UPDATE miners SET registration_block = 200 WHERE hotkey = 'miner-hotkey'")
+        conn.execute("UPDATE chain_commits SET block_number = 250 WHERE block_hash = '0xabc'")
+
+    claimed = repo.claim_next_eval(
+        worker_id="worker-a", lease_seconds=60, request_builder=_request_builder
+    )
+
+    assert claimed is not None
+    assert claimed.submission_id == submission_id
+    with psycopg.connect(db_url) as conn:
+        state = conn.execute(
+            "SELECT state FROM model_submissions WHERE id = %s", (submission_id,)
+        ).fetchone()[0]
+    assert state == "EVAL_RUNNING"
+
+
+def test_claim_next_eval_rejects_scored_hotkey_within_current_registration(db_url: str):
+    repo = EvalRepository(db_url)
+    submission_id = _seed_eval_ready_submission(db_url)
+    _seed_scored_duplicate(db_url, hotkey="miner-hotkey")
+    with psycopg.connect(db_url) as conn, conn.transaction():
+        conn.execute("UPDATE miners SET registration_block = 50 WHERE hotkey = 'miner-hotkey'")
+
+    claimed = repo.claim_next_eval(
+        worker_id="worker-a", lease_seconds=60, request_builder=_request_builder
+    )
+
+    assert claimed is None
+    with psycopg.connect(db_url) as conn:
+        row = conn.execute(
+            "SELECT state, fault_code FROM model_submissions WHERE id = %s",
+            (submission_id,),
+        ).fetchone()
+    assert row == ("TERMINAL_INVALID", "hotkey_already_validated")
+
+
 def _seed_scored_duplicate(database_url: str, *, hotkey: str) -> UUID:
     submission_id = uuid4()
     chain_commit_id = uuid4()

@@ -388,9 +388,13 @@ async def hotkey_validated(pool: asyncpg.Pool, hotkey: str) -> bool:
                 """
                 SELECT EXISTS(
                     SELECT 1
-                    FROM model_submissions
-                    WHERE hotkey = $1
-                      AND state = ANY($2::text[])
+                    FROM model_submissions ms
+                    JOIN chain_commits cc ON cc.id = ms.chain_commit_id
+                    LEFT JOIN miners m ON m.hotkey = ms.hotkey
+                    WHERE ms.hotkey = $1
+                      AND ms.state = ANY($2::text[])
+                      AND (m.registration_block IS NULL
+                           OR cc.block_number >= m.registration_block)
                 )
                 """,
                 hotkey,
