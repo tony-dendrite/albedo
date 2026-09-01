@@ -3,6 +3,7 @@ from __future__ import annotations
 import multiprocessing as mp
 import os
 import queue as queue_module
+import signal
 import time
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -122,11 +123,21 @@ class VllmProcessGenerator:
             self._request_queue.put(None)
             self._process.join(timeout=30)
         if self._process.is_alive():
-            self._process.terminate()
+            self._kill_process_tree()
             self._process.join(timeout=10)
         self._process = None
         self._request_queue = None
         self._result_queue = None
+
+    def _kill_process_tree(self) -> None:
+        pid = self._process.pid
+        if pid is None:
+            self._process.terminate()
+            return
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            self._process.terminate()
 
     def _start(self) -> None:
         if self._process is not None and self._process.is_alive():
@@ -209,6 +220,10 @@ def _vllm_worker(
     request_queue=None,
 ) -> None:
     try:
+        try:
+            os.setsid()
+        except OSError:
+            pass
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_ids)
 
         from vllm import LLM, SamplingParams
