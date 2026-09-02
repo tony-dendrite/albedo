@@ -44,12 +44,15 @@ from albedo_eval_service.shared.observation_format import (
     wrap,
 )
 from albedo_eval_service.shared.observation_memo import ObservationMemo
+from albedo_eval_service.shared.patch_lint import extract_commands, final_submit_issue
 from albedo_eval_service.shared.pip_check import fabricated_pip_error, pip_success_body
 from albedo_eval_service.shared.sed_check import fabricated_sed_error, misdiagnosed_sed
 from albedo_eval_service.shared.submit_protocol import (
+    _tail_name,
     assign_submit,
     command_for,
     first_bash_command,
+    is_exact_submission,
     rewrite_messages,
 )
 from albedo_eval_service.simulator.prompt_simulator import (
@@ -115,6 +118,7 @@ class _TrajectoryState:
     submit_clause: str = ""
     submit_marker: str = ""
     rewrite_mode: str = ""
+    submit_lint_flag: str = ""
     micro: dict[str, str] | None = None
     nudged_at: int = 0
     submits: list[dict[str, Any]] = dataclasses.field(default_factory=list)
@@ -637,7 +641,9 @@ def _trajectory_states(request: SanityRunRequest) -> list[_TrajectoryState]:
             for message in messages
         ]
         sample_id = sample_ids[i] if i < len(sample_ids) else f"sanity-sample:{i}"
-        marker, command = assign_submit(sample_id, salt=str(request.run_id))
+        marker, command = assign_submit(
+            sample_id, salt=str(request.run_id), tail_name="patchtxt" if i == 0 else None
+        )
         rewritten, rewrite_mode = rewrite_messages(clean_messages, command)
         if rewrite_mode == "failed":
             logger.warning(
@@ -689,9 +695,10 @@ async def _inject_microtasks(states: list[_TrajectoryState]) -> None:
                 enable_thinking=True,
             )
             logger.info(
-                "[sanity-dispatch] microtask sample={} marker={} rewrite={} target={}:{}",
+                "[sanity-dispatch] microtask sample={} marker={} tail={} rewrite={} target={}:{}",
                 state.sample_id,
                 state.submit_marker,
+                _tail_name(state.submit_clause),
                 state.rewrite_mode,
                 state.micro.get("file"),
                 state.micro.get("function"),
@@ -760,6 +767,30 @@ def _run_chain_checks(states: list[_TrajectoryState], turn_count: int) -> None:
             state.heuristic_reason = f"chain: {malformed_structure(state)}"
         if state.heuristic_reason:
             logger.warning("[sanity-dispatch] {} {}", state.sample_id, state.heuristic_reason)
+    for state in states:
+        if state.error:
+            continue
+        state.submit_lint_flag = _submit_lint_reason(state)
+        if not state.submit_lint_flag:
+            continue
+        if not state.heuristic_reason:
+            state.heuristic_reason = state.submit_lint_flag
+        logger.warning(
+            "[sanity-dispatch] submit-lint {} {}", state.sample_id, state.submit_lint_flag
+        )
+
+
+def _submit_lint_reason(state: _TrajectoryState) -> str:
+    if "cat patch.txt" not in state.submit_clause:
+        return ""
+    commands = [
+        command
+        for turn in state.turns
+        if turn.get("role") == "assistant"
+        for command in extract_commands(str(turn.get("content") or ""))
+    ]
+    issue = final_submit_issue(commands, state.submit_marker)
+    return f"chain: {issue}" if issue else ""
 
 
 def _apply_turn_result(states: list[_TrajectoryState], result: dict[str, Any]) -> None:
@@ -967,6 +998,7 @@ def _reject_submission(
             "segment": state.segment,
             "rejected": True,
             "format_ok": state.submit_clause.split("&&")[0].strip() in assistant_output,
+            "exact_ok": is_exact_submission(assistant_output, state.submit_clause),
             "has_edit": segment_has_edit(state, state.segment),
         }
     )
@@ -987,6 +1019,7 @@ def _advance_segment(
             "turn": turn_index,
             "segment": state.segment,
             "format_ok": state.submit_clause.split("&&")[0].strip() in assistant_output,
+            "exact_ok": is_exact_submission(assistant_output, state.submit_clause),
             "post_nudge": bool(state.nudged_at) and turn_index > state.nudged_at,
             "has_edit": segment_has_edit(state, state.segment),
         }
@@ -1325,6 +1358,7 @@ def _trajectory_result(
             "reason": state.error or state.heuristic_reason,
             # state.error is a chain-infra failure (evaluator/simulator), never model behavior
             "infra": bool(state.error),
+            "submit_lint": state.submit_lint_flag,
         }
         for state in states
     ]
