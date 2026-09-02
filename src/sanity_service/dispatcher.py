@@ -121,7 +121,7 @@ class _TrajectoryState:
     retry_reason: str = ""
     consecutive_bad_turns: int = 0
     consecutive_silent_observations: int = 0
-    last_followup: str = ""
+    asked: list[str] = dataclasses.field(default_factory=list)
     observation_memo: ObservationMemo = dataclasses.field(default_factory=ObservationMemo)
 
 
@@ -134,7 +134,7 @@ class SanityDispatcher:
         self, submission: dict[str, Any], host: Any, attempt_id: UUID
     ) -> SanityRunRequest:
         samples = sample_prompts(
-            seed=str(submission["block_hash"]),
+            seed=f"{submission['block_hash']}:{attempt_id}",  # eval side does the same
             n=self.settings.sample_count,
             manifest_path=self.settings.dataset_manifest_path,
             manifest_hash=self.settings.dataset_manifest_hash,
@@ -971,6 +971,7 @@ def _reject_submission(
         }
     )
     _append_observation(state, rejection)
+    state.asked.append(rejection.strip())
     state.turns[-1].update(injected=True)
     state.turns[-1].pop("environment_observation", None)
     state.prompt = format_messages(
@@ -992,8 +993,8 @@ def _advance_segment(
     )
     first = state.segment == "micro"
     state.segment_index += not first
-    repeated = followup.strip() and followup.strip() == state.last_followup
-    state.last_followup = followup.strip()
+    repeated = followup.strip() in state.asked
+    state.asked.append(followup.strip())
     if not followup.strip() or repeated:
         state.stopped = True
         logger.info(
@@ -1272,30 +1273,44 @@ async def _retry_for_output(
     command: str,
     observation: str,
 ) -> str:
-    response = await client.complete(
-        model=settings.simulation_model or settings.evaluator_model,
-        messages=[
-            {"role": "system", "content": simulation_system_prompt(fmt)},
-            {"role": "user", "content": f"{transcript}\n\n{MUST_PRINT_RETRY}"},
-        ],
-        temperature=0.0,
-        max_tokens=settings.simulation_max_tokens,
-        provider=_simulation_provider(settings),
-        accept=lambda raw: (
-            valid_output(raw, fmt) and has_content(raw, fmt) and not degenerate_observation(raw)
-        ),
-    )
-    candidate = "" if response.error else response.raw.strip()
-    recovered = (
-        valid_output(candidate, fmt)
-        and has_content(candidate, fmt)
-        and not degenerate_observation(candidate)
-    )
+    def usable(raw: str) -> bool:
+        text = repair_output(raw, fmt)
+        return (
+            valid_output(text, fmt)
+            and has_content(text, fmt)
+            and not degenerate_observation(text)
+            and not stuttered_lines(text)
+            and not leaked_turn(text)
+            and not echoed_command(command, text)
+            and not transcript.rstrip().endswith(text.strip())  # the model's own turn, echoed
+        )
+
+    # simulation model first; the costly evaluator model only when it still cannot print
+    for model, provider in (
+        (settings.simulation_model or settings.evaluator_model, _simulation_provider(settings)),
+        (settings.evaluator_model, _evaluator_provider(settings)),
+    ):
+        response = await client.complete(
+            model=model,
+            messages=[
+                {"role": "system", "content": simulation_system_prompt(fmt)},
+                {"role": "user", "content": f"{transcript}\n\n{MUST_PRINT_RETRY}"},
+            ],
+            temperature=0.0,
+            max_tokens=settings.simulation_max_tokens,
+            provider=provider,
+            accept=usable,
+        )
+        candidate = "" if response.error else repair_output(response.raw.strip(), fmt)
+        recovered = bool(candidate) and usable(candidate)
+        if recovered:
+            break
     logger.info(
-        "[sanity-dispatch] must_print_retry sample_id={} command={!r} recovered={}",
+        "[sanity-dispatch] must_print_retry sample_id={} command={!r} recovered={} model={}",
         sample_id,
         command[:80],
         recovered,
+        model,
     )
     return candidate if recovered else observation
 

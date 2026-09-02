@@ -47,6 +47,8 @@ ONE new concrete follow-up request grounded in files or changes visible in the t
 in an adjacent area, a small extension of the change, a missed call site). Stay fully in-world; never \
 mention being an AI, a simulation, or an evaluation. 2-4 sentences.
 {rules}
+ALREADY RAISED THIS SESSION — do not raise any of these again, in any wording:
+{asked}
 
 TRANSCRIPT:
 {tail}
@@ -66,6 +68,8 @@ the surrounding files that needs handling before you can accept (an unhandled ca
 a needed docstring/comment), and ask them to address it and submit again. Stay fully in-world; \
 never mention being an AI, a simulation, or an evaluation.
 {rules}
+ALREADY RAISED THIS SESSION — do not raise any of these again, in any wording:
+{asked}
 
 TRANSCRIPT:
 {tail}
@@ -104,6 +108,10 @@ def followup_instruction(followup: str, submit_clause: str, *, first: bool) -> s
 def _microtask_parsable(raw: str) -> bool:
     obj = extract_json(raw or "", prefer_keys=("request",))
     return isinstance(obj, dict) and bool(obj.get("request"))
+
+
+def _asked(state: Any) -> str:
+    return "\n".join(f"- {a[:300]}" for a in getattr(state, "asked", ())) or "- (none yet)"
 
 
 def applied_edits(state: Any) -> str:
@@ -230,18 +238,23 @@ async def _generate_in_world(
 ) -> str:
     context = chain_context(state)
     clause = str(getattr(state, "submit_clause", "") or "")
+    asked = set(getattr(state, "asked", ()))
     try:
         result = await client.complete(
             model=settings.simulation_model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
-            accept=lambda raw: not ungrounded_reason(raw, context, clause),
+            accept=lambda raw: (
+                raw.strip() not in asked and not ungrounded_reason(raw, context, clause)
+            ),
         )
     except Exception as exc:
         logger.warning("[sanity/chain] {} generation failed for {}: {}", kind, state.sample_id, exc)
         return fallback
     message = (result.raw or "").strip()
-    reason = ungrounded_reason(message, context, clause)
+    reason = ungrounded_reason(message, context, clause) or (
+        "restates a request already made" if message in asked else ""
+    )
     if reason:
         logger.warning(
             "[sanity/chain] {} discarded for {} ({}), using fallback",
@@ -262,6 +275,7 @@ async def generate_followup(client: Any, settings: Any, state: Any, submission: 
             rules=_GROUNDING_RULES,
             tail=chain_context(state),
             submission=submission[-2000:],
+            asked=_asked(state),
         ),
         # an ungroundable follow-up is no follow-up: the caller accepts the submission
         fallback="",
@@ -322,19 +336,27 @@ def empty_submit_count(state: Any, marker: str) -> int:
     worked = False
     asked_to_submit_as_is = False
     asked: set[str] = set()
+    demand: set[str] = set()
+    edited: set[str] = set()
+    repeated_demand = False
     for turn in state.turns:
         content = str(turn.get("content") or "")
         if turn.get("role") != "assistant":
             asked_to_submit_as_is = bool(turn.get("nudge"))
             if not turn.get("environment_observation"):
                 asked = _names(content)
+            if turn.get("injected"):
+                repeated_demand = bool(asked & (demand - edited))
+                demand = asked
             continue
         command = first_bash_command(content)
+        if _EDIT_RE.search(content):
+            edited |= _names(command)
         if not marker or marker not in command:
             worked = worked or bool(_EDIT_RE.search(content)) or bool(_names(command) & asked)
             continue
         worked = worked or bool(_EDIT_RE.search(content))
-        count += not worked and not asked_to_submit_as_is
+        count += not worked and not asked_to_submit_as_is and not repeated_demand
         worked = False
     return count
 
@@ -373,6 +395,7 @@ async def generate_rejection(client: Any, settings: Any, state: Any, submission:
             rules=_GROUNDING_RULES,
             tail=chain_context(state),
             submission=submission[-2000:],
+            asked=_asked(state),
         ),
         fallback="",
         kind="rejection",

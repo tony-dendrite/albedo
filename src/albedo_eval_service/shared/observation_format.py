@@ -128,6 +128,7 @@ def leaked_turn(raw: str) -> bool:
 
 def echoed_command(command: str, raw: str) -> bool:
     body = observation_body(raw, classify(raw)).strip()
+    body = re.sub(r"^```\w*\n|\n```$", "", body).strip()
     return bool(body) and body == (command or "").strip()
 
 
