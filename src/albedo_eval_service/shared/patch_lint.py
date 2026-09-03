@@ -299,6 +299,9 @@ def final_submit_issue(commands: list[str], marker: str) -> str:
     if kind == "diff-cmd" and re.search(r"/dev/stdin|\s-\s", cmd):
         return "patch constructed by diffing against stdin"
     if kind == "copy":
+        src = re.search(r"\b(?:cp|cat)\s+(?:-\S+\s+)*(\S+)", cmd)
+        if src and _is_patchlike(src.group(1)):
+            return ""
         return "patch file created by copying file content, not a diff"
     return ""
 
