@@ -40,7 +40,7 @@ SOURCES: dict[str, dict] = {
     "open-swe-traces": {
         "repos": ["nvidia/Open-SWE-Traces"],
         "shard_glob": "data/train-*.parquet",
-        "raw_glob": "data/*/train-*.parquet",
+        "raw_glob": "data/**/train-*.parquet",
         "render": True,
         "family": "pr",
         "exclude_ids": _OPEN_SWE_LEAKS,
