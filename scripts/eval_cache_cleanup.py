@@ -79,15 +79,23 @@ def connect():
 
 
 _HF_REVISION_RE = re.compile(r"^([0-9a-f]{40}|[0-9a-f]{64})$")
-_S3_RID_RE = re.compile(r"^[0-9a-f]{64}$")
+_S3_RID_RE = re.compile(r"^[0-9a-f]{64}(-a[0-9]+)?$")
+_S3_ATTEMPT_RE = re.compile(r"/models/attempts/([0-9a-f]{64})/a([0-9]+)$")
+
+
+def _s3_identity(location: str) -> str | None:
+    attempt = _S3_ATTEMPT_RE.search(location.rstrip("/"))
+    if attempt is not None:
+        return f"{attempt.group(1)}-a{attempt.group(2)}"
+    rid = location.rstrip("/").rpartition("/")[2]
+    return rid if _S3_RID_RE.match(rid) else None
 
 
 def digest_of(model_uri: str | None) -> str | None:
     if not model_uri:
         return None
     if model_uri.startswith("s3://"):
-        rid = model_uri.partition("@")[0].rstrip("/").rpartition("/")[2]
-        return rid if _S3_RID_RE.match(rid) else None
+        return _s3_identity(model_uri.partition("@")[0])
     if "@sha256:" in model_uri:
         return model_uri.split("@sha256:")[-1].strip()
     tail = model_uri.rpartition("@")[2].strip()
@@ -166,13 +174,24 @@ def scan(cache_dir: Path):
     if s3_base.is_dir():
         for bucket in s3_base.iterdir():
             reg_root = bucket / "models" / "registrations"
-            if not reg_root.is_dir():
+            if reg_root.is_dir():
+                for model in reg_root.iterdir():
+                    if not model.is_dir() or not _S3_RID_RE.match(model.name):
+                        continue
+                    is_partial = not (model / ".albedo-model-cache.json").is_file()
+                    yield model, f"s3:{bucket.name}", model.name, is_partial
+            attempts_root = bucket / "models" / "attempts"
+            if not attempts_root.is_dir():
                 continue
-            for model in reg_root.iterdir():
-                if not model.is_dir() or not _S3_RID_RE.match(model.name):
+            for registration in attempts_root.iterdir():
+                if not registration.is_dir() or not _S3_RID_RE.match(registration.name):
                     continue
-                is_partial = not (model / ".albedo-model-cache.json").is_file()
-                yield model, f"s3:{bucket.name}", model.name, is_partial
+                for model in registration.iterdir():
+                    if not model.is_dir() or not re.fullmatch(r"a[0-9]+", model.name):
+                        continue
+                    is_partial = not (model / ".albedo-model-cache.json").is_file()
+                    identity = f"{registration.name}-{model.name}"
+                    yield model, f"s3:{bucket.name}", identity, is_partial
 
 
 def decide(repo_munged, digest, is_partial, model_dir, king, subs, grace_hours, now):

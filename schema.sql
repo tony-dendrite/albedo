@@ -448,6 +448,7 @@ CREATE TABLE IF NOT EXISTS private_registrations (
     credential_expires_at TIMESTAMPTZ,
     fault_message TEXT,
     attempt_count INT NOT NULL DEFAULT 1,
+    model_prefix TEXT,
     submission_id UUID REFERENCES model_submissions(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),

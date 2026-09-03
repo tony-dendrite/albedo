@@ -3,17 +3,23 @@
 ACTIVATED -> CREDENTIALED  mint parent token, publish sealed credentials
 READY     -> REVOKED       kill upload access, wipe the mailbox
 REVOKED   -> SUBMITTED     verify the frozen prefix, hand off a model submission
-          -> FAILED        miner-fault verification failure (prefix cleaned up)
+          -> FAILED        miner-fault verification failure (uploaded bytes retained)
 
 The linear state machine is the revoke-before-verify gate: verification only
 ever runs on rows whose parent token was successfully deleted.
+
+Uploaded bytes are retained on every terminal path. reap_expired is the only
+place that deletes a model, once it is older than the retention window and no
+live registration still needs it; each attempt owns a distinct prefix, so a retry
+never disturbs an earlier upload.
 """
 
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from typing import Any, Collection, Mapping
 
 import asyncpg
 import boto3
@@ -73,10 +79,14 @@ def build_deps(settings: PrivateStoreSettings) -> Deps:
     )
 
 
+def _prefix_of(row: Mapping[str, Any]) -> str:
+    return row["model_prefix"] or model_prefix(row["registration_id"])
+
+
 async def _credential(conn: asyncpg.Connection, row: asyncpg.Record, deps: Deps) -> None:
     settings = deps.settings
     rid = row["registration_id"]
-    prefix = model_prefix(rid)
+    prefix = model_prefix(rid, row["attempt_count"])
     parent = await asyncio.to_thread(deps.gateway.create_parent_token, f"albedo-registration-{rid}")
     temp = create_local_temporary_credentials(
         endpoint=settings.endpoint,
@@ -110,12 +120,13 @@ async def _credential(conn: asyncpg.Connection, row: asyncpg.Record, deps: Deps)
         """
         UPDATE private_registrations
         SET state = 'CREDENTIALED', parent_token_id = $2,
-            credential_expires_at = to_timestamp($3), updated_at = now()
+            credential_expires_at = to_timestamp($3), model_prefix = $4, updated_at = now()
         WHERE id = $1
         """,
         row["id"],
         parent.token_id,
         temp.expires_at_unix,
+        prefix,
     )
     log.info("[access-controller] credentials published for {}", rid)
 
@@ -137,7 +148,7 @@ async def _verify(
 ) -> None:
     settings = deps.settings
     rid = row["registration_id"]
-    prefix = model_prefix(rid)
+    prefix = _prefix_of(row)
     try:
         verified = await asyncio.to_thread(
             deps.uploads.verify_manifest,
@@ -148,7 +159,7 @@ async def _verify(
             expected_manifest_sha256=row["manifest_sha256"],
         )
     except ArtifactIntegrityError as exc:
-        removed = await asyncio.to_thread(deps.uploads.cleanup_model_prefix, prefix)
+        await asyncio.to_thread(deps.uploads.abort_multipart_uploads, prefix)
         await conn.execute(
             """
             UPDATE private_registrations
@@ -158,12 +169,7 @@ async def _verify(
             row["id"],
             str(exc),
         )
-        log.warning(
-            "[access-controller] verification FAILED for {} ({} objects removed): {}",
-            rid,
-            removed,
-            exc,
-        )
+        log.warning("[access-controller] verification FAILED for {}: {}", rid, exc)
         return
     digest = verified.manifest.model_digest
     payload = {
@@ -212,13 +218,20 @@ async def _verify(
     )
 
 
-async def _abandon(pool: asyncpg.Pool, deps: Deps, row: asyncpg.Record, reason: str) -> None:
-    """Revoke a credentialed registration's upload access, wipe its prefix, FAIL it."""
-    prefix = model_prefix(row["registration_id"])
+async def _close_upload_window(
+    pool: asyncpg.Pool, deps: Deps, row: asyncpg.Record, reason: str
+) -> None:
+    """Take upload access away from a registration that will not be evaluated.
+
+    Every completed object stays until the reaper needs the room. This ends write
+    access — revoke the parent token, remove the sealed envelope — aborts unfinished
+    multiparts (invisible to the reaper's inventory, so they would leak forever), and
+    records why, which is also what stops the row being swept again.
+    """
     if row["parent_token_id"]:
         await asyncio.to_thread(deps.gateway.revoke_parent_token, row["parent_token_id"])
     await asyncio.to_thread(deps.mailbox.delete, [mailbox_object_key(row["registration_id"], 1)])
-    await asyncio.to_thread(deps.uploads.cleanup_model_prefix, prefix)
+    await asyncio.to_thread(deps.uploads.abort_multipart_uploads, _prefix_of(row))
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE private_registrations SET state = 'FAILED', fault_message = $2,"
@@ -226,7 +239,9 @@ async def _abandon(pool: asyncpg.Pool, deps: Deps, row: asyncpg.Record, reason: 
             row["id"],
             reason,
         )
-    log.warning("[access-controller] abandoned {} — {}", row["registration_id"], reason)
+    log.warning(
+        "[access-controller] upload window closed for {} — {}", row["registration_id"], reason
+    )
 
 
 async def sweep_credentialed(pool: asyncpg.Pool, deps: Deps) -> int:
@@ -238,7 +253,7 @@ async def sweep_credentialed(pool: asyncpg.Pool, deps: Deps) -> int:
     """
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT id, registration_id, parent_token_id,"
+            "SELECT id, registration_id, parent_token_id, attempt_count, model_prefix,"
             " EXTRACT(EPOCH FROM (now() - updated_at)) AS age_s"
             " FROM private_registrations WHERE state = 'CREDENTIALED'"
         )
@@ -247,52 +262,72 @@ async def sweep_credentialed(pool: asyncpg.Pool, deps: Deps) -> int:
         if row["age_s"] > deps.settings.upload_window_seconds:
             reason = f"upload window expired ({int(row['age_s'])}s with no ready signal)"
         else:
-            prefix = model_prefix(row["registration_id"])
-            breach = await asyncio.to_thread(deps.uploads.quota_breach, prefix)
+            breach = await asyncio.to_thread(deps.uploads.quota_breach, _prefix_of(row))
             reason = f"upload quota abused: {breach}" if breach else None
         if reason is None:
             continue
-        await _abandon(pool, deps, row, reason)
+        await _close_upload_window(pool, deps, row, reason)
         swept += 1
     return swept
 
 
-async def reap_losers(pool: asyncpg.Pool, deps: Deps) -> int:
-    """Delete the private bytes of losing models beyond the N most recent.
+_REAPABLE_SUBMISSION_STATES = ("COMPLETE_LOSS", "TERMINAL_INVALID", "TERMINAL_INFRA_FAILED")
 
-    A model that lost its duel is no longer needed, but we keep the most recent
-    losses on disk for dispute/re-eval; everything older is reaped. Winners are
-    reaped separately, only after king_hf_uploader mirrors them to public HF.
-    The row is kept (as REAPED) for the audit trail — only the bytes go.
-    """
+
+def plan_reap(
+    retained: Mapping[str, Any], *, cutoff: datetime, protected: Collection[str]
+) -> list[str]:
+    """Prefixes whose newest object predates `cutoff`, skipping any a live registration needs."""
+    return sorted(p for p, newest in retained.items() if newest < cutoff and p not in protected)
+
+
+async def _protected_prefixes(pool: asyncpg.Pool) -> set[str]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT pr.id, pr.registration_id
+            SELECT pr.registration_id, pr.attempt_count, pr.model_prefix
             FROM private_registrations pr
-            JOIN model_submissions ms ON ms.id = pr.submission_id
-            WHERE pr.state = 'SUBMITTED' AND ms.state = 'COMPLETE_LOSS'
-            ORDER BY COALESCE(ms.finished_at, ms.updated_at) DESC
-            OFFSET $1
+            LEFT JOIN model_submissions ms ON ms.id = pr.submission_id
+            WHERE pr.state <> 'FAILED'
+              AND COALESCE(ms.state, '') <> ALL($1::text[])
             """,
-            deps.settings.keep_recent_losers,
+            list(_REAPABLE_SUBMISSION_STATES),
         )
-    for row in rows:
-        await asyncio.to_thread(
-            deps.uploads.cleanup_model_prefix, model_prefix(row["registration_id"])
-        )
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE private_registrations SET state = 'REAPED', updated_at = now()"
-                " WHERE id = $1",
-                row["id"],
+    return {_prefix_of(row) for row in rows}
+
+
+async def reap_expired(pool: asyncpg.Pool, deps: Deps) -> int:
+    """Delete private uploads older than the retention window — the only place bytes go.
+
+    Age is the newest object's LastModified, i.e. when the upload finished. Losers,
+    failed attempts, abandoned uploads and orphans with no row all go once older than
+    `retention_hours`; anything a live registration still needs is skipped. Deleting a
+    prefix drops it from the next inventory, so nothing is recorded to avoid reaping twice.
+    """
+    hours = deps.settings.retention_hours
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    retained = await asyncio.to_thread(deps.uploads.retained_uploads)
+    victims = plan_reap(retained, cutoff=cutoff, protected=await _protected_prefixes(pool))
+    if not victims:
+        return 0
+    log.warning(
+        "[access-controller] {} of {} uploads older than {}h — reaping",
+        len(victims),
+        len(retained),
+        hours,
+    )
+    reaped = 0
+    for prefix in victims:
+        try:
+            removed = await asyncio.to_thread(deps.uploads.cleanup_model_prefix, prefix)
+        except Exception as exc:
+            log.opt(exception=True).warning(
+                "[access-controller] reap failed for {} — will retry: {}", prefix, exc
             )
-        log.info(
-            "[access-controller] reaped losing model {} (beyond {} most recent)",
-            row["registration_id"],
-            deps.settings.keep_recent_losers,
-        )
-    return len(rows)
+            continue
+        reaped += 1
+        log.warning("[access-controller] reaped {} ({} objects)", prefix, removed)
+    return reaped
 
 
 async def _sanity_blocked(pool: asyncpg.Pool, hotkey: str) -> bool:
@@ -312,8 +347,12 @@ async def _sanity_blocked(pool: asyncpg.Pool, hotkey: str) -> bool:
 
 
 async def _reset_for_retry(pool: asyncpg.Pool, deps: Deps, row: asyncpg.Record) -> None:
+    """Grant another attempt. The previous attempt's bytes are kept.
+
+    Bumping attempt_count moves the next upload to its own prefix, so nothing from
+    this attempt can be mistaken for part of the next one.
+    """
     rid = row["registration_id"]
-    await asyncio.to_thread(deps.uploads.cleanup_model_prefix, model_prefix(rid))
     async with pool.acquire() as conn:
         await conn.execute(
             """
@@ -323,7 +362,7 @@ async def _reset_for_retry(pool: asyncpg.Pool, deps: Deps, row: asyncpg.Record) 
                     activation_block,
                     COALESCE((SELECT max(block_number) FROM chain_commits), activation_block)),
                 attempt_count = attempt_count + 1,
-                parent_token_id = NULL, credential_expires_at = NULL,
+                parent_token_id = NULL, credential_expires_at = NULL, model_prefix = NULL,
                 ready_block = NULL, ready_block_hash = NULL, manifest_sha256 = NULL,
                 model_digest = NULL, submission_id = NULL, fault_message = NULL,
                 updated_at = now()
@@ -424,7 +463,7 @@ async def run() -> None:
             if loop.time() >= next_sweep:
                 await sweep_credentialed(pool, deps)
                 await resubmit_terminal(pool, deps)
-                await reap_losers(pool, deps)
+                await reap_expired(pool, deps)
                 next_sweep = loop.time() + settings.sweep_interval_s
             if not await tick(pool, deps):
                 await asyncio.sleep(settings.poll_interval_s)

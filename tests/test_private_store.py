@@ -21,6 +21,7 @@ from private_store.contracts import (
     mailbox_object_key,
     model_prefix,
     parse_activation_pubkey,
+    parse_model_prefix,
     parse_ready_signal,
     ready_signal_payload,
     registration_id,
@@ -125,6 +126,36 @@ def test_model_prefix_requires_canonical_registration():
     assert model_prefix("f" * 64) == f"models/registrations/{'f' * 64}/"
     with pytest.raises(ValueError):
         model_prefix("not-a-digest")
+
+
+def test_retry_attempts_get_their_own_prefix_outside_the_first():
+    rid = "f" * 64
+    first, retry = model_prefix(rid), model_prefix(rid, 2)
+    assert first == f"models/registrations/{rid}/"
+    assert retry == f"models/attempts/{rid}/a2/"
+    assert not retry.startswith(first)
+    assert first.split("/")[2] == rid and retry.split("/")[2] == rid
+    with pytest.raises(ValueError):
+        model_prefix(rid, 0)
+
+
+def test_model_prefix_round_trips_through_parse():
+    rid = "f" * 64
+    for attempt in (1, 2, 3, 9, 10, 47):
+        assert parse_model_prefix(model_prefix(rid, attempt)) == (rid, attempt)
+    for bad in (
+        "",
+        "models/",
+        "models/registrations/",
+        f"models/registrations/{rid}",
+        f"models/registrations/{rid}/a2/",  # retries never nest under the first attempt
+        f"models/attempts/{rid}/a1/",  # attempt 1 has exactly one spelling
+        f"models/attempts/{rid}/a0/",
+        f"models/attempts/{rid}/",
+        f"models/attempts/{'z' * 64}/a2/",
+    ):
+        with pytest.raises(ValueError):
+            parse_model_prefix(bad)
 
 
 # --- temporary credentials ---------------------------------------------------
@@ -305,10 +336,16 @@ class FakeBody:
 
 
 class FakeS3:
+    _EPOCH = datetime(2026, 9, 1, tzinfo=timezone.utc)
+
     def __init__(self) -> None:
         self.objects: dict[tuple[str, str], tuple[bytes, dict[str, str]]] = {}
         self.multipart: list[dict[str, str]] = []
         self.deleted: list[str] = []
+        self.modified: dict[tuple[str, str], datetime] = {}
+
+    def _stamp(self, bucket: str, key: str) -> datetime:
+        return self.modified.get((bucket, key), self._EPOCH)
 
     def put(self, bucket: str, key: str, data: bytes, *, sha256: str | None = None) -> None:
         metadata = {"sha256": sha256 or hashlib.sha256(data).hexdigest()}
@@ -341,7 +378,12 @@ class FakeS3:
 
     def list_objects_v2(self, Bucket: str, Prefix: str, **_: object):
         contents = [
-            {"Key": key, "Size": len(data), "ETag": f'"{hashlib.md5(data).hexdigest()}"'}
+            {
+                "Key": key,
+                "Size": len(data),
+                "ETag": f'"{hashlib.md5(data).hexdigest()}"',
+                "LastModified": self._stamp(bucket, key),
+            }
             for (bucket, key), (data, _meta) in sorted(self.objects.items())
             if bucket == Bucket and key.startswith(Prefix)
         ]
@@ -495,8 +537,8 @@ def test_verify_manifest_enforces_quota_and_aborts_leftover_multipart():
             submission_pubkey=SUBMISSION_PUBKEY,
             expected_manifest_sha256=manifest.manifest_sha256,
         )
-    # a leftover incomplete multipart (killed/retried upload) must NOT fail an otherwise
-    # complete submission — verify aborts the garbage and proceeds to accept the upload.
+    # a leftover incomplete multipart (killed upload) must NOT fail an otherwise
+    # complete submission: it is invisible to the object inventory either way.
     s3b, controller_b, manifest_b, registration_b, hotkey_b, prefix_b = seeded_controller()
     s3b.multipart.append({"Key": f"{prefix_b}model-inflight", "UploadId": "u1"})
     verified = controller_b.verify_manifest(
@@ -507,7 +549,7 @@ def test_verify_manifest_enforces_quota_and_aborts_leftover_multipart():
         expected_manifest_sha256=manifest_b.manifest_sha256,
     )
     assert verified.manifest.registration_id == registration_b
-    assert s3b.multipart == []  # leftover aborted during verify
+    assert s3b.multipart == [{"Key": f"{prefix_b}model-inflight", "UploadId": "u1"}]
 
 
 def test_cleanup_model_prefix_removes_everything_once():
@@ -535,10 +577,29 @@ def test_cleanup_refuses_non_registration_prefixes():
         "models/registrations/",
         f"models/registrations/{'z' * 64}/",
         prefix[:-1],
+        f"models/attempts/{'a' * 64}/a1/",  # not canonical: attempt 1 is the bare prefix
+        f"models/attempts/{'a' * 64}/",
     ]
     for bad in bad_prefixes:
         with pytest.raises(ValueError, match="refusing to bulk-delete"):
             controller.cleanup_model_prefix(bad)
+
+
+def test_cleanup_accepts_a_retry_prefix():
+    s3, controller, _m, registration_id, _h, _prefix = seeded_controller()
+    retry = model_prefix(registration_id, 2)
+    s3.put(BUCKET, f"{retry}model.safetensors", b"retry-bytes")
+    assert controller.cleanup_model_prefix(retry) == 1
+
+
+def test_retained_uploads_inventories_every_attempt():
+    s3, controller, _m, registration_id, _h, prefix = seeded_controller()
+    retry = model_prefix(registration_id, 2)
+    s3.put(BUCKET, f"{retry}model.safetensors", b"retry-bytes")
+    s3.put(BUCKET, "models/registrations/not-a-registration", b"stray")
+    held = controller.retained_uploads()
+    assert set(held) == {prefix, retry}
+    assert all(value is not None for value in held.values())
     # the seeded objects are untouched by the rejected deletes
     assert controller.cleanup_model_prefix(prefix) == 5
 

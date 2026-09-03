@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from nacl.signing import SigningKey
@@ -67,9 +68,8 @@ class FakeConn:
         self.used = used
         self.age_s = age_s
         self.submission_id = None
-        self.reapable: list[dict] = []  # loser rows the DB's ORDER BY/OFFSET would return
-        self.last_offset = None
         self.sanity_blocked = False
+        self.protected: list[dict] = []  # rows the reaper's guard query returns
 
     def transaction(self):
         return _Ctx(self)
@@ -91,11 +91,13 @@ class FakeConn:
                 "activation_block": args[4],
                 "submission_pubkey": args[5],
                 "state": "ACTIVATED",
+                "attempt_count": 1,  # schema default
                 "ready_block": None,
                 "ready_block_hash": None,
                 "manifest_sha256": None,
                 "model_digest": None,
                 "parent_token_id": None,
+                "model_prefix": None,
                 "submission_id": None,
                 "fault_message": None,
             }
@@ -128,10 +130,8 @@ class FakeConn:
         return None
 
     async def fetch(self, sql, *args):
-        if "COMPLETE_LOSS" in sql:
-            assert "OFFSET" in sql and "DESC" in sql  # keep N most recent
-            self.last_offset = args[0]
-            return self.reapable
+        if "LEFT JOIN model_submissions" in sql:  # _protected_prefixes query
+            return self.protected
         if "TERMINAL_INVALID" in sql:  # resubmit_terminal query
             row = self.registration
             if (
@@ -150,7 +150,9 @@ class FakeConn:
 
     async def execute(self, sql, *args):
         if "SET state = 'CREDENTIALED'" in sql:
-            self.registration.update(state="CREDENTIALED", parent_token_id=args[1])
+            self.registration.update(
+                state="CREDENTIALED", parent_token_id=args[1], model_prefix=args[3]
+            )
         elif "SET state = 'REVOKED'" in sql:
             self.registration["state"] = "REVOKED"
         elif "SET state = 'FAILED'" in sql:
@@ -159,15 +161,13 @@ class FakeConn:
             self.registration.update(state="SUBMITTED", model_digest=args[1], submission_id=args[2])
         elif "SET state = 'ACTIVATED'" in sql:
             self.registration.update(
+                model_prefix=None,
                 state="ACTIVATED",
                 attempt_count=self.registration["attempt_count"] + 1,
                 submission_id=None,
                 ready_block=None,
                 manifest_sha256=None,
             )
-        elif "SET state = 'REAPED'" in sql:
-            self.reaped = getattr(self, "reaped", [])
-            self.reaped.append(args[0])
         elif "SET updated_at" in sql:
             pass
         else:
@@ -198,9 +198,14 @@ class FakeGateway:
         self.revoked.append(token_id)
 
 
-def make_deps(s3: FakeS3, gateway: FakeGateway | None = None) -> controller.Deps:
+def make_deps(
+    s3: FakeS3, gateway: FakeGateway | None = None, *, retention_hours: float | None = None
+) -> controller.Deps:
+    settings = SETTINGS
+    if retention_hours is not None:
+        settings = SETTINGS.model_copy(update={"retention_hours": retention_hours})
     return controller.Deps(
-        settings=SETTINGS,
+        settings=settings,
         gateway=gateway or FakeGateway(),
         mailbox=MailboxStore(s3, bucket=SETTINGS.mailbox_bucket_name),
         uploads=R2UploadController(
@@ -298,6 +303,8 @@ def _seeded_row() -> dict:
         "activation_block": 100,
         "submission_pubkey": SUBMISSION_PUBKEY.hex(),
         "state": "ACTIVATED",
+        "attempt_count": 1,  # decides which prefix this attempt owns
+        "model_prefix": None,  # set by _credential; NULL rows fall back to attempt 1's prefix
         "ready_block": None,
         "ready_block_hash": None,
         "manifest_sha256": None,
@@ -368,7 +375,7 @@ def test_controller_runs_the_full_lifecycle(monkeypatch):
     assert not asyncio.run(controller.tick(pool, deps))
 
 
-def test_controller_fails_and_cleans_up_a_bad_upload():
+def test_controller_fails_a_bad_upload_but_keeps_its_bytes():
     s3 = FakeS3()
     s3.put(BUCKET, f"{PREFIX}model.safetensors", b"whatever")
     row = _seeded_row()
@@ -377,7 +384,82 @@ def test_controller_fails_and_cleans_up_a_bad_upload():
     assert asyncio.run(controller.tick(FakePool(conn), make_deps(s3)))
     assert conn.registration["state"] == "FAILED"
     assert "manifest.json" in conn.registration["fault_message"]
-    assert not [k for k in s3.objects if k[1].startswith(PREFIX)]
+    # only the capacity reaper deletes; a verification failure keeps what was uploaded
+    assert [k for k in s3.objects if k[1].startswith(PREFIX)]
+
+
+def test_a_retry_uploads_beside_the_previous_attempt_and_both_survive(monkeypatch):
+    """A granted retry must not cost the miner the model it already uploaded.
+
+    Attempt 1 is verified and evaluated, comes back TERMINAL_INVALID, and a retry is
+    granted. Attempt 2 uploads to its own prefix and verifies, while attempt 1's bytes
+    remain for the capacity reaper to decide on later.
+    """
+    s3 = FakeS3()
+    files = model_files()
+    first = build_manifest(SUBMISSION_KEY, HOTKEY, RID, files)
+    for path, data in files.items():
+        s3.put(BUCKET, f"{PREFIX}{path}", data)
+    s3.put(BUCKET, f"{PREFIX}manifest.json", first.as_bytes())
+
+    # attempt 1 was verified and then failed evaluation
+    row = _seeded_row()
+    row.update(
+        state="SUBMITTED",
+        submission_state="TERMINAL_INVALID",
+        submission_id=uuid.uuid4(),
+        fault_code=None,
+    )
+    conn = FakeConn(row)
+    pool = FakePool(conn)
+    deps = make_deps(s3)
+
+    assert asyncio.run(controller.resubmit_terminal(pool, deps)) == 1
+    assert conn.registration["attempt_count"] == 2
+    assert [k for k in s3.objects if k[1].startswith(PREFIX)]  # attempt 1 retained
+
+    # attempt 2 gets credentials for a prefix of its own
+    retry_prefix = model_prefix(RID, 2)
+    assert asyncio.run(controller.tick(pool, deps))
+    assert conn.registration["state"] == "CREDENTIALED"
+    ciphertext, _meta = s3.objects[(SETTINGS.mailbox_bucket_name, mailbox_object_key(RID, 1))]
+    envelope = MailboxCipher.decrypt_for_miner(ciphertext, SUBMISSION_KEY)
+    assert envelope["allowed_prefix"] == retry_prefix
+    assert envelope["allowed_prefix"].split("/")[2] == RID  # what the miner CLI checks
+
+    # the miner uploads a different model to the retry prefix
+    second_files = {**files, "model.safetensors": b"second attempt weights"}
+    second = build_manifest(SUBMISSION_KEY, HOTKEY, RID, second_files)
+    for path, data in second_files.items():
+        s3.put(BUCKET, f"{retry_prefix}{path}", data)
+    s3.put(BUCKET, f"{retry_prefix}manifest.json", second.as_bytes())
+    conn.registration.update(
+        state="READY",
+        manifest_sha256=second.manifest_sha256,
+        ready_block=300,
+        ready_block_hash="0xabc300",
+    )
+    assert asyncio.run(controller.tick(pool, deps))  # -> REVOKED
+
+    recorded = []
+
+    async def _fake_insert(pool_arg, commits):
+        recorded.extend(commits)
+        return len(commits)
+
+    monkeypatch.setattr(controller.chain_db, "insert_new_commits", _fake_insert)
+    conn.submission_id = uuid.uuid4()
+    assert asyncio.run(controller.tick(pool, deps))
+    assert conn.registration["state"] == "SUBMITTED"
+
+    (commit,) = recorded
+    assert commit.model_uri == (
+        f"s3://{BUCKET}/models/attempts/{RID}/a2@sha256:{second.model_digest}"
+    )
+    # both attempts hold their own objects
+    assert [k for k in s3.objects if k[1].startswith(PREFIX)]
+    assert [k for k in s3.objects if k[1].startswith(retry_prefix)]
+    assert first.model_digest != second.model_digest
 
 
 def test_controller_retries_transient_failures_without_burning_state():
@@ -403,12 +485,14 @@ def test_sweep_kills_a_petabyte_uploader_in_the_credentialed_window():
     assert conn.registration["state"] == "FAILED"
     assert "quota abused" in conn.registration["fault_message"]
     assert deps.gateway.revoked == ["tok-1"]
-    assert not [k for k in s3.objects if k[1].startswith(PREFIX)]
+    # access is revoked, but the bytes stay for the capacity reaper to judge
+    assert [k for k in s3.objects if k[1].startswith(PREFIX)]
 
 
 def test_sweep_abandons_a_miner_who_uploads_but_never_sends_ready():
     s3 = FakeS3()
     s3.put(BUCKET, f"{PREFIX}model.safetensors", b"x" * 100)  # a fine upload, just no ready
+    s3.multipart.append({"Key": f"{PREFIX}model-inflight", "UploadId": "u1"})
     row = _seeded_row()
     row.update(state="CREDENTIALED", parent_token_id="tok-1")
     deps = make_deps(s3)
@@ -418,7 +502,10 @@ def test_sweep_abandons_a_miner_who_uploads_but_never_sends_ready():
     assert conn.registration["state"] == "FAILED"
     assert "upload window expired" in conn.registration["fault_message"]
     assert deps.gateway.revoked == ["tok-1"]
-    assert not [k for k in s3.objects if k[1].startswith(PREFIX)]
+    assert [k for k in s3.objects if k[1].startswith(PREFIX)]  # completed bytes retained
+    # the unfinished multipart is aborted: it holds no listed object, so the capacity reaper
+    # could never see it and it would otherwise occupy storage forever
+    assert not s3.multipart
 
 
 def test_sweep_leaves_honest_in_window_uploaders_alone():
@@ -433,25 +520,62 @@ def test_sweep_leaves_honest_in_window_uploaders_alone():
     assert deps.gateway.revoked == []
 
 
-def test_reap_losers_wipes_prefix_and_marks_reaped():
+def _aged(s3: FakeS3, prefix: str, hours: float) -> None:
+    key = f"{prefix}model.safetensors"
+    s3.put(BUCKET, key, b"x" * 500)
+    s3.modified[(BUCKET, key)] = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+
+def _held(s3: FakeS3, prefix: str) -> bool:
+    return bool([k for k in s3.objects if k[1].startswith(prefix)])
+
+
+def test_reaper_deletes_uploads_older_than_the_retention_window():
     s3 = FakeS3()
-    old_loser = "c" * 64  # a loss beyond the keep window
-    s3.put(BUCKET, f"{model_prefix(old_loser)}model.safetensors", b"x" * 500)
+    stale, older, fresh = "a" * 64, "b" * 64, "c" * 64
+    for rid, hours in ((stale, 100), (older, 80), (fresh, 1)):
+        _aged(s3, model_prefix(rid), hours)
+    assert asyncio.run(controller.reap_expired(FakePool(FakeConn()), make_deps(s3))) == 2
+    assert not _held(s3, model_prefix(stale)) and not _held(s3, model_prefix(older))
+    assert _held(s3, model_prefix(fresh))
+
+
+def test_reaper_noop_when_everything_is_within_the_window():
+    s3 = FakeS3()
+    _aged(s3, model_prefix("c" * 64), 71)
+    assert asyncio.run(controller.reap_expired(FakePool(FakeConn()), make_deps(s3))) == 0
+    assert _held(s3, model_prefix("c" * 64))
+
+
+def test_reaper_spares_uploads_a_live_registration_still_needs():
+    """Old but still queued, evaluating, or a winner: the guard keeps it; an old loser goes."""
+    s3 = FakeS3()
+    live, loser = "a" * 64, "b" * 64
+    _aged(s3, model_prefix(live), 100)
+    _aged(s3, model_prefix(loser), 100)
     conn = FakeConn()
-    conn.reapable = [{"id": 7, "registration_id": old_loser}]
-    deps = make_deps(s3)
-
-    reaped = asyncio.run(controller.reap_losers(FakePool(conn), deps))
-    assert reaped == 1
-    assert conn.last_offset == deps.settings.keep_recent_losers  # asks the DB to keep N
-    assert conn.reaped == [7]  # row kept as REAPED (audit trail)
-    assert not [k for k in s3.objects if k[1].startswith(model_prefix(old_loser))]
+    conn.protected = [{"registration_id": live, "attempt_count": 1, "model_prefix": None}]
+    assert asyncio.run(controller.reap_expired(FakePool(conn), make_deps(s3))) == 1
+    assert _held(s3, model_prefix(live))
+    assert not _held(s3, model_prefix(loser))
 
 
-def test_reap_losers_noop_when_within_the_keep_window():
-    conn = FakeConn()
-    conn.reapable = []  # OFFSET keep returned nothing → all losses still within window
-    assert asyncio.run(controller.reap_losers(FakePool(conn), make_deps(FakeS3()))) == 0
+def test_reaper_evicts_an_old_earlier_attempt_but_keeps_the_fresh_retry():
+    s3 = FakeS3()
+    rid, other = "a" * 64, "b" * 64
+    _aged(s3, model_prefix(rid), 100)  # attempt 1 lost long ago
+    _aged(s3, model_prefix(rid, 2), 1)  # the retry is fresh
+    _aged(s3, model_prefix(other), 1)
+    assert asyncio.run(controller.reap_expired(FakePool(FakeConn()), make_deps(s3))) == 1
+    assert not _held(s3, model_prefix(rid))
+    assert _held(s3, model_prefix(rid, 2)) and _held(s3, model_prefix(other))
+
+
+def test_retention_window_is_configurable():
+    s3 = FakeS3()
+    _aged(s3, model_prefix("d" * 64), 10)
+    deps = make_deps(s3, retention_hours=5)
+    assert asyncio.run(controller.reap_expired(FakePool(FakeConn()), deps)) == 1
 
 
 def _submitted_row(
@@ -463,6 +587,7 @@ def _submitted_row(
         "hotkey": HOTKEY,
         "state": "SUBMITTED",
         "attempt_count": attempt,
+        "model_prefix": None,
         "submission_state": sub_state,  # models the JOIN to model_submissions.state
         "fault_code": fault_code,
         "activation_block": 100,
@@ -479,7 +604,9 @@ def test_resubmit_terminal_grants_retry_on_invalid():
     assert conn.registration["state"] == "ACTIVATED"  # back for another attempt
     assert conn.registration["attempt_count"] == 2
     assert conn.registration["submission_id"] is None
-    assert not [k for k in s3.objects if k[1].startswith(PREFIX)]  # old bytes wiped
+    # the previous attempt is retained; the next one uploads to its own prefix
+    assert [k for k in s3.objects if k[1].startswith(PREFIX)]
+    assert model_prefix(RID, 2) != PREFIX
 
 
 def test_resubmit_terminal_stops_at_max_attempts():

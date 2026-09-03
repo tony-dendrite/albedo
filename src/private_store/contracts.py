@@ -15,6 +15,10 @@ _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_ID = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{40,64}$")
 _ACTIVATION = re.compile(r"^r2activate:v1:(?P<pubkey>[A-Za-z0-9_-]{43})$")
 _READY_SIGNAL = re.compile(r"^r2ready:v1:(?P<manifest_sha256>[0-9a-f]{64})$")
+CANONICAL_MODEL_PREFIX = re.compile(
+    r"^models/(?:registrations/(?P<first>[0-9a-f]{64})"
+    r"|attempts/(?P<retry>[0-9a-f]{64})/a(?P<attempt>[2-9]|[1-9][0-9]+))/$"
+)
 
 
 def _require_hash(value: str, field: str) -> str:
@@ -53,9 +57,28 @@ def registration_id(*, netuid: int, hotkey: str, chain_generation: str) -> str:
     return hashlib.sha256(b"albedo-registration-v1\0" + body).hexdigest()
 
 
-def model_prefix(registration_id: str) -> str:
+def model_prefix(registration_id: str, attempt: int = 1) -> str:
+    """Return the R2 key prefix owning one upload attempt.
+
+    Attempt 1 lives at `models/registrations/<rid>/` and retries under a sibling
+    root, so no attempt's prefix contains another's: clearing one never touches the
+    others, and each attempt's objects are inventoried on their own.
+    """
     _require_hash(registration_id, "registration_id")
-    return f"models/registrations/{registration_id}/"
+    if attempt < 1:
+        raise ValueError("upload attempt must start at one")
+    if attempt == 1:
+        return f"models/registrations/{registration_id}/"
+    return f"models/attempts/{registration_id}/a{attempt}/"
+
+
+def parse_model_prefix(prefix: str) -> tuple[str, int]:
+    """Recover (registration_id, attempt) from a prefix; the inverse of model_prefix."""
+    match = CANONICAL_MODEL_PREFIX.fullmatch(prefix)
+    if match is None:
+        raise ValueError(f"not a canonical model prefix: {prefix!r}")
+    attempt = match["attempt"]
+    return (match["first"] or match["retry"]), int(attempt) if attempt else 1
 
 
 def activation_signal_payload(submission_pubkey: bytes) -> str:

@@ -7,12 +7,14 @@ credentials; upload access is revoked before any verification runs.
 
 from private_store.cloudflare import CloudflareR2TokenGateway, ParentToken
 from private_store.contracts import (
+    CANONICAL_MODEL_PREFIX,
     Manifest,
     ManifestFile,
     activation_signal_payload,
     mailbox_object_key,
     model_prefix,
     parse_activation_pubkey,
+    parse_model_prefix,
     parse_ready_signal,
     ready_signal_payload,
     registration_id,
@@ -35,6 +37,7 @@ from private_store.storage import MailboxStore, R2UploadController, UploadQuotaE
 
 __all__ = [
     "ArtifactIntegrityError",
+    "CANONICAL_MODEL_PREFIX",
     "CloudflareR2TokenGateway",
     "MailboxCipher",
     "MailboxStore",
@@ -52,6 +55,7 @@ __all__ = [
     "model_digest_from_inventory",
     "model_prefix",
     "parse_activation_pubkey",
+    "parse_model_prefix",
     "parse_ready_signal",
     "ready_signal_payload",
     "registration_id",

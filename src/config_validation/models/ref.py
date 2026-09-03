@@ -13,13 +13,19 @@ BACKEND_S3 = "s3"
 _HIPPIUS_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GIT_SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
 _GIT_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_S3_REPO_RE = re.compile(r"^s3://[a-z0-9][a-z0-9.-]*/models/registrations/[0-9a-f]{64}$")
+_S3_REPO_RE = re.compile(
+    r"^s3://[a-z0-9][a-z0-9.-]*/models/"
+    r"(?:registrations/[0-9a-f]{64}|attempts/[0-9a-f]{64}/a(?:[2-9]|[1-9][0-9]+))$"
+)
+_S3_ATTEMPT_RE = re.compile(r"/models/attempts/(?P<rid>[0-9a-f]{64})/a(?P<attempt>[0-9]+)$")
 
 
 def cache_repo(repo: str) -> str:
-    """Two-level cache path key: s3 prefixes flatten to '<bucket>/<registration>'."""
     if repo.startswith("s3://"):
         bucket, _, rest = repo.removeprefix("s3://").partition("/")
+        attempt = _S3_ATTEMPT_RE.search(f"/{rest.rstrip('/')}")
+        if attempt is not None:
+            return f"{bucket}/{attempt['rid']}-a{attempt['attempt']}"
         return f"{bucket}/{rest.rstrip('/').rpartition('/')[2]}"
     return repo
 

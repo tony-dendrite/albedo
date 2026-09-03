@@ -8,7 +8,7 @@ from typing import Any, Iterable, Mapping
 
 from botocore.exceptions import ClientError
 
-from private_store.contracts import Manifest
+from private_store.contracts import CANONICAL_MODEL_PREFIX, Manifest, parse_model_prefix
 from private_store.crypto import verify_ed25519
 from private_store.digests import ArtifactIntegrityError
 
@@ -28,7 +28,7 @@ class MailboxInvariantError(RuntimeError):
 MAX_MINER_UPLOAD_BYTES = 100_000_000_000
 MAX_MINER_UPLOAD_OBJECTS = 4096  # a real model is <200 files; caps HEAD/list fan-out
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
-_CANONICAL_PREFIX = re.compile(r"^models/registrations/[0-9a-f]{64}/$")
+MODEL_PREFIX_ROOTS = ("models/registrations/", "models/attempts/")
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +74,7 @@ class MailboxStore:
             Key=key,
             Body=ciphertext,
             ContentType="application/octet-stream",
+            CacheControl="no-store, max-age=0",
             Metadata={"sha256": self._digest(ciphertext)},
         )
 
@@ -262,9 +263,12 @@ class R2UploadController:
         submission_pubkey: bytes,
         expected_manifest_sha256: str,
     ) -> VerifiedManifest:
-        if model_prefix != f"models/registrations/{registration_id}/":
+        try:
+            prefix_registration_id, _attempt = parse_model_prefix(model_prefix)
+        except ValueError as exc:
+            raise ArtifactIntegrityError(f"registration model prefix is not canonical: {exc}")
+        if prefix_registration_id != registration_id:
             raise ArtifactIntegrityError("registration model prefix is not canonical")
-        self.abort_multipart_uploads(model_prefix)
         objects = self._list_objects(self.private_model_bucket, model_prefix)
         if len(objects) > MAX_MINER_UPLOAD_OBJECTS:
             raise UploadQuotaExceeded(
@@ -342,8 +346,34 @@ class R2UploadController:
             etags[item.path] = etag or listed_etag
         return VerifiedManifest(manifest=manifest, manifest_sha256=manifest_digest)
 
+    def retained_uploads(self) -> dict[str, Any]:
+        """Map every prefix that still holds objects to its newest LastModified.
+
+        The bucket, not the database, is the authority on what occupies storage: one
+        registration can own several attempt prefixes, and a prefix orphaned by a
+        crashed flow has no row at all. The newest object in a prefix is also when
+        that upload finished, so no separate age column is needed.
+        """
+        newest: dict[str, Any] = {}
+        for root in MODEL_PREFIX_ROOTS:
+            nested = root.endswith("attempts/")
+            for key, item in self._list_objects(self.private_model_bucket, root).items():
+                registration_id, _, rest = key[len(root) :].partition("/")
+                attempt, _, tail = rest.partition("/")
+                if not rest or (nested and not tail):
+                    continue
+                prefix = f"{root}{registration_id}/" + (f"{attempt}/" if nested else "")
+                if not CANONICAL_MODEL_PREFIX.fullmatch(prefix):
+                    continue
+                modified = item.get("LastModified")
+                if modified is None:
+                    continue
+                current = newest.get(prefix)
+                newest[prefix] = modified if current is None else max(current, modified)
+        return newest
+
     def abort_multipart_uploads(self, model_prefix: str) -> int:
-        if not _CANONICAL_PREFIX.fullmatch(model_prefix):
+        if not CANONICAL_MODEL_PREFIX.fullmatch(model_prefix):
             raise ValueError(f"refusing to bulk-abort a non-registration prefix: {model_prefix!r}")
         aborted = 0
         for upload in self._multipart_uploads(model_prefix):
@@ -356,7 +386,7 @@ class R2UploadController:
         return aborted
 
     def cleanup_model_prefix(self, model_prefix: str) -> int:
-        if not _CANONICAL_PREFIX.fullmatch(model_prefix):
+        if not CANONICAL_MODEL_PREFIX.fullmatch(model_prefix):
             raise ValueError(f"refusing to bulk-delete a non-registration prefix: {model_prefix!r}")
         # Abort dangling multipart uploads too — otherwise a prefix whose only content is an
         # unfinished multipart (e.g. a verify-FAILED submission) leaks R2 storage forever.

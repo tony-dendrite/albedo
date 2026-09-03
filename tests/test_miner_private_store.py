@@ -174,6 +174,44 @@ def test_fetch_credentials_polls_decrypts_and_persists(tmp_path, monkeypatch):
     assert oct(saved.stat().st_mode)[-3:] == "600"
 
 
+def test_fetch_credentials_accepts_a_retry_envelope(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(mp, "MAILBOX_BASE_URL", "https://pub.example.r2.dev")
+    retry_prefix = model_prefix(RID, 2)
+    cipher = MailboxCipher(SigningKey(b"v" * 32))
+    ciphertext, _ = cipher.create_ciphertext(
+        submission_pubkey=SUBMISSION_PUBKEY,
+        hotkey=HOTKEY,
+        netuid=97,
+        registration_id=RID,
+        generation=1,
+        endpoint="https://account.r2.cloudflarestorage.com",
+        private_model_bucket=BUCKET,
+        allowed_prefix=retry_prefix,
+        access_key_id="tok",
+        secret_access_key="sec",
+        session_token="sess",
+        expires_at=datetime(2026, 9, 4, tzinfo=timezone.utc),
+        chain_generation="albedo-mainnet-1",
+    )
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return ciphertext
+
+    monkeypatch.setattr(mp.urllib.request, "urlopen", lambda request, timeout: _Resp())
+    envelope = mp.fetch_credentials(
+        hotkey_ss58=HOTKEY, registration_id=RID, signing_key=SUBMISSION_KEY
+    )
+    assert envelope["allowed_prefix"] == f"models/attempts/{RID}/a2/"
+
+
 def test_fetch_credentials_rejects_a_mismatched_envelope(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(mp, "MAILBOX_BASE_URL", "https://pub.example.r2.dev")

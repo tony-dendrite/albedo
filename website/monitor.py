@@ -486,7 +486,7 @@ def _private_verification_fails(conn, *, limit: int) -> list[dict[str, Any]]:
     bucket = os.environ.get("R2_PRIVATE_MODELS_BUCKET_NAME", "albedo-private-models")
     rows = conn.execute(
         """
-        SELECT registration_id, hotkey, uid, fault_message, updated_at
+        SELECT registration_id, hotkey, uid, fault_message, updated_at, attempt_count
         FROM private_registrations
         WHERE state = 'FAILED'
         ORDER BY updated_at DESC
@@ -498,7 +498,12 @@ def _private_verification_fails(conn, *, limit: int) -> list[dict[str, Any]]:
         {
             "submission_id": row["registration_id"],
             "eval_run_id": None,
-            "model_uri": f"s3://{bucket}/models/registrations/{row['registration_id']}",
+            "model_uri": f"s3://{bucket}/"
+            + (
+                f"models/registrations/{row['registration_id']}"
+                if row["attempt_count"] == 1
+                else f"models/attempts/{row['registration_id']}/a{row['attempt_count']}"
+            ),
             "hotkey": row["hotkey"],
             "uid": row["uid"],
             "state": "TERMINAL_INVALID",
