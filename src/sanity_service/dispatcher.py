@@ -84,6 +84,7 @@ from sanity_service.chain import (
 )
 from sanity_service.dataset import sample_prompts
 from sanity_service.db import ClaimedPreEval, PreEvalRepository
+from sanity_service.head_check import run_head_check
 from sanity_service.judge_panel import make_client
 from sanity_service.llm_check import SampleInput, run_gate
 from sanity_service.remote_client import SanityRemoteClient
@@ -119,6 +120,7 @@ class _TrajectoryState:
     submit_marker: str = ""
     rewrite_mode: str = ""
     submit_lint_flag: str = ""
+    head_check_flag: str = ""
     micro: dict[str, str] | None = None
     nudged_at: int = 0
     submits: list[dict[str, Any]] = dataclasses.field(default_factory=list)
@@ -339,7 +341,7 @@ class SanityDispatcher:
                 return failed_results[0]
             if not decided_early:
                 _run_chain_checks(states, turn_count)
-                await run_tail_check(states)
+                await asyncio.gather(run_tail_check(states), run_head_check(states))
             return _trajectory_result(str(claimed.attempt_id), states, turn_count)
         finally:
             if kept_warm:
@@ -1359,6 +1361,7 @@ def _trajectory_result(
             # state.error is a chain-infra failure (evaluator/simulator), never model behavior
             "infra": bool(state.error),
             "submit_lint": state.submit_lint_flag,
+            "head_check": state.head_check_flag,
         }
         for state in states
     ]
