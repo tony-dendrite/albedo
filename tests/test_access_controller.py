@@ -104,6 +104,7 @@ class FakeConn:
                 row
                 and row["state"] in ("ACTIVATED", "CREDENTIALED")
                 and row["submission_pubkey"] != args[1]
+                and args[2] > row["activation_block"]  # only a newer activate re-keys
                 and row["attempt_count"] < args[3]
             ):
                 return None
@@ -240,10 +241,12 @@ def _pin_settings(monkeypatch):
     monkeypatch.setattr(intake, "_settings", lambda: SETTINGS)
 
 
-def _activate_signal(payload: str | None = None, uid: int | None = 5) -> PrivateSignal:
+def _activate_signal(
+    payload: str | None = None, uid: int | None = 5, block: int = 100
+) -> PrivateSignal:
     if payload is None:
         payload = activation_signal_payload(SUBMISSION_PUBKEY)
-    return PrivateSignal("activate", 97, 100, uid, HOTKEY, payload)
+    return PrivateSignal("activate", 97, block, uid, HOTKEY, payload)
 
 
 # --- intake ------------------------------------------------------------------
@@ -271,12 +274,13 @@ def test_intake_rekeys_a_credentialed_registration_as_a_new_attempt():
     conn = FakeConn(row)
     new_key = bytes(SigningKey(b"n" * 32).verify_key)
 
-    assert _apply(conn, [_activate_signal(activation_signal_payload(new_key))]) == 1
+    assert _apply(conn, [_activate_signal(activation_signal_payload(new_key), block=150)]) == 1
     assert conn.registration["state"] == "ACTIVATED"
     assert conn.registration["attempt_count"] == 2
     assert conn.registration["submission_pubkey"] == new_key.hex()
+    assert conn.registration["activation_block"] == 150  # forward only
     # re-scan of that same signal is a no-op
-    assert _apply(conn, [_activate_signal(activation_signal_payload(new_key))]) == 0
+    assert _apply(conn, [_activate_signal(activation_signal_payload(new_key), block=150)]) == 0
 
     deps = make_deps(s3)
     deps.uploads.max_upload_bytes = 600  # attempt 1's bytes alone would breach a shared quota
@@ -286,6 +290,17 @@ def test_intake_rekeys_a_credentialed_registration_as_a_new_attempt():
     assert conn.registration["model_prefix"] == model_prefix(RID, 2)  # own prefix
     assert [k for k in s3.objects if k[1].startswith(PREFIX)]  # attempt 1 untouched
     assert deps.uploads.quota_breach(model_prefix(RID, 2)) is None  # counted separately
+
+
+def test_intake_ignores_replayed_older_activates():
+    row = _seeded_row()
+    row.update(state="CREDENTIALED", parent_token_id="tok-1", activation_block=500)
+    conn = FakeConn(row)
+    old_key = bytes(SigningKey(b"o" * 32).verify_key)
+    assert _apply(conn, [_activate_signal(activation_signal_payload(old_key), block=100)]) == 0
+    assert conn.registration["attempt_count"] == 1
+    assert conn.registration["submission_pubkey"] == SUBMISSION_PUBKEY.hex()
+    assert conn.registration["activation_block"] == 500
 
 
 def test_intake_ignores_a_new_key_once_ready_done_or_out_of_attempts():

@@ -80,6 +80,7 @@ async def _apply_activate(pool: asyncpg.Pool, signal: PrivateSignal) -> int:
             WHERE registration_id = $1
               AND state IN ('ACTIVATED', 'CREDENTIALED')
               AND submission_pubkey <> $2
+              AND $3 > activation_block
               AND attempt_count < $4
             RETURNING attempt_count
             """,

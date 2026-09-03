@@ -451,11 +451,10 @@ def _fails(conn, *, limit: int, base: str, model_filter: str) -> list[dict[str, 
                 ORDER BY er.started_at DESC NULLS LAST LIMIT 1) AS eval_run_id
         FROM model_submissions ms
         WHERE ms.state = ANY(%s)
-          AND (ms.model_uri LIKE %s OR ms.model_uri LIKE %s)
         ORDER BY ms.updated_at DESC
         LIMIT %s
         """,
-        (list(FAIL_STATES), f"%{model_filter}%", _PRIVATE_URI_LIKE, limit),
+        (list(FAIL_STATES), limit),
     ).fetchall()
     artifacts = _artifacts_for(conn, [row["submission_id"] for row in rows], base)
     fails = [
