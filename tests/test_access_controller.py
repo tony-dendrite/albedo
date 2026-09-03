@@ -75,10 +75,6 @@ class FakeConn:
         return _Ctx(self)
 
     async def fetchval(self, sql, *args):
-        if "used_hotkeys" in sql:
-            return 1 if self.used else None
-        if "sanity_results" in sql:
-            return 1 if self.sanity_blocked else None
         if "INSERT INTO private_registrations" in sql:
             if self.registration is not None:
                 return None
@@ -102,6 +98,28 @@ class FakeConn:
                 "fault_message": None,
             }
             return 1
+        if "attempt_count = attempt_count + 1" in sql and "submission_pubkey = $2" in sql:  # re-key
+            row = self.registration
+            if not (
+                row
+                and row["state"] in ("ACTIVATED", "CREDENTIALED")
+                and row["submission_pubkey"] != args[1]
+                and row["attempt_count"] < args[3]
+            ):
+                return None
+            row.update(
+                submission_pubkey=args[1],
+                attempt_count=row["attempt_count"] + 1,
+                state="ACTIVATED",
+                activation_block=args[2],
+                credential_expires_at=None,
+                model_prefix=None,
+            )
+            return row["attempt_count"]
+        if "used_hotkeys" in sql:
+            return 1 if self.used else None
+        if "sanity_results" in sql:
+            return 1 if self.sanity_blocked else None
         if "SET state = 'READY'" in sql:
             row = self.registration
             if (
@@ -243,6 +261,46 @@ def test_intake_activates_a_signed_registration():
     assert conn.registration["state"] == "ACTIVATED"
     # re-scan of the same signal is a no-op
     assert _apply(conn, [_activate_signal()]) == 0
+
+
+def test_intake_rekeys_a_credentialed_registration_as_a_new_attempt():
+    s3 = FakeS3()
+    s3.put(BUCKET, f"{PREFIX}model-00001.safetensors", b"x" * 500)  # attempt 1's upload
+    row = _seeded_row()
+    row.update(state="CREDENTIALED", parent_token_id="tok-old")
+    conn = FakeConn(row)
+    new_key = bytes(SigningKey(b"n" * 32).verify_key)
+
+    assert _apply(conn, [_activate_signal(activation_signal_payload(new_key))]) == 1
+    assert conn.registration["state"] == "ACTIVATED"
+    assert conn.registration["attempt_count"] == 2
+    assert conn.registration["submission_pubkey"] == new_key.hex()
+    # re-scan of that same signal is a no-op
+    assert _apply(conn, [_activate_signal(activation_signal_payload(new_key))]) == 0
+
+    deps = make_deps(s3)
+    deps.uploads.max_upload_bytes = 600  # attempt 1's bytes alone would breach a shared quota
+    assert asyncio.run(controller.tick(FakePool(conn), deps))
+    assert conn.registration["state"] == "CREDENTIALED"
+    assert "tok-old" in deps.gateway.revoked  # the previous session's token is dead
+    assert conn.registration["model_prefix"] == model_prefix(RID, 2)  # own prefix
+    assert [k for k in s3.objects if k[1].startswith(PREFIX)]  # attempt 1 untouched
+    assert deps.uploads.quota_breach(model_prefix(RID, 2)) is None  # counted separately
+
+
+def test_intake_ignores_a_new_key_once_ready_done_or_out_of_attempts():
+    new_key = bytes(SigningKey(b"k" * 32).verify_key)
+    for state in ("READY", "REVOKED", "SUBMITTED", "FAILED"):
+        row = _seeded_row()
+        row.update(state=state)
+        conn = FakeConn(row)
+        assert _apply(conn, [_activate_signal(activation_signal_payload(new_key))]) == 0
+        assert conn.registration["state"] == state
+    capped = _seeded_row()
+    capped.update(state="CREDENTIALED", attempt_count=SETTINGS.max_attempts)
+    conn = FakeConn(capped)
+    assert _apply(conn, [_activate_signal(activation_signal_payload(new_key))]) == 0
+    assert conn.registration["attempt_count"] == SETTINGS.max_attempts
 
 
 def test_intake_rejects_malformed_used_hotkeys_and_unregistered():

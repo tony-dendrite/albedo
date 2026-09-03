@@ -126,7 +126,9 @@ def test_a_second_silence_keeps_the_original_answer():
     """If the simulator insists the read is empty, we take it rather than fabricate content."""
     client = _Client(_SILENT, _SILENT)
     assert _simulate(client, _READ) == _SILENT
-    assert len(client.calls) == 2
+    # simulate, must-print retry on the simulation model, then the last-resort evaluator retry
+    assert len(client.calls) == 3
+    assert client.calls[-1]["model"] != client.calls[-2]["model"]
 
 
 def test_the_retry_will_not_accept_a_degenerate_replacement():

@@ -87,6 +87,8 @@ async def _credential(conn: asyncpg.Connection, row: asyncpg.Record, deps: Deps)
     settings = deps.settings
     rid = row["registration_id"]
     prefix = model_prefix(rid, row["attempt_count"])
+    if row["parent_token_id"]:
+        await asyncio.to_thread(deps.gateway.revoke_parent_token, row["parent_token_id"])
     parent = await asyncio.to_thread(deps.gateway.create_parent_token, f"albedo-registration-{rid}")
     temp = create_local_temporary_credentials(
         endpoint=settings.endpoint,

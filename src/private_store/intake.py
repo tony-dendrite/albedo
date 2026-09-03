@@ -68,9 +68,35 @@ async def _apply_activate(pool: asyncpg.Pool, signal: PrivateSignal) -> int:
             signal.block_number,
             submission_pubkey.hex(),
         )
-    if inserted is not None:
-        log.info("[private-store] activated registration {} hotkey {}", rid, signal.hotkey)
-    return int(inserted is not None)
+        if inserted is not None:
+            log.info("[private-store] activated registration {} hotkey {}", rid, signal.hotkey)
+            return 1
+        attempt = await conn.fetchval(
+            """
+            UPDATE private_registrations
+            SET submission_pubkey = $2, attempt_count = attempt_count + 1, state = 'ACTIVATED',
+                activation_block = $3, credential_expires_at = NULL, model_prefix = NULL,
+                updated_at = now()
+            WHERE registration_id = $1
+              AND state IN ('ACTIVATED', 'CREDENTIALED')
+              AND submission_pubkey <> $2
+              AND attempt_count < $4
+            RETURNING attempt_count
+            """,
+            rid,
+            submission_pubkey.hex(),
+            signal.block_number,
+            settings.max_attempts,
+        )
+    if attempt is None:
+        return 0
+    log.info(
+        "[private-store] re-keyed registration {} hotkey {} — attempt {}",
+        rid,
+        signal.hotkey,
+        attempt,
+    )
+    return 1
 
 
 async def _apply_ready(pool: asyncpg.Pool, signal: PrivateSignal) -> int:
