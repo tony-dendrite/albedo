@@ -202,6 +202,8 @@ def hub_repo_url(uri: str) -> str | None:
     repo = model_repo(uri)
     if not repo:
         return None
+    if uri.startswith("s3://"):
+        return "https://albedo.tech"
     if _is_hf_source(uri):
         return f"https://huggingface.co/{repo}"
     parts = repo.split("/")
@@ -220,6 +222,8 @@ def repo_id_for(king: KingUpload, settings: Settings) -> str:
 
 
 def _matches_qwen35(king: KingUpload, settings: Settings) -> bool:
+    if (king.model_uri or king.artifact_uri).startswith("s3://"):
+        return True  # private-store upload: no repo name to match; pre-eval enforced the base model
     text = " ".join(
         part
         for part in (
@@ -645,15 +649,22 @@ authoritative source is the {source_label} repository linked above.*
 
 def render_albedo_md(king: KingUpload) -> str:
     url = king.hub_url or "https://hub.hippius.com/models"
-    is_hf = _is_hf_source(king.model_uri or king.artifact_uri)
+    src = king.model_uri or king.artifact_uri
+    source = (
+        "HuggingFace"
+        if _is_hf_source(src)
+        else "private Albedo store"
+        if src.startswith("s3://")
+        else "Hippius"
+    )
     return _ALBEDO_MD_TEMPLATE.format(
         king_name=king.king_name,
         defeated=_defeated_line(king),
         repo=king.hippius_repo or "unknown",
         url=url,
         hotkey=king.hotkey or "unknown",
-        source_label="HuggingFace" if is_hf else "Hippius",
-        source_hub="HuggingFace" if is_hf else "Hippius Hub",
+        source_label=source,
+        source_hub="Hippius Hub" if source == "Hippius" else source,
     )
 
 
