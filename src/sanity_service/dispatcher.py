@@ -22,6 +22,7 @@ from albedo_eval_service.shared.edit_detection import named_in_removal
 from albedo_eval_service.shared.observation_format import (
     MAX_CONSECUTIVE_BAD_TURNS,
     RETURNCODE,
+    absent_tool_output,
     canonical_empty,
     claims_tracked_change,
     command_contract,
@@ -32,7 +33,9 @@ from albedo_eval_service.shared.observation_format import (
     echoed_command,
     empty_output,
     has_content,
+    impossible_success,
     leaked_turn,
+    pipeline_returncode_override,
     prints_nothing_on_success,
     renumbered_view,
     repair_output,
@@ -49,7 +52,7 @@ from albedo_eval_service.shared.observation_format import (
 )
 from albedo_eval_service.shared.observation_memo import ObservationMemo
 from albedo_eval_service.shared.patch_lint import extract_commands, final_submit_issue
-from albedo_eval_service.shared.pip_check import fabricated_pip_error, pip_success_body
+from albedo_eval_service.shared.pip_check import fabricated_pip_error
 from albedo_eval_service.shared.sed_check import fabricated_sed_error, misdiagnosed_sed
 from albedo_eval_service.shared.submit_protocol import (
     _tail_name,
@@ -1191,6 +1194,31 @@ async def _simulate_observation(
     )
 
 
+def _usable_observation(raw: str, fmt: str, command: str) -> bool:
+    """Shapes the simulator is not allowed to serve, mirroring judge_api's
+    _usable_simulation_output. One predicate gates both the in-call retry and the attempt loop, so
+    an answer can never be refused by one and served by the other.
+    """
+    return _unusable_observation_reason(raw, fmt, command) == "ok"
+
+
+def _unusable_observation_reason(raw: str, fmt: str, command: str) -> str:
+    """Which check _usable_observation failed, for the retry log."""
+    if not valid_output(raw, fmt):
+        return "invalid_format"
+    if degenerate_observation(raw):
+        return "degenerate_lines"
+    if impossible_success(raw, fmt, command):
+        return "shell_error_with_rc_0"
+    if stuttered := stuttered_lines(raw):
+        return f"stuttered: {stuttered}"
+    if fabricated_sed_error(command, raw):
+        return "fabricated_sed_error"
+    if fabricated_pip_error(command, raw):
+        return "fabricated_pip_error"
+    return "ok"
+
+
 async def _simulate_observation_uncached(
     *,
     client: Any,
@@ -1203,6 +1231,25 @@ async def _simulate_observation_uncached(
     sample_id, prompt, messages = state.sample_id, state.prompt, state.messages
     fmt = detect_format(sample_id, messages)
     command = first_bash_command(assistant_output)
+
+    # tools the bench image cannot reach answer the same way every time, so the answer is settled
+    # here rather than asked for: an inconsistent one has the model retrying pip instead of
+    # working the task. Runs before grounding, which cannot speak to an absent tool either.
+    absent = absent_tool_output(command)
+    if absent is not None:
+        body, returncode = absent
+        # a refusal reached through a head/tail pipe still exits with the filter's code, so the
+        # shape has to be settled here: this path returns before correct_returncode runs
+        override = pipeline_returncode_override(command)
+        if override is not None:
+            returncode = override
+        logger.info(
+            "[sanity-dispatch] observation_simulation_absent_tool sample_id={} rc={} command={!r}",
+            sample_id,
+            returncode,
+            command[:80],
+        )
+        return wrap(body, fmt, returncode=returncode)
 
     resolved = Grounding(None, None, None, "")
     if repo_context is not None:
@@ -1253,13 +1300,7 @@ async def _simulate_observation_uncached(
             max_tokens=settings.simulation_max_tokens,
             provider=_evaluator_provider(settings) if rescue else _simulation_provider(settings),
             parse_retries=None if rescue else 1,
-            accept=lambda raw: (
-                valid_output(raw, fmt)
-                and not degenerate_observation(raw)
-                and not stuttered_lines(raw)
-                and not fabricated_sed_error(command, raw)
-                and not fabricated_pip_error(command, raw)
-            ),
+            accept=lambda raw: _usable_observation(raw, fmt, command),
         )
         if response.error:
             raise RuntimeError(response.error)
@@ -1275,15 +1316,6 @@ async def _simulate_observation_uncached(
             )
             observation = ""
             continue
-        if fabricated_sed_error(command, observation):
-            logger.warning(
-                "[sanity-dispatch] invented a sed error real sed does not give sample_id={} "
-                "command={!r}: {!r}",
-                sample_id,
-                command[:120],
-                observation[:120],
-            )
-            return empty_output(fmt)
         if diagnostic := misdiagnosed_sed(command, observation):
             logger.info(
                 "[sanity-dispatch] replaced an invented sed diagnostic sample_id={}: {!r} -> {!r}",
@@ -1292,37 +1324,15 @@ async def _simulate_observation_uncached(
                 diagnostic,
             )
             return wrap(diagnostic, fmt, returncode=1)
-        if fabricated_pip_error(command, observation):
-            logger.warning(
-                "[sanity-dispatch] invented a pip failure the bench cannot give sample_id={} "
-                "command={!r}: {!r}",
-                sample_id,
-                command[:120],
-                observation[:120],
-            )
-            return wrap(pip_success_body(command), fmt)
-        if (
-            valid_output(observation, fmt)
-            and not degenerate_observation(observation)
-            and not stuttered_lines(observation)
-        ):
+        if _usable_observation(observation, fmt, command):
             break
-        if not valid_output(observation, fmt):
-            logger.warning(
-                "[sanity-dispatch] observation truncated or invalid format sample_id={} "
-                "attempt={}/{}: {!r}",
-                sample_id,
-                attempt + 1,
-                MAX_CONSECUTIVE_DEGENERATE_OBSERVATIONS,
-                observation[-160:],
-            )
-            continue
         logger.warning(
-            "[sanity-dispatch] observation collapsed into repeated lines sample_id={} "
-            "attempt={}/{}: {!r}",
+            "[sanity-dispatch] observation_simulation_unusable sample_id={} attempt={}/{} "
+            "reason={}: {!r}",
             sample_id,
             attempt + 1,
             MAX_CONSECUTIVE_DEGENERATE_OBSERVATIONS,
+            _unusable_observation_reason(observation, fmt, command),
             observation[:160],
         )
     else:
@@ -1333,12 +1343,14 @@ async def _simulate_observation_uncached(
                 f"simulator collapsed into repeated lines on "
                 f"{MAX_CONSECUTIVE_DEGENERATE_OBSERVATIONS} consecutive attempts at one step"
             )
-        if stuttered := stuttered_lines(observation):
+        if (reason := _unusable_observation_reason(observation, fmt, command)) != "ok":
             logger.warning(
-                "[sanity-dispatch] kept a stuttered observation after retries sample_id={}: {}",
+                "[sanity-dispatch] observation still unusable after retries sample_id={} reason={}",
                 sample_id,
-                stuttered,
+                reason,
             )
+            if reason in ("fabricated_pip_error", "fabricated_sed_error"):
+                return empty_output(fmt)
     if META_LEAK_RE.search(observation):
         logger.warning(
             "[sanity-dispatch] observation broke character sample_id={}: {!r}",

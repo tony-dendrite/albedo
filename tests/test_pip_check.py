@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-from albedo_eval_service.shared.pip_check import (
-    PIP_ROOT_WARNING,
-    fabricated_pip_error,
-    pip_success_body,
-)
+from albedo_eval_service.shared.pip_check import PIP_ROOT_WARNING, fabricated_pip_error
 
 # the exact simulated observation this check was built against (a real eval fabrication)
 _SCREENSHOT_ERROR = (
@@ -49,11 +45,6 @@ def test_non_pip_commands_and_clean_output_pass():
     assert not fabricated_pip_error("pip install -e . -q", PIP_ROOT_WARNING)
     assert not fabricated_pip_error("", _SCREENSHOT_ERROR)
     assert not fabricated_pip_error("pip install -e .", "")
-
-
-def test_success_body_is_the_bench_root_warning_unless_stderr_is_discarded():
-    assert pip_success_body("pip install -e . -q 2>&1 | tail -20") == PIP_ROOT_WARNING
-    assert pip_success_body("pip install -e . -q 2>/dev/null") == ""
 
 
 def test_eval_accept_gate_rejects_the_fabrication():

@@ -12,6 +12,7 @@ from pathlib import Path
 _CANONICAL_TOKENIZER_PATH = (
     Path(__file__).resolve().parents[2] / "assets" / "tokenizers" / "Qwen3.6-35B-A3B"
 )
+EVEN_STEP_TRIM: list[tuple[str, int]] = [("cold", 1), ("pre_edit", 1), ("at_edit", 1)]
 
 _PROMPTS_FILE = Path(__file__).parent / "prompts.json"
 _FALLBACK_SYSTEM = (
@@ -43,7 +44,9 @@ def sample_prompts(
         from albedo_eval_service.shared.sampling import multi_source_manifest_sample_ids
 
         manifest = load_manifest_file(manifest_path, expected_sha256=manifest_hash)
-        ids = multi_source_manifest_sample_ids(manifest, block_hash=str(seed))
+        ids = multi_source_manifest_sample_ids(
+            manifest, block_hash=str(seed), sample_count=n, step_trim=EVEN_STEP_TRIM
+        )
         sample_ids = random.Random(str(seed)).sample(ids, min(n, len(ids)))
         loaded = load_manifest_samples(
             dataset_root=dataset_root,

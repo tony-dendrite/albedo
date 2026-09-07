@@ -23,6 +23,7 @@ def multi_source_manifest_sample_ids(
     *,
     block_hash: str,
     sample_count: int = 64,
+    step_trim: list[tuple[str, int]] | None = None,
 ) -> list[str]:
     if "sources" not in manifest:
         raise ValueError(
@@ -44,7 +45,7 @@ def multi_source_manifest_sample_ids(
     selected: list[str] = []
     repo_counts: dict[str, int] = defaultdict(int)
     other_language_budget = round(sample_count * NON_BENCHMARK_LANGUAGE_FRACTION)
-    for phase, wants in _family_grid(sample_count).items():
+    for phase, wants in _family_grid(sample_count, step_trim or STEP_TRIM).items():
         for family, want in wants.items():
             taken = 0
             for entry in pool:
@@ -105,11 +106,13 @@ def _apportion(spec: list[tuple[str, int]], count: int) -> dict[str, int]:
     return out
 
 
-def _family_grid(count: int) -> dict[str, dict[str, int]]:
+def _family_grid(
+    count: int, step_trim: list[tuple[str, int]] = STEP_TRIM
+) -> dict[str, dict[str, int]]:
     allocated = {name: 0 for name, _ in FAMILY_MIX}
     grid: dict[str, dict[str, int]] = {}
     cumulative = 0
-    for phase, phase_want in _apportion(STEP_TRIM, count).items():
+    for phase, phase_want in _apportion(step_trim, count).items():
         cumulative += phase_want
         target = _apportion(FAMILY_MIX, cumulative)
         row = {name: max(0, target[name] - allocated[name]) for name, _ in FAMILY_MIX}

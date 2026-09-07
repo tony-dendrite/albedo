@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from .observation_format import action_blocks
 from .submit_protocol import asked_submit
 
-DUP_CMD_THRESHOLD = 0.65
-MAX_RUN_THRESHOLD = 6
+DUP_CMD_THRESHOLD = 0.61
+MAX_RUN_THRESHOLD = 5
 
 MAX_LISTED_COMMANDS = 5
 MAX_COMMAND_CHARS = 120

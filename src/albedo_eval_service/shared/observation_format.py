@@ -595,11 +595,17 @@ def _missing_module(name: str) -> str:
 
 
 _PIP_RETRY_LINE = (
-    "WARNING: Retrying (Retry(total=4, connect=None, read=None, redirect=None, status=None)) "
-    "after connection broken by 'NameResolutionError(\"HTTPSConnection(host='pypi.org', "
-    "port=443): Failed to resolve 'pypi.org' ([Errno -2] Name or service not known)\")': "
-    "/simple/{path}/"
+    "WARNING: Retrying (Retry(total={total}, connect=None, read=None, redirect=None, "
+    "status=None)) after connection broken by 'NameResolutionError(\"HTTPSConnection("
+    "host='pypi.org', port=443): Failed to resolve 'pypi.org' ([Errno -2] Name or service not "
+    "known)\")': /simple/{path}/"
 )
+_PIP_OSERROR_LINE = (
+    "ERROR: Could not install packages due to an OSError: HTTPSConnectionPool(host='pypi.org', "
+    "port=443): Max retries exceeded with url: /simple/{path}/ (Caused by NameResolutionError("
+    "\"Failed to resolve 'pypi.org' ([Errno -2] Name or service not known)\"))"
+)
+_PIP_RETRY_TOTALS = (4, 3, 2, 1, 0)
 _INDEX_NAME_RE = re.compile(r"^[A-Za-z][\w.-]*$")
 
 
@@ -614,11 +620,17 @@ def _index_path(names: str) -> str:
 
 
 def _pip_unavailable(names: str) -> str:
-    return (
-        _PIP_RETRY_LINE.format(path=_index_path(names)) + "\n"
-        f"ERROR: Could not find a version that satisfies the requirement {names} "
-        "(from versions: none)\n"
-        f"ERROR: No matching distribution found for {names}"
+    """What pip prints when the package index is unreachable.
+
+    Deliberately the connection failure alone. A resolver error ("Could not find a version that
+    satisfies the requirement X") reads as a bad requirement, and a model that sees it retries
+    with other versions, other flags and other package names instead of abandoning pip. The
+    unresolvable host is the signal that no install can work in this environment.
+    """
+    path = _index_path(names)
+    return "\n".join(
+        [_PIP_RETRY_LINE.format(total=total, path=path) for total in _PIP_RETRY_TOTALS]
+        + [_PIP_OSERROR_LINE.format(path=path)]
     )
 
 
@@ -757,7 +769,9 @@ def absent_tool_output(command: str) -> tuple[str, int] | None:
     if _PYTEST_RUN_RE.search(text):
         return PYTEST_MISSING, 1
     if match := _PY_MODULE_RE.search(text):
-        return _missing_module(match.group(1)), 1
+        module = match.group(1)
+        if module.split(".")[0] != "pip":
+            return _missing_module(module), 1
     return None
 
 

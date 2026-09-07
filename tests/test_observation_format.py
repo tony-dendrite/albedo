@@ -29,6 +29,7 @@ from albedo_eval_service.shared.observation_format import (
     with_body,
     wrap,
 )
+from albedo_eval_service.shared.pip_check import fabricated_pip_error
 from albedo_eval_service.simulator.prompt_simulator import (
     FORMAT_MINI_CODER,
     FORMAT_OPENHANDS,
@@ -202,19 +203,15 @@ def test_pytest_is_absent_from_this_environment():
         assert absent_tool_output(command) == (PYTEST_MISSING, 1), command
     assert absent_tool_output("pip install pytest") == (PIP_PYTEST_ABSENT, 1)
     # any package is unavailable, not just pytest, and any module is missing
-    assert absent_tool_output("cd /testbed && pip install -q boto3 moto")[0].endswith(
-        "No matching distribution found for boto3"
-    )
+    assert "/simple/boto3/" in absent_tool_output("cd /testbed && pip install -q boto3 moto")[0]
     # a redirection, a flag's value and a local path are not package names
-    for command, named in (
+    for command, path in (
         ("pip install pytest pytest-mock virtualenv 2>&1 | tail -5", "pytest"),
         ("pip install --index-url https://pypi.org/simple/ pytest", "pytest"),
-        ('pip install "requests>=2.0"', "requests>=2.0"),
-        ("pip install -e . 2>&1 | tail -10", "the requested packages"),
+        ('pip install "requests>=2.0"', "requests"),
+        ("pip install -e . 2>&1 | tail -10", "setuptools"),
     ):
-        assert absent_tool_output(command)[0].endswith(
-            f"No matching distribution found for {named}"
-        ), command
+        assert f"/simple/{path}/" in absent_tool_output(command)[0], command
     assert absent_tool_output("python -m mypy src/") == (
         "/opt/conda/bin/python: No module named mypy",
         1,
@@ -239,9 +236,40 @@ def test_commands_that_only_name_pytest_still_run_normally():
     ):
         assert absent_tool_output(command) is None, command
     # no package index in this environment, so installing anything fails the same way
-    assert absent_tool_output("pip install pytest-cov")[0].endswith(
-        "No matching distribution found for pytest-cov"
-    )
+    assert "/simple/pytest-cov/" in absent_tool_output("pip install pytest-cov")[0]
+
+
+def test_only_a_pip_install_is_answered_without_the_simulator():
+    """An install cannot succeed with no index, so it is answered here. Every other pip
+    subcommand reads the installed set, which the simulator can derive, so it must reach it.
+
+    The dangerous case is the `python -m pip` form: it matches the missing-module shape, and
+    answering it "No module named pip" is a fabrication of the exact kind the pip gate rejects
+    -- it teaches the model pip is absent when the image ships it.
+    """
+    for command, index_path in (
+        ("pip install -q boto3", "boto3"),
+        ("python -m pip install numpy==1.24", "numpy"),
+        ("pip install -e . -q", "setuptools"),
+    ):
+        body, returncode = absent_tool_output(command)
+        assert returncode == 1, command
+        assert f"/simple/{index_path}/" in body, command
+        assert "Max retries exceeded" in body, command
+        assert "No matching distribution" not in body, command
+        assert "Could not find a version" not in body, command
+        assert not fabricated_pip_error(command, body), command
+    for command in (
+        "pip list",
+        "pip3 show astropy",
+        "pip freeze | grep astropy",
+        "pip --version",
+        "pip uninstall -y astropy",
+        "python -m pip list",
+        "python3.11 -m pip freeze",
+        "cd /testbed && python -m pip check",
+    ):
+        assert absent_tool_output(command) is None, command
 
 
 def test_degenerate_observation_catches_a_collapsed_file():
