@@ -21,7 +21,7 @@ king earns weight/emissions. So your job is: produce a model that (a) passes val
 
 Evaluation is a multiturn duel: 100 sampled coding-trajectory prefixes drawn from four real-agent
 corpora (`mini-coder`, `mini-coder-rs`, `open-swe-traces`, `swe-hero`), on which your model and the
-king each generate **8, 12 or 16 assistant turns** per sample (the horizon is stratified per sample).
+king each generate **12 or 16 assistant turns** per sample (the horizon is stratified per sample).
 Between turns your command is run against a real checkout of the repository at that commit, so
 `git`/`grep`/`find`/`sed` return real output; only what cannot be executed is filled in by an LLM
 simulator, always in whatever observation format that trajectory natively uses. Judges then score
@@ -30,7 +30,7 @@ exact task.
 
 Two documents cover this in detail:
 
-- **[SCORING.md](SCORING.md)** — the checklist, the measurement gate, the loop short-circuit, the
+- **[SCORING.md](SCORING.md)** — the checklist, the loop short-circuit, the
   2.5-point win margin, and the anti-gaming rules.
 - **[DATASETS.md](DATASETS.md)** — the four corpora, how samples are drawn (seeded by your
   submission's block hash), and the observation formats the simulator must speak.
@@ -112,9 +112,19 @@ on disk (`safetensors_index`).
 In short: fine-tune the weights, keep the Qwen3.6-35B-A3B architecture and tokenizer intact, don't add
 custom code or quantize.
 
-**Dedup** — validators also reject models that are near-duplicates (≥ 0.98 fingerprint similarity)
-of an already-seen model. This check needs OpenSearch and is **not** run by the local CLI; your
-model needs to be meaningfully different from existing submissions.
+**Dedup** — validators fingerprint your weights and compare them against every model already
+accepted on the subnet. Four verdicts can fault a submission:
+
+| verdict | what it means | fault code |
+|---|---|---|
+| `COPY` | weights (or their fingerprint) identical to another miner's accepted model | `duplicate` — **permanently blocks the hotkey** |
+| `OWN-COPY` | identical to a model you already had accepted | `duplicate_own` |
+| `NOISE-COPY` | the change from the nearest accepted model is spectral noise, not training | `duplicate_heuristic` |
+| `NOISED-COPY` | dense noise, not training | `duplicate_heuristic` |
+
+Copying a model and perturbing the weights does not work: both noise verdicts exist to catch
+exactly that. Other near-duplicate signals (`LINEAR-COMBO`,
+`SPARSE-EDIT`, `TRIVIAL-EDIT`) are recorded but do **not** fault a submission yet.
 
 ---
 
@@ -339,5 +349,5 @@ CHAIN_NETWORK=test albedo check-commit
 | document | covers |
 |---|---|
 | [PRIVATE_UPLOADS.md](PRIVATE_UPLOADS.md) | private submission flow: `submit-private`, the `r2activate`/`r2ready` commitments, credentials mailbox, local state, upload window |
-| [SCORING.md](SCORING.md) | checklist construction, measurement gate, loop short-circuit, win margin, anti-gaming |
+| [SCORING.md](SCORING.md) | checklist construction, loop short-circuit, win margin, anti-gaming |
 | [DATASETS.md](DATASETS.md) | the four corpora, trajectory rendering, observation formats, grounded execution + the simulator ladder, sampling and the manifest pin |

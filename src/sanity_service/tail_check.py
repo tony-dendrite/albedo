@@ -102,12 +102,16 @@ async def judge_tail(client, task: str, scored_turns: list[str], *, sample_id: s
         return TailVerdict(sample_id, checked=True, passed=True, reason="tail judge unparsable")
     zeros = [qid for qid, bit in answers.items() if bit == 0]
     if len(zeros) >= TAIL_JUDGE_FAIL_ZEROS:
-        failed = ", ".join(dict(TAIL_JUDGE_QUESTIONS)[qid] for qid in zeros)
         return TailVerdict(
             sample_id,
             checked=True,
             passed=False,
-            reason=f"degenerate tail past turn {TAIL_CUTOFF}: failed [{failed}]",
+            reason=(
+                f"degenerate tail past turn {TAIL_CUTOFF}: the late turns stopped doing "
+                "purposeful work (repeated or aimless actions, filler or broken text, "
+                "reasoning that does not drive the commands); every turn this deep must "
+                "still be a concrete, new step that follows from the observations"
+            ),
             answers=answers,
         )
     return TailVerdict(sample_id, checked=True, passed=True, answers=answers)

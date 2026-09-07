@@ -220,3 +220,23 @@ def test_score_batch_payload_skips_errored_generations():
     emitted = {entry["sample_id"] for payload in payloads for entry in payload["samples"]}
     assert samples[1].sample_id not in emitted
     assert len(emitted) == 2
+
+
+def test_rollout_ids_reach_the_judge_as_dataset_rows():
+    request = types.SimpleNamespace(
+        eval_run_id=uuid4(),
+        dataset=types.SimpleNamespace(scoring_batch_size=8),
+        scoring=types.SimpleNamespace(judge_count=1),
+    )
+    sample = EvalSample(sample_id="data/train-00000.parquet:0:0#r2", prompt="p")
+
+    observation = _simulate_observation_payload(request, sample, "```bash\nls\n```")
+    (batch,) = _score_batch_payloads(
+        request,
+        [sample],
+        [GenerationResult(sample.sample_id, "king")],
+        [GenerationResult(sample.sample_id, "challenger")],
+    )
+
+    assert observation["sample_id"] == "data/train-00000.parquet:0:0"
+    assert batch["samples"][0]["sample_id"] == "data/train-00000.parquet:0:0"

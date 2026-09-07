@@ -11,17 +11,22 @@ from albedo_eval_service.shared.observation_format import (
     absent_tool_output,
     classify,
     command_contract,
+    command_stages,
     contract_violation,
     detect_format,
     empty_output,
+    first_bash_block,
+    grounded_observation,
     is_scaffold_truncated,
     is_truncated,
     no_output_notice,
     observation_body,
+    prints_nothing_on_success,
     repair_output,
     repair_to_contract,
     truncation_notice,
     valid_output,
+    with_body,
     wrap,
 )
 from albedo_eval_service.simulator.prompt_simulator import (
@@ -198,8 +203,18 @@ def test_pytest_is_absent_from_this_environment():
     assert absent_tool_output("pip install pytest") == (PIP_PYTEST_ABSENT, 1)
     # any package is unavailable, not just pytest, and any module is missing
     assert absent_tool_output("cd /testbed && pip install -q boto3 moto")[0].endswith(
-        "No matching distribution found for boto3 moto"
+        "No matching distribution found for boto3"
     )
+    # a redirection, a flag's value and a local path are not package names
+    for command, named in (
+        ("pip install pytest pytest-mock virtualenv 2>&1 | tail -5", "pytest"),
+        ("pip install --index-url https://pypi.org/simple/ pytest", "pytest"),
+        ('pip install "requests>=2.0"', "requests>=2.0"),
+        ("pip install -e . 2>&1 | tail -10", "the requested packages"),
+    ):
+        assert absent_tool_output(command)[0].endswith(
+            f"No matching distribution found for {named}"
+        ), command
     assert absent_tool_output("python -m mypy src/") == (
         "/opt/conda/bin/python: No module named mypy",
         1,
@@ -275,3 +290,123 @@ def test_degenerate_observation_leaves_real_output_alone():
             ["}", "x = 1", "}", "y = 2", "}", "z = 3", "}", "w = 4", "}", "v = 5", "}", "u = 6"]
         )
     )
+
+
+OPENHANDS_SESSION = [
+    {"role": "assistant", "content": "```bash\nls\n```"},
+    {
+        "role": "user",
+        "content": (
+            "README.md\n[The command completed with exit code 0.]\n"
+            "[Current working directory: /workspace/o__r__1.0]\n"
+            "[Python interpreter: /usr/local/bin/python]\n"
+            "[Command finished with exit code 0]"
+        ),
+    },
+]
+
+
+def test_a_known_output_answers_swe_agent_exactly_as_the_simulator_would():
+    # every route through the simulator ends in with_body once an exact output exists, and for
+    # this format that leaves nothing of the model's answer behind
+    for body in ("src/app.py\nsrc/util.py", ""):
+        assert grounded_observation(SWE_AGENT, body, None, "grep -rn x src/", None) == with_body(
+            wrap("invented by the model", SWE_AGENT), SWE_AGENT, body
+        )
+
+
+def test_an_empty_computed_search_waits_for_an_exit_status_in_returncode_format():
+    # a non-empty output was already answered as a success before exit codes were derived
+    assert grounded_observation(RETURNCODE, "src/app.py", None, "grep -rn x src/", None) == wrap(
+        "src/app.py", RETURNCODE
+    )
+    # an empty one says nothing without a status: 0 and 1 mean opposite things to the assistant
+    assert grounded_observation(RETURNCODE, "", None, "grep -rn x src/", None) is None
+    assert grounded_observation(RETURNCODE, "", 1, "grep -rn x src/", None) == wrap(
+        "", RETURNCODE, returncode=1
+    )
+
+
+def test_openhands_reuses_the_trailer_block_its_own_session_prints():
+    observation = grounded_observation(
+        OPENHANDS, "README.md", 0, "grep -rn x src/", OPENHANDS_SESSION
+    )
+    assert observation == (
+        "README.md\n[The command completed with exit code 0.]\n"
+        "[Current working directory: /workspace/o__r__1.0]\n"
+        "[Python interpreter: /usr/local/bin/python]\n"
+        "[Command finished with exit code 0]"
+    )
+    # without a precedent to copy, the wrapper would have to be invented
+    assert grounded_observation(OPENHANDS, "README.md", 0, "grep -rn x src/", None) is None
+
+
+def test_openhands_declines_when_the_command_moves_the_working_directory():
+    # a cd into the directory the session already reports leaves the trailer correct
+    stays = grounded_observation(
+        OPENHANDS,
+        "README.md",
+        0,
+        "cd /workspace/o__r__1.0 && grep -rn x src/",
+        OPENHANDS_SESSION,
+    )
+    assert stays is not None and "[Current working directory: /workspace/o__r__1.0]" in stays
+    # any real move lands somewhere this cannot spell
+    for command in ("cd /tmp/scratch && grep -rn x src/", "cd sub && grep -rn x src/"):
+        assert grounded_observation(OPENHANDS, "README.md", 0, command, OPENHANDS_SESSION) is None
+
+
+def test_a_numbered_read_renders_as_an_openhands_view_with_no_trailer():
+    observation = grounded_observation(
+        OPENHANDS, "     1\tprint(1)", 0, "cat -n /workspace/o__r__1.0/app.py", OPENHANDS_SESSION
+    )
+    assert observation == (
+        "Here's the result of running `cat -n` on /workspace/o__r__1.0/app.py:\n     1\tprint(1)"
+    )
+    assert "exit code" not in observation
+    # a failed or empty read is not a view, and the scaffold's wording for it is not derivable
+    assert (
+        grounded_observation(
+            OPENHANDS, "", 1, "cat -n /workspace/o__r__1.0/gone.py", OPENHANDS_SESSION
+        )
+        is None
+    )
+
+
+def test_a_comment_above_the_command_does_not_hide_it():
+    fence = "```bash\n"
+    # the parser that grounds a turn reads the leading token, so a note above the command used
+    # to make a plain range read look like something unparseable
+    assert (
+        first_bash_block(f"{fence}# let me check the line numbers\nsed -n '510,530p' p.go\n```")
+        == "sed -n '510,530p' p.go"
+    )
+    assert first_bash_block(f"{fence}# one\n# two\ngrep -n x a.py\n```") == "grep -n x a.py"
+    # a `#` that is not a leading line belongs to the command
+    assert (
+        first_bash_block(f'{fence}echo "# not a comment" > f\n```') == 'echo "# not a comment" > f'
+    )
+    heredoc = "cat > f << 'EOF'\n# inside the body\nx = 1\nEOF"
+    assert first_bash_block(f"{fence}{heredoc}\n```") == heredoc
+    # nothing but comments has no command underneath to uncover
+    assert first_bash_block(f"{fence}# only a note\n```") == "# only a note"
+
+
+def test_a_command_after_a_heredoc_terminator_is_its_own_stage():
+    write_then_run = "cat <<'EOF' > /tmp/t.py\nprint(1)\nEOF\npython /tmp/t.py"
+    assert command_stages(write_then_run) == [
+        "cat <<'EOF' > /tmp/t.py\nprint(1)\nEOF",
+        "python /tmp/t.py",
+    ]
+    # the run prints, so the pair is not silent on success even though the write alone would be
+    assert not prints_nothing_on_success(write_then_run)
+    assert prints_nothing_on_success("cat <<'EOF' > /tmp/t.py\nprint(1)\nEOF")
+
+
+def test_a_heredoc_alone_is_not_a_silent_write():
+    # the interpreter consumes the script and prints; only a redirect onto a file is quiet
+    assert not prints_nothing_on_success("python <<'EOF'\nprint(1)\nEOF")
+    assert not prints_nothing_on_success("python - <<'EOF'\nprint(1)\nEOF")
+    # tee copies its input to stdout as well as to the file
+    assert not prints_nothing_on_success("tee f.py <<'EOF'\nx\nEOF")
+    assert prints_nothing_on_success("cat <<'EOF' > f.py\nx\nEOF")

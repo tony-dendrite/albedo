@@ -4,7 +4,7 @@ import hashlib
 import re
 from dataclasses import dataclass, field
 
-from albedo_eval_service.shared.observation_format import is_scaffold_truncated
+from albedo_eval_service.shared.observation_format import command_stages, is_scaffold_truncated
 
 from .command_search import _bre_to_python
 from .git_sim import GitState, apply_git
@@ -19,6 +19,7 @@ _EMPTY_SENTENCE = "Your command ran successfully and did not produce any output.
 _VIEW_HEADER = re.compile(r"^\s*Here's the result of running `[^`]+` on [^:]+:\s*$")
 _NUMBERED = re.compile(r"^\s*(\d+)\t(.*)$")
 _CD_PREFIX = re.compile(r"^\s*cd\s+[^\s&;|]+\s*&&\s*")
+_CD_ONLY = re.compile(r"^cd\s+([^\s&;|]+)$")
 _FULL_READ = re.compile(r"^(cat|nl)\b((?!\|).)*$")
 _GREP_N = re.compile(r"^(grep|rg)\b(?=.*\s-\w*n)((?!\|).)*$")
 _SED_RANGE = re.compile(r"^sed\s+-n\s+'?(\d+),(\d+)p'?\s+(\S+)\s*$")
@@ -338,18 +339,45 @@ def _apply_search_replace(
     return path
 
 
-def _heredoc_create(command: str) -> tuple[str, str] | None:
-    match = _HEREDOC_HEAD.match(command.strip())
+def _heredoc_body(stage: str) -> tuple[str, str] | None:
+    """The path a single `cat`/`tee` heredoc stage writes, and the body it writes there."""
+    match = _HEREDOC_HEAD.match(stage.strip())
     if match is None:
         return None
     path = match.group("p1") or match.group("p2")
     delimiter = match.group("d1") or match.group("d2")
     if not path or not delimiter:
         return None
-    lines = command.strip().split("\n")[1:]
+    lines = stage.strip().split("\n")[1:]
     for end, line in enumerate(lines):
         if line.strip() == delimiter:
-            return strip_sandbox(path), "\n".join(lines[:end])
+            return path, "\n".join(lines[:end])
+    return None
+
+
+def _heredoc_create(command: str) -> tuple[str, str] | None:
+    """The file a heredoc writes and its body, resolved against a `cd` the chain does first.
+
+    `cd /tmp && cat > x.py << EOF` writes /tmp/x.py, not the repo's own x.py, so the write path
+    is joined onto the directory the chain moved to before it is made repo-relative. A relative
+    `cd` names a directory only the transcript's own working directory can resolve, so those are
+    left untracked rather than guessed: recording the wrong path would let a later read of a real
+    repository file answer with this file's content.
+    """
+    base = ""
+    for stage in command_stages(command) or [command]:
+        stripped = stage.strip()
+        if moved := _CD_ONLY.match(stripped):
+            target = moved.group(1).strip("'\"")
+            if not target.startswith("/"):
+                return None
+            base = target
+            continue
+        if (found := _heredoc_body(stage)) is not None:
+            path, body = found
+            path = path.strip("'\"")
+            joined = path if path.startswith("/") or not base else f"{base.rstrip('/')}/{path}"
+            return strip_sandbox(joined), body
     return None
 
 
@@ -480,6 +508,11 @@ def _sed_apply(script: str, text: str) -> str | None:
             return None
         rest = placed.group("rest")
         raw = rest[1:] if rest.startswith("\\") else rest.lstrip(" \t")
+        # `934a\` + newline + text is the standard multi-line form: the backslash escapes the
+        # line break, so the break itself is syntax, not content. Keeping it appended a blank
+        # line and shifted every later line number in the file by one.
+        if raw.startswith("\n"):
+            raw = raw[1:]
         added = _sed_unescape(raw).split("\n")
         verb, at = placed.group("verb"), bounds[0]
         if verb == "a":

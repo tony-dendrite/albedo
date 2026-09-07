@@ -22,6 +22,8 @@ from repo_context_service.core import (
     _first_command,
     _is_permanent_github_error,
     _NotFound,
+    _referenced_paths,
+    _sed_scripts,
     _SnapshotTooLarge,
     parse_instance,
 )
@@ -71,6 +73,12 @@ def test_parse_instance_formats():
     assert hero.commit == "dbf8aaf4a3f3b41e5c1a402473df5da43813948f"
     ost = parse_instance("open-swe-traces", "python-attrs__attrs-770")
     assert (ost.owner, ost.repo, ost.pr) == ("python-attrs", "attrs", "770")
+    # the same source also ships `owner_repo_pr<N>`; without this it grounds as kind=trajectory
+    pull = parse_instance("open-swe-traces", "fillipe-gsm_python-tsp_pr39")
+    assert (pull.owner, pull.repo, pull.pr) == ("fillipe-gsm", "python-tsp", "39")
+    # owner is whatever precedes the FIRST underscore, so hyphenated repos survive
+    hyphen = parse_instance("open-swe-traces", "sphinx-contrib_confluencebuilder_pr1093")
+    assert (hyphen.owner, hyphen.repo, hyphen.pr) == ("sphinx-contrib", "confluencebuilder", "1093")
     assert parse_instance("swe-zero", "owner__repo-notanumber") is None
     assert parse_instance("mini-coder", "noseparator") is None
     assert parse_instance("mini-coder", "owner__repo.ZZZZZZ") is None
@@ -374,7 +382,7 @@ def test_a_long_listing_is_derived_from_the_snapshot():
     rows = run_search(parse_search("ls -l"), read, listing).output.split("\n")
     assert rows[0] == "total 8"
     assert re.fullmatch(r"-rw-r--r-- 1 root root\s+6 \w{3} +\d+ [\d:]+ a\.py", rows[1]), rows[1]
-    assert re.fullmatch(r"drwxr-xr-x 2 root root\s+4096 \w{3} +\d+ [\d:]+ pkg", rows[2]), rows[2]
+    assert re.fullmatch(r"drwxrwxrwx 2 root root\s+4096 \w{3} +\d+ [\d:]+ pkg", rows[2]), rows[2]
     assert run_search(parse_search("ls -l a.py"), read, listing).output.endswith(" a.py")
     assert isinstance(parse_search("ls -lh"), ParseFailure)
 
@@ -870,3 +878,215 @@ def test_posix_classes_and_stderr_redirects_do_not_silence_a_grep():
     assert not isinstance(parse_search("grep -rn target m.py 2>&1 | head -20"), ParseFailure)
     # sending stdout elsewhere is still not something we can claim was printed
     assert isinstance(parse_search("grep -n target m.py 1>&2"), ParseFailure)
+
+
+def test_computed_search_reports_the_exit_status_the_shell_would(tmp_path, monkeypatch):
+    service = make_service(tmp_path)
+    make_snapshot(service, {"src/app.py": "needle here\n", "src/util.py": "nothing\n"})
+    monkeypatch.setattr(service, "_resolve_sha", lambda ref: ("o", "r", FULL_SHA))
+    run = lambda cmd: service.repo_context_for_instance(  # noqa: E731
+        "swe-zero", "o__r-1", f"```bash\n{cmd}\n```"
+    )
+
+    assert run("grep -rn needle src/").exact_returncode == 0
+    # grep found nothing, which a shell reports as failure rather than an empty success
+    assert run("grep -rn absent-token src/").exact_returncode == 1
+    assert run("cat src/app.py").exact_returncode == 0
+    assert run("cat src/nope.py").exact_returncode == 1
+    # find reports success when nothing matched
+    assert run("find src -name '*.rs'").exact_returncode == 0
+    # the last command in a pipeline owns the status, and wc always succeeds
+    assert run("grep -rn absent-token src/ | wc -l").exact_returncode == 0
+
+
+def test_no_exit_status_is_claimed_for_a_search_that_cannot_be_stood_behind(tmp_path, monkeypatch):
+    service = make_service(tmp_path)
+    make_snapshot(service, {"src/app.py": "needle here\n"})
+    monkeypatch.setattr(service, "_resolve_sha", lambda ref: ("o", "r", FULL_SHA))
+
+    # `grep -c` prints a "0" line while still failing, so neither answer is safe to assert
+    counted = service.repo_context_for_instance(
+        "swe-zero", "o__r-1", "```bash\ngrep -rc absent-token src/\n```"
+    )
+    assert counted.exact_returncode is None
+
+
+def _search(cmd: str, files: dict[str, str]):
+    plan = parse_search(cmd)
+    assert not isinstance(plan, ParseFailure), f"{cmd}: {plan}"
+    return run_search(plan, lambda rel: files.get(rel), sorted(files))
+
+
+_GREP_FIXTURE = {"b.py": "alpha\nneedle one\nbeta\ngamma\ndelta\nneedle two\nomega\n"}
+
+
+def test_a_piped_grep_reproduces_context_flags_the_way_grep_prints_them():
+    # verified against GNU grep: a lone `--` between groups, `N:` on a hit, `N-` on context
+    assert _search("cat b.py | grep -A 1 needle", _GREP_FIXTURE).output == (
+        "needle one\nbeta\n--\nneedle two\nomega"
+    )
+    assert _search("cat b.py | grep -A1 -B1 needle", _GREP_FIXTURE).output == (
+        "alpha\nneedle one\nbeta\n--\ndelta\nneedle two\nomega"
+    )
+    assert _search("cat b.py | grep -C 1 needle", _GREP_FIXTURE).output == (
+        "alpha\nneedle one\nbeta\n--\ndelta\nneedle two\nomega"
+    )
+    assert _search("cat b.py | grep -n -A 1 needle", _GREP_FIXTURE).output == (
+        "2:needle one\n3-beta\n--\n6:needle two\n7-omega"
+    )
+    # a context count that is not a number, and -v with context, are not modelled
+    assert isinstance(parse_search("cat b.py | grep -A absent needle"), ParseFailure)
+    assert isinstance(parse_search("cat b.py | grep -v -A 1 needle"), ParseFailure)
+
+
+def test_an_awk_line_window_reads_like_the_sed_range_it_is():
+    files = {"a.py": "".join(f"line {i}\n" for i in range(1, 21))}
+    assert _search("awk 'NR>=3 && NR<=5' a.py", files).output == "line 3\nline 4\nline 5"
+    assert _search("awk 'NR >= 3 && NR <= 5' a.py", files).output == "line 3\nline 4\nline 5"
+    # an awk program that also prints its own formatting is not a plain window
+    assert isinstance(parse_search("awk 'NR>=3 && NR<=5 {print NR}' a.py"), ParseFailure)
+    assert isinstance(parse_search("awk '/def x/,/return/' a.py"), ParseFailure)
+
+
+def test_wc_l_counts_the_lines_and_names_the_operand():
+    files = {"a.py": "".join(f"line {i}\n" for i in range(1, 21))}
+    assert _search("wc -l a.py", files).output == "20 a.py"
+    # reading stdin, or several operands with their total, is not modelled
+    assert isinstance(parse_search("wc -l"), ParseFailure)
+    assert isinstance(parse_search("wc -c a.py"), ParseFailure)
+
+
+def test_a_read_of_a_missing_file_exits_the_way_its_own_tool_does():
+    files = {"a.py": "one\ntwo\n"}
+    # verified against GNU coreutils: sed exits 2 when it cannot open its input, cat/head/nl 1
+    assert _search("sed -n '1,2p' gone.py", files).returncode == 2
+    for cmd in ("cat gone.py", "head -5 gone.py", "nl -ba gone.py", "wc -l gone.py"):
+        assert _search(cmd, files).returncode == 1, cmd
+
+
+def test_cat_numbers_several_operands_as_one_stream():
+    listing = ["a.py", "b.py"]
+    read = {"a.py": "one\ntwo\n", "b.py": "three\n"}.get
+    assert run_search(parse_search("cat a.py b.py"), read, listing).output == "one\ntwo\nthree"
+    numbered = run_search(parse_search("cat -n a.py b.py"), read, listing).output
+    assert numbered == "     1\tone\n     2\ttwo\n     3\tthree"
+    # head and tail banner each operand and wc -l adds a total, so they keep the one-file rule
+    assert isinstance(parse_search("head -3 a.py b.py"), ParseFailure)
+    assert isinstance(parse_search("wc -l a.py b.py"), ParseFailure)
+
+
+def test_a_heredoc_body_is_never_reported_as_a_missing_file():
+    listing = ["src/docx/text/run.py"]
+    write = "cat > /tmp/repro.py <<'EOF'\nimport datetime as dt\nprint(dt.datetime.now())\nEOF"
+    present, missing = _referenced_paths(write, listing)
+    assert missing == []
+    # a real repository path named inside the body is still worth reporting as present
+    reads = "cat > /tmp/fix.py <<'EOF'\ncontent = open('src/docx/text/run.py').read()\nEOF"
+    assert _referenced_paths(reads, listing) == (["src/docx/text/run.py"], [])
+    # and a path the command itself names is still asserted absent
+    assert _referenced_paths("sed -i 's/a/b/' nope/gone.py", listing)[1] == ["nope/gone.py"]
+
+
+def test_a_sed_script_is_never_reported_as_a_missing_file():
+    listing = ["src/docx/text/run.py"]
+    edit = "sed -i '112s/self.font.bold = True/self.font.bold = None/' src/docx/text/run.py"
+    assert _referenced_paths(edit, listing)[1] == []
+    assert _sed_scripts("sed -i -e 's/a/b/' -e 's/c/d/' src/x.py") == ["s/a/b/", "s/c/d/"]
+    # the file the script runs against is still checked
+    assert _referenced_paths("sed -i 's/a/b/' nope/gone.py", listing)[1] == ["nope/gone.py"]
+
+
+def _chain_result(service, command: str):
+    return service.repo_context_for_instance("swe-zero", "o__r-12", f"```bash\n{command}\n```")
+
+
+def test_a_chain_of_repository_queries_is_answered_as_one_command(tmp_path, monkeypatch):
+    service = make_service(tmp_path)
+    make_snapshot(service, {"a.py": "alpha\n", "b.py": "beta\n"})
+    monkeypatch.setattr(service, "_resolve_sha", lambda ref: ("o", "r", FULL_SHA))
+
+    result = _chain_result(service, "cat a.py && cat b.py")
+    assert result.exact_output == "alpha\nbeta"
+    assert result.exact_returncode == 0
+
+
+def test_a_chain_stops_at_the_stage_that_fails_and_reports_its_status(tmp_path, monkeypatch):
+    service = make_service(tmp_path)
+    make_snapshot(service, {"a.py": "alpha\n", "b.py": "beta\n"})
+    monkeypatch.setattr(service, "_resolve_sha", lambda ref: ("o", "r", FULL_SHA))
+
+    # grep exits 1 when nothing matched, so the shell never runs the second read and the
+    # observation must not contain its output
+    result = _chain_result(service, "grep nowhere a.py && cat b.py")
+    assert result.exact_returncode == 1
+    assert result.exact_output == ""
+    assert "beta" not in (result.context or "")
+
+
+def test_a_chain_that_writes_before_it_reads_is_never_composed(tmp_path, monkeypatch):
+    """The read would be answered from the commit, which is the world the write just left.
+
+    Every stage is run against the same snapshot, so composing `sed -i` with the read that
+    follows it would assert the file's *old* content as the exact output of a command that ran
+    after the edit - a fabrication the assistant has no way to detect.
+    """
+    service = make_service(tmp_path)
+    make_snapshot(service, {"a.py": "alpha\n"})
+    monkeypatch.setattr(service, "_resolve_sha", lambda ref: ("o", "r", FULL_SHA))
+
+    for command in (
+        "sed -i 's/alpha/omega/' a.py && cat a.py",
+        "cp a.py b.py && cat a.py",
+        "cat a.py > copy.txt && cat a.py",
+        "rm a.py && ls .",
+    ):
+        result = _chain_result(service, command)
+        assert result.exact_output is None, command
+        assert "omega" not in (result.context or "")
+
+
+def test_a_chain_with_a_cd_past_its_head_is_never_composed(tmp_path, monkeypatch):
+    """Only a leading `cd` is a no-op for path resolution; a later one moves the stages after it.
+
+    `parse_search` strips a `cd` prefix, so the stages are all resolved from the repository root.
+    A `cd` in the middle of the chain would make every following relative path mean something
+    else, and answering it from the root names the wrong file.
+    """
+    service = make_service(tmp_path)
+    make_snapshot(service, {"a.py": "alpha\n", "pkg/a.py": "different\n"})
+    monkeypatch.setattr(service, "_resolve_sha", lambda ref: ("o", "r", FULL_SHA))
+
+    result = _chain_result(service, "cat a.py && cd pkg && cat a.py")
+    assert result.exact_output is None
+    # the leading form stays composable
+    assert _chain_result(service, "cd /x && cat a.py && cat a.py").exact_output == "alpha\nalpha"
+
+
+def test_a_chain_whose_stage_reports_a_missing_path_is_never_composed(tmp_path, monkeypatch):
+    """A path absent from the tracked listing may still be present where the command ran.
+
+    The chain's stages are resolved from the repository root even when the command opened with a
+    `cd` this does not follow, so "No such file or directory" derived here could be a file that
+    exists in the directory the shell was actually in. The listing block says so in prose; an
+    exact output would say it as fact.
+    """
+    service = make_service(tmp_path)
+    make_snapshot(service, {"a.py": "alpha\n"})
+    monkeypatch.setattr(service, "_resolve_sha", lambda ref: ("o", "r", FULL_SHA))
+
+    result = _chain_result(service, "cat a.py && grep -rn x gone/")
+    assert result.exact_output is None
+
+
+def test_pwd_answers_from_the_session_root_and_declines_without_one():
+    plan = parse_search("pwd")
+    assert not isinstance(plan, ParseFailure)
+    assert run_search(plan, lambda rel: None, [], root="/workspace/o__r__1.0").output == (
+        "/workspace/o__r__1.0"
+    )
+    # no root anywhere in the transcript means no directory to print
+    assert isinstance(run_search(parse_search("pwd"), lambda rel: None, [], root=""), ParseFailure)
+    # a `cd` prefix is stripped before the parse, so its destination - which is exactly what pwd
+    # would print - is no longer visible: answering from the session root would name the old one
+    assert isinstance(parse_search("cd /elsewhere && pwd"), ParseFailure)
+    assert isinstance(parse_search("pwd -P"), ParseFailure)

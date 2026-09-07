@@ -100,3 +100,26 @@ def test_private_payloads_survive_the_real_chain_decode_path():
     assert {s.payload for s in signals} == {activate, ready}
     assert [c.model_uri for c in commits] == ["some-owner/some-model@sha256:" + "a" * 64]
     assert max(len(activate.encode()), len(ready.encode())) <= 128
+
+
+def test_resolve_missing_coldkeys_only_for_registered_hotkeys(monkeypatch):
+    import asyncio
+
+    from chain_reader import db, reader
+
+    stored = {}
+
+    async def fake_missing(pool):
+        return ["hk-reg", "hk-gone", "hk-no-owner"]
+
+    async def fake_set(pool, hk, ck):
+        stored[hk] = ck
+
+    owners = {"hk-reg": "ck-1", "hk-no-owner": None}
+    monkeypatch.setattr(db, "hotkeys_missing_coldkey", fake_missing)
+    monkeypatch.setattr(db, "set_coldkey", fake_set)
+    monkeypatch.setattr(reader.chain, "hotkey_owner", lambda st, hk, block: owners.get(hk))
+
+    n = asyncio.run(reader.resolve_missing_coldkeys(None, object(), {"hk-reg", "hk-no-owner"}, 123))
+    assert n == 1
+    assert stored == {"hk-reg": "ck-1"}

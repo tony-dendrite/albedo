@@ -149,15 +149,19 @@ def repair_output(raw: str, fmt: str) -> str:
     return text
 
 
-def wrap(body: str, fmt: str, *, returncode: int = 0) -> str:
+def wrap(body: str, fmt: str, *, returncode: int = 0, middle: tuple[str, ...] = ()) -> str:
     if fmt == RETURNCODE:
         inner = f"{body}\n" if body else ""
         return f"<returncode>{returncode}</returncode>\n<output>\n{inner}</output>"
     if fmt == SWE_AGENT:
         return f"OBSERVATION:\n{body}" if body else "OBSERVATION:"
-    return (
-        f"{body}\n[The command completed with exit code {returncode}.]\n"
-        f"[Command finished with exit code {returncode}]"
+    return "\n".join(
+        [
+            body,
+            f"[The command completed with exit code {returncode}.]",
+            *middle,
+            f"[Command finished with exit code {returncode}]",
+        ]
     )
 
 
@@ -223,12 +227,13 @@ If you have completed your assignment, consult the first message about how to su
 
 
 _ACTION_BLOCK_RE = re.compile(
-    r"```(?:bash|sh|shell)?[ \t]*\n(.*?)```|<([a-z_]*bash[a-z_]*)>(.*?)</\2>",
+    r"```(?:bash|sh|shell)[ \t]*\n(.*?)```|<([a-z_]*bash[a-z_]*)>(.*?)</\2>",
     re.IGNORECASE | re.DOTALL,
 )
 
 
 def action_blocks(text: str) -> list[str]:
+    """The shell commands a turn would actually run, whitespace-normalised for comparison."""
     return [
         " ".join((m.group(1) if m.group(1) is not None else m.group(3)).split())
         for m in _ACTION_BLOCK_RE.finditer(text or "")
@@ -385,11 +390,74 @@ _PRINTS_NOTHING = re.compile(
 )
 
 
+_HEREDOC_START = re.compile(r"<<-?[ \t]*(['\"]?)(\w+)\1")
+_STAGE_SEP = re.compile(r"&&|\|\||;|\n")
+
+
+def heredoc_bodies(command: str) -> list[str]:
+    """The text of every heredoc body in the command.
+
+    A heredoc body is data - source code, JSON, prose - not shell words. Callers that scan a
+    command for the files it names need to know which spans came from a body, because tokenising
+    one as shell words invents paths out of identifiers such as `dt.datetime.now`.
+    """
+    text = command or ""
+    bodies: list[str] = []
+    for match in _HEREDOC_START.finditer(text):
+        start = cut = match.end()
+        for line in text[cut:].splitlines(keepends=True):
+            if line.strip() == match.group(2):
+                break
+            cut += len(line)
+        bodies.append(text[start:cut])
+    return bodies
+
+
+def command_stages(command: str) -> list[str]:
+    """The command's top-level stages, ignoring separators that are data rather than syntax.
+
+    A `;` or newline inside a quoted argument or a heredoc body belongs to that argument, not to
+    the shell, so both are blanked before the split: `python -c "a; b"` is one stage, and a
+    heredoc that spans twenty lines is one stage rather than twenty.
+    """
+    text = command or ""
+    masked = list(_unquoted(text))
+    for match in _HEREDOC_START.finditer(text):
+        cut = match.end()
+        for line in text[cut:].splitlines(keepends=True):
+            # the terminator's own newline ends the heredoc and separates it from whatever runs
+            # next, so it must stay visible to the split: masking it joins `EOF` to the command
+            # on the following line and hides a whole stage
+            cut += len(line.rstrip("\r\n")) if line.strip() == match.group(2) else len(line)
+            if line.strip() == match.group(2):
+                break
+        masked[match.end() : cut] = "_" * (cut - match.end())
+    joined = "".join(masked)
+    stages, last = [], 0
+    for separator in _STAGE_SEP.finditer(joined):
+        stages.append(text[last : separator.start()])
+        last = separator.end()
+    stages.append(text[last:])
+    return [stage.strip() for stage in stages if stage.strip()]
+
+
+# a redirect onto a file swallows the stage's output; a bare heredoc says nothing about who
+# consumes it, and `python <<EOF` or `tee f <<EOF` both print
+_REDIRECTS_TO_FILE = re.compile(r"(?<![0-9<>])>>?[ \t]*\S")
+
+
 def prints_nothing_on_success(command: str) -> bool:
-    """True when every stage of `command` is a write, a navigation or a redirect: all quiet."""
-    stages = [stage.strip() for stage in (command or "").split("&&")]
+    """True when every stage of `command` is a write, a navigation or a redirect: all quiet.
+
+    Redirects are looked for with quoted spans blanked, so a `>` that is part of an argument -
+    a comparison inside `python -c`, a diff marker in a heredoc - is not mistaken for one. A
+    heredoc on its own is not a write: `python <<EOF` feeds a script to an interpreter that then
+    prints, and `tee f <<EOF` copies its input to stdout as well as to the file.
+    """
+    stages = command_stages(command)
     return bool(stages) and all(
-        stage and (_PRINTS_NOTHING.match(stage) or _WRITE_RE.search(stage)) for stage in stages
+        _PRINTS_NOTHING.match(stage) or _REDIRECTS_TO_FILE.search(_unquoted(stage))
+        for stage in stages
     )
 
 
@@ -466,11 +534,26 @@ _FIRST_BLOCK_RE = re.compile(r"```(?:bash|sh)?[ \t]*\n(.*?)```", re.DOTALL)
 _TAGGED_BLOCK_RE = re.compile(r"```(?:bash|sh)[ \t]*\n(.*?)```", re.DOTALL)
 
 
+_LEADING_COMMENTS = re.compile(r"\A(?:[ \t]*#[^\n]*(?:\n|\Z))+")
+
+
+def strip_leading_comments(command: str) -> str:
+    """Drop the comment lines a model writes above its command.
+
+    bash ignores them, but everything here reads the command's leading token, so a `#` in front
+    makes the grounding parser see a comment instead of the grep it was handed, and the output
+    expectation and contract checks misread the turn with it. A block that is nothing but
+    comments keeps its text: there is no command underneath to find.
+    """
+    stripped = _LEADING_COMMENTS.sub("", command or "").strip()
+    return stripped or (command or "").strip()
+
+
 def first_bash_block(assistant_output: str) -> str:
     match = _TAGGED_BLOCK_RE.search(assistant_output or "") or _FIRST_BLOCK_RE.search(
         assistant_output or ""
     )
-    return match.group(1).strip() if match else ""
+    return strip_leading_comments(match.group(1)) if match else ""
 
 
 _QUOTED_SPAN_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
@@ -511,8 +594,28 @@ def _missing_module(name: str) -> str:
     return f"/opt/conda/bin/python: No module named {name}"
 
 
+_PIP_RETRY_LINE = (
+    "WARNING: Retrying (Retry(total=4, connect=None, read=None, redirect=None, status=None)) "
+    "after connection broken by 'NameResolutionError(\"HTTPSConnection(host='pypi.org', "
+    "port=443): Failed to resolve 'pypi.org' ([Errno -2] Name or service not known)\")': "
+    "/simple/{path}/"
+)
+_INDEX_NAME_RE = re.compile(r"^[A-Za-z][\w.-]*$")
+
+
+def _index_path(names: str) -> str:
+    """The index path pip would have requested for this requirement.
+
+    A local install (`pip install -e .`) never reaches the index for itself -- it goes looking
+    for the build backend first -- so that is what the failed request names.
+    """
+    first = re.split(r"[<>=!~\[]", names.strip(), maxsplit=1)[0].strip()
+    return first if _INDEX_NAME_RE.match(first) else "setuptools"
+
+
 def _pip_unavailable(names: str) -> str:
     return (
+        _PIP_RETRY_LINE.format(path=_index_path(names)) + "\n"
         f"ERROR: Could not find a version that satisfies the requirement {names} "
         "(from versions: none)\n"
         f"ERROR: No matching distribution found for {names}"
@@ -531,6 +634,9 @@ _PIP_INSTALL_RE = re.compile(
     r"\bpip[\d.]*\s+install\b([^;&|]*)"
     r"|\bpython[\d.]*\s+-m\s+pip\s+install\b([^;&|]*)"
 )
+# a requirement specifier and nothing else: a redirection left behind by the capture stopping at
+# `&`, a flag's value, or a local path must never be reported as a package name
+_REQUIREMENT_RE = re.compile(r"^[A-Za-z][\w.-]*(?:\[[\w,.-]+\])?(?:[<>=!~]=?[\w.*+-]+)?$")
 _PY_MODULE_RE = re.compile(_STAGE + r"[\w./-]*python[\d.]*\s+-m\s+([A-Za-z_][\w.]*)")
 _IMPORT_RE = re.compile(r"\bimport\s+([A-Za-z_][\w.]*)")
 _SCRIPT_RE = re.compile(r"\b([\w-]+)\.py\b")
@@ -556,15 +662,98 @@ def no_output_notice(command: str = "") -> tuple[str, int]:
     return f"bash: {head.group(0) if head else text}: command not found", 127
 
 
+_SHELL_DIAGNOSTIC_RE = re.compile(
+    r"^(?:[\w./-]*(?:ba)?sh|[\w./-]*python[\d.]*):\s.*?"
+    r"(?:command not found|No such file or directory|syntax error|No module named)\b"
+)
+_OBSERVED_RC_RE = re.compile(r"<returncode>(-?\d+)</returncode>")
+
+
+_PIPE_TAIL_RE = re.compile(r"\|\s*(?:head|tail)\b[^|&;]*$")
+
+
+def pipeline_returncode_override(command: str) -> int | None:
+    """The exit code the shell must report for this command shape, or None to leave it be."""
+    text = _CD_PREFIX_RE.sub("", (command or "").strip())
+    # only the last segment of an && / ; chain decides the exit code
+    segment = re.split(r"&&|;", text)[-1].strip()
+    return 0 if _PIPE_TAIL_RE.search(segment) else None
+
+
+_TOOL_DIAGNOSTIC_RC = {
+    "ls": 2, "grep": 2, "egrep": 2, "fgrep": 2, "rg": 2, "sed": 2, "diff": 2,
+    "cat": 1, "head": 1, "tail": 1, "find": 1, "rm": 1, "mv": 1, "cp": 1,
+    "stat": 1, "wc": 1, "nl": 1,
+}  # fmt: skip
+_TOOL_DIAGNOSTIC_RE = re.compile(
+    r"^([\w./-]+): .*?"
+    r"(?:cannot access|No such file or directory|cannot open|cannot stat"
+    r"|Is a directory|Permission denied)$"
+)
+_COMMAND_WORD_RE = re.compile(r"[\w./-]+")
+
+
+def tool_diagnostic_returncode(command: str, body: str) -> int | None:
+    """The exit code a tool must report when its last output line is a read failure.
+
+    The diagnostic is looked for on the *last* non-empty line, not the first: `echo x && cat
+    missing` puts it there, and that chain is the shape that shows up most. The named tool has
+    to appear in the command as well, so a file whose own last line happens to read like a
+    diagnostic is left alone.
+    """
+    lines = [line for line in (body or "").splitlines() if line.strip()]
+    match = _TOOL_DIAGNOSTIC_RE.match(lines[-1].strip()) if lines else None
+    if match is None:
+        return None
+    tool = match.group(1).rsplit("/", 1)[-1]
+    words = {word.rsplit("/", 1)[-1] for word in _COMMAND_WORD_RE.findall(command or "")}
+    return _TOOL_DIAGNOSTIC_RC.get(tool) if tool in words else None
+
+
+def correct_returncode(raw: str, fmt: str, command: str) -> str:
+    """Rewrite a return code the shell could not have produced. Leaves the body untouched."""
+    if fmt != RETURNCODE:
+        return raw
+    override = pipeline_returncode_override(command)
+    if override is None:
+        override = tool_diagnostic_returncode(command, observation_body(raw, fmt))
+    if override is None:
+        return raw
+    match = _OBSERVED_RC_RE.search(raw or "")
+    if match is None or int(match.group(1)) == override:
+        return raw
+    return _OBSERVED_RC_RE.sub(f"<returncode>{override}</returncode>", raw, count=1)
+
+
+def impossible_success(raw: str, fmt: str, command: str) -> bool:
+    """A shell diagnostic reported alongside a success return code.
+
+    The shell exits nonzero for every one of these — 127 for a missing command or unresolvable
+    path, 2 for a syntax error, 1 for a missing module — so returncode 0 beside one is a shape no
+    terminal produces. Only the first non-empty line is tested, so a command that legitimately
+    prints such text (a grep hit, a log file, a commit subject) is left alone.
+
+    A pipeline ending in head/tail is the one shape where the pair is legitimate: the
+    diagnostic comes from the failed first stage while the exit code is the filter's 0.
+    """
+    if fmt != RETURNCODE:
+        return False
+    if command and pipeline_returncode_override(command) is not None:
+        return False
+    match = _OBSERVED_RC_RE.search(raw or "")
+    if match is None or int(match.group(1)) != 0:
+        return False
+    first = next((line for line in observation_body(raw, fmt).splitlines() if line.strip()), "")
+    return bool(_SHELL_DIAGNOSTIC_RE.match(first.strip()))
+
+
 def absent_tool_output(command: str) -> tuple[str, int] | None:
     text = command or ""
     if match := _PIP_INSTALL_RE.search(text):
-        wanted = [
-            token
-            for token in (match.group(1) or match.group(2) or "").split()
-            if not token.startswith("-")
-        ]
-        return _pip_unavailable(" ".join(wanted) or "the requested packages"), 1
+        tokens = [t.strip("'\"") for t in (match.group(1) or match.group(2) or "").split()]
+        # real pip names the first requirement it cannot satisfy and stops
+        wanted = next((t for t in tokens if _REQUIREMENT_RE.match(t)), "the requested packages")
+        return _pip_unavailable(wanted), 1
     if _PYTEST_RUN_RE.search(text):
         return PYTEST_MISSING, 1
     if match := _PY_MODULE_RE.search(text):
@@ -646,6 +835,92 @@ def repair_to_contract(raw: str, fmt: str, contract: CommandContract) -> str:
     lines = observation_body(raw, fmt).splitlines()
     kept = lines[: contract.max_lines]
     return raw if kept == lines else _replace_body(raw, fmt, kept)
+
+
+_OH_TRAILER_OPEN = re.compile(r"^\[The command (?:completed|timed out) with exit code -?\d+\.\]$")
+_OH_TRAILER_CLOSE = re.compile(r"^\[Command finished with exit code -?\d+\]$")
+_OH_BRACKET_LINE = re.compile(r"^\[.*\]$")
+_OH_NUMBERED_READ = re.compile(r"^cat\s+-n\s+(\S+)$")
+_OH_MOVES_CWD = re.compile(r"(?:^|[;&|]\s*)cd\b")
+_OH_CD_PREFIX = re.compile(r"^\s*cd\s+(\S+)\s*&&")
+_OH_CWD_LINE = "[Current working directory: "
+
+
+def _moves_cwd(command: str, middle: tuple[str, ...]) -> bool:
+    """Whether this command lands the session somewhere other than where it already is.
+
+    A leading `cd` into the absolute path the transcript is already reporting is a no-op, so
+    the session's own trailer still describes where the next observation runs. Anything else —
+    a relative hop, a `cd` mid-chain, or a move with no reported directory to compare against —
+    puts the session in a directory this cannot spell with confidence.
+    """
+    if not _OH_MOVES_CWD.search(command or ""):
+        return False
+    target = _OH_CD_PREFIX.match(command or "")
+    if target is None or not target.group(1).startswith("/"):
+        return True
+    current = next(
+        (line[len(_OH_CWD_LINE) : -1] for line in middle if line.startswith(_OH_CWD_LINE)), None
+    )
+    return current is None or target.group(1).rstrip("/") != current.rstrip("/")
+
+
+def openhands_trailer(messages: list[dict[str, str]] | None) -> tuple[str, ...] | None:
+    """The lines this session prints between its two exit-code trailers.
+
+    Whether a session reports its working directory and Python interpreter — and with which
+    values — is a property of that session, so the block is copied from its own most recent
+    shell observation rather than derived. An empty tuple means the session prints neither
+    line; None means no observation has shown a trailer yet.
+    """
+    for message in reversed(messages or []):
+        if str(message.get("role") or "").lower() not in ("user", "tool"):
+            continue
+        lines = str(message.get("content") or "").rstrip().splitlines()
+        tail: list[str] = []
+        while lines and _OH_BRACKET_LINE.match(lines[-1].strip()):
+            tail.insert(0, lines.pop().strip())
+        if len(tail) >= 2 and _OH_TRAILER_OPEN.match(tail[0]) and _OH_TRAILER_CLOSE.match(tail[-1]):
+            return tuple(tail[1:-1])
+    return None
+
+
+def grounded_observation(
+    fmt: str,
+    body: str,
+    returncode: int | None,
+    command: str,
+    messages: list[dict[str, str]] | None,
+) -> str | None:
+    """The observation for a command whose exact output is already known, or None.
+
+    Answering straight from the computed output skips a model call that could only retype it.
+    Only the body is knowable from the repository though: the wrapper a scaffold prints around
+    it is itself part of what the assistant is scored against, so a turn whose wrapper cannot
+    be derived from this transcript falls through to the simulator rather than being handed an
+    invented one.
+    """
+    if fmt == SWE_AGENT:
+        return wrap(body, fmt)
+    if fmt == RETURNCODE:
+        if returncode is not None:
+            return wrap(body, fmt, returncode=returncode)
+        # a non-empty computed output was already answered as a success before exit codes were
+        # derived; an empty one says nothing without a status, so it still needs the simulator
+        return wrap(body, fmt, returncode=0) if body else None
+    if view := _OH_NUMBERED_READ.match((command or "").strip()):
+        # the scaffold renders a successful numbered read as a view, with no trailer at all
+        return (
+            f"Here's the result of running `cat -n` on {view.group(1)}:\n{body}"
+            if (returncode == 0 and body)
+            else None
+        )
+    if returncode is None:
+        return None
+    middle = openhands_trailer(messages)
+    if middle is None or _moves_cwd(command, middle):
+        return None
+    return wrap(body, fmt, returncode=returncode, middle=middle)
 
 
 def with_body(raw: str, fmt: str, body: str) -> str:

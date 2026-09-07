@@ -1,4 +1,6 @@
 export const POLL_MS = 4000;
+// feeds their producers rewrite on a minutes-long cadence, not per eval
+export const SLOW_POLL_MS = 60000;
 
 export const DATA_ENDPOINTS = [
   "./data/dashboard.json",
@@ -48,7 +50,6 @@ export const REGISTRATION_ENDPOINTS = [
   "./data/registrations_30d.json",
 ];
 
-export const ENDPOINT_CACHE_KEY = "albedo.endpoint.v3";
 export const SUBNET_NETUID = 97;
 
 // Runs render only the entries their artifact map actually has, so the two legacy types below

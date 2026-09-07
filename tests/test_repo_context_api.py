@@ -29,7 +29,16 @@ class FakeService:
 
 
 def make_client(result, service: FakeService | None = None) -> TestClient:
-    settings = RepoContextSettings(_env_file=None, cache_dir="/tmp/unused")
+    # every field this file asserts on is pinned rather than defaulted: `_env_file=None` stops
+    # pydantic reading .env but not os.environ, and any test that touches a settings getter has
+    # already copied the developer's .env into it via load_dotenv's setdefault
+    settings = RepoContextSettings(
+        _env_file=None,
+        cache_dir="/tmp/unused",
+        dataset_manifest_path="",
+        dataset_root="",
+        github_token="",
+    )
     return TestClient(create_app(settings, service=service or FakeService(result)))
 
 
@@ -77,3 +86,39 @@ def test_healthz_reports_configuration():
     assert payload["cache_dir"] == "/tmp/unused"
     assert payload["manifest_configured"] is False
     assert payload["github_token_set"] is False
+
+
+def test_prefetch_wait_blocks_and_returns_the_summary():
+    """Pre-eval must not start driving turns on a cold snapshot cache: a cold `/repo-context`
+    cannot finish inside its 20s budget, so the caller needs a completion signal."""
+    import threading
+
+    started = threading.Event()
+    released = threading.Event()
+
+    class SlowService(FakeService):
+        def prefetch(self, sample_ids):
+            started.set()
+            released.wait(timeout=5)
+            self.prefetched = list(sample_ids)
+            return {"samples": len(sample_ids), "instances": 1, "ready": 1}
+
+    service = SlowService(GroundingContext(context=None, kind="none"))
+    client = TestClient(create_app(RepoContextSettings(cache_dir="/tmp/x"), service))
+
+    result: dict = {}
+
+    def call():
+        result["body"] = client.post(
+            "/prefetch", json={"sample_ids": ["s:1:1"], "wait": True}
+        ).json()
+
+    caller = threading.Thread(target=call)
+    caller.start()
+    assert started.wait(timeout=5), "prefetch was never invoked"
+    assert "body" not in result, "wait=true returned before prefetch finished"
+    released.set()
+    caller.join(timeout=5)
+
+    assert result["body"] == {"samples": 1, "instances": 1, "ready": 1}
+    assert service.prefetched == ["s:1:1"]

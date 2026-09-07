@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import queue
-import sys
 import types
 from uuid import uuid4
 
@@ -13,13 +11,7 @@ from albedo_config import RemoteSettings
 from albedo_eval_service.modelstore.canonical_model_config import canonical_max_model_len
 from albedo_eval_service.modelstore.resolver import ResolvedModel
 from albedo_eval_service.remote.dataset import EvalSample
-from albedo_eval_service.remote.generation import (
-    GenerationResult,
-    VllmProcessGenerator,
-    _generate_payload,
-    _vllm_worker,
-    format_scored_trajectory,
-)
+from albedo_eval_service.remote.generation import GenerationResult, format_scored_trajectory
 from albedo_eval_service.remote.state import RemoteRun
 from albedo_eval_service.remote.worker import (
     ObservationResult,
@@ -137,39 +129,6 @@ def test_scored_trajectory_marks_only_candidate_outputs():
     assert "CANDIDATE OUTPUT 3" in text
 
 
-class _AliveProcess:
-    exitcode = None
-
-    def is_alive(self):
-        return True
-
-
-class _EmptyQueue:
-    def get(self, *, timeout):
-        raise queue.Empty
-
-    def get_nowait(self):
-        raise queue.Empty
-
-
-def test_vllm_generator_times_out_when_worker_sends_no_payload():
-    sample = types.SimpleNamespace(sample_id="sample-1", prompt="Fix it")
-    generator = VllmProcessGenerator(
-        model="m",
-        gpu_ids=["0"],
-        max_new_tokens=1,
-        temperature=0,
-        top_p=1,
-        result_timeout_seconds=0.01,
-    )
-    generator._process = _AliveProcess()
-    generator._result_queue = _EmptyQueue()
-
-    payload = generator._wait_for_payload("1", [sample])
-
-    assert payload["error"] == "vLLM process produced no result payload after 0.01s"
-
-
 def test_remote_worker_loads_parquet_and_runs_paired_generation(tmp_path, monkeypatch):
     _write_dataset(tmp_path)
     monkeypatch.setattr(
@@ -190,6 +149,7 @@ def test_remote_worker_loads_parquet_and_runs_paired_generation(tmp_path, monkey
         artifact_spool_dir=str(tmp_path / "artifacts"),
         scoring_backend="mock",
         trajectory_assistant_turns=2,
+        rollouts_per_sample=1,
     )
 
     RemoteEvalWorker(settings, generator_factory=factory).execute(run)
@@ -215,11 +175,10 @@ def test_remote_worker_loads_parquet_and_runs_paired_generation(tmp_path, monkey
     assert [event["batch_id"] for event in scoring_events] == ["score-0001", "score-0002"]
     assert {call["side"] for call in calls if "gpu_ids" in call} == {"previous_king", "challenger"}
     generate_calls = [call for call in calls if "sample_ids" in call]
-    assert [call["side"] for call in generate_calls].count("previous_king") == 16
-    assert [call["side"] for call in generate_calls].count("challenger") == 16
-    king_calls = [call for call in generate_calls if call["side"] == "previous_king"]
-    assert all(len(call["sample_ids"]) == 2 for call in king_calls[:12])
-    assert all(len(call["sample_ids"]) == 1 for call in king_calls[12:])
+    # horizons 12 and 16, one request per trajectory turn
+    assert [call["side"] for call in generate_calls].count("previous_king") == 28
+    assert [call["side"] for call in generate_calls].count("challenger") == 28
+    assert all(len(call["sample_ids"]) == 1 for call in generate_calls)
     assert [call["side"] for call in calls if call.get("closed")].count("previous_king") == 1
     assert [call["side"] for call in calls if call.get("closed")].count("challenger") == 1
 
@@ -355,33 +314,6 @@ def test_submit_echo_stops_future_trajectory_turns(monkeypatch):
     assert merged[0].error is None
     assert "CANDIDATE OUTPUT 2" not in merged[0].text
     assert "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in merged[0].text
-
-
-def test_generate_payload_flags_only_responses_that_hit_the_per_response_cap():
-    class _LLM:
-        def __init__(self, completions):
-            self._completions = completions
-
-        def generate(self, prompts, params):
-            return [types.SimpleNamespace(outputs=[c]) for c in self._completions]
-
-    at_cap = types.SimpleNamespace(text="a", finish_reason="length", token_ids=[0] * 16384)
-    context_bound = types.SimpleNamespace(text="b", finish_reason="length", token_ids=[0] * 900)
-    finished = types.SimpleNamespace(text="c", finish_reason="stop", token_ids=[0] * 12)
-
-    payload = _generate_payload(
-        _LLM([at_cap, context_bound, finished]),
-        None,
-        ["p1", "p2", "p3"],
-        ["s1", "s2", "s3"],
-        16384,
-    )
-
-    assert {r["sample_id"]: r["truncated"] for r in payload["results"]} == {
-        "s1": True,
-        "s2": False,
-        "s3": False,
-    }
 
 
 def _trajectory_sample(sample_id: str = "sample-1"):
@@ -685,55 +617,69 @@ def test_vllm_generator_uses_canonical_max_model_len_even_when_env_is_lower(tmp_
 
     assert generator.max_model_len == canonical_max_model_len()
     assert generator.max_new_tokens == settings.max_new_tokens
-
-
-def test_vllm_worker_stops_on_qwen_im_end(monkeypatch):
-    captured = {}
-
-    class _SamplingParams:
-        def __init__(self, **kwargs):
-            captured["params"] = kwargs
-
-    class _LLM:
-        def __init__(self, **kwargs):
-            captured["llm"] = kwargs
-
-        def generate(self, prompts, params):
-            captured["prompts"] = prompts
-            captured["params_obj"] = params
-            choice = types.SimpleNamespace(text="done", finish_reason="stop")
-            return [types.SimpleNamespace(outputs=[choice])]
-
-    class _Queue:
-        payload = None
-
-        def put(self, payload):
-            self.payload = payload
-
-    monkeypatch.setitem(
-        sys.modules, "vllm", types.SimpleNamespace(LLM=_LLM, SamplingParams=_SamplingParams)
-    )
-    queue = _Queue()
-
-    _vllm_worker(
-        model="/models/challenger",
-        gpu_ids=["0"],
-        prompts=["<|im_start|>user\nTask<|im_end|>\n<|im_start|>assistant\n"],
-        sample_ids=["sample-1"],
-        max_new_tokens=77,
-        temperature=0.6,
-        top_p=0.95,
-        top_k=20,
-        max_model_len=None,
-        enforce_eager=False,
-        queue=queue,
+    assert generator.port == settings.challenger_vllm_port
+    assert (
+        worker._vllm_generator("previous_king", ["0"], "/m").port
+        == settings.previous_king_vllm_port
     )
 
-    assert captured["params"]["stop_token_ids"] == [248046]
-    assert captured["llm"]["enable_prefix_caching"] is True
-    assert queue.payload == {
-        "results": [{"sample_id": "sample-1", "text": "done", "error": None, "truncated": False}]
+
+def test_rollouts_share_the_row_horizon():
+    from albedo_eval_service.remote import worker as W
+
+    samples = [_eval_sample("a"), _eval_sample("b")]
+    base = W.assign_horizons(samples)
+    expanded = W._rollouts(samples, 2)
+
+    assert [sample.sample_id for sample in expanded] == ["a#r1", "b#r1", "a#r2", "b#r2"]
+    assert W._rollout_horizons(expanded) == {
+        "a#r1": base["a"],
+        "a#r2": base["a"],
+        "b#r1": base["b"],
+        "b#r2": base["b"],
     }
+    assert W._rollouts(samples, 1) is samples
+
+
+def test_rollouts_double_the_trajectories_of_every_row(tmp_path, monkeypatch):
+    _write_dataset(tmp_path)
+    monkeypatch.setattr(
+        "albedo_eval_service.remote.dataset._load_tokenizer", lambda _path: _Tokenizer()
+    )
+    calls: list[dict[str, object]] = []
+    request = _request()
+    run = RemoteRun(remote_run_id=str(request.eval_run_id), request=request, state="accepted")
+    settings = RemoteSettings(
+        dataset_root=str(tmp_path),
+        upload_artifacts=False,
+        artifact_spool_dir=str(tmp_path / "artifacts"),
+        scoring_backend="mock",
+        rollouts_per_sample=2,
+    )
+
+    RemoteEvalWorker(
+        settings,
+        generator_factory=lambda side, gpu_ids, model: RecordingGenerator(side=side, calls=calls),
+    ).execute(run)
+
+    verdict = run.final_verdict()
+    assert run.state == "succeeded"
+    assert verdict["valid_turns"] == 4
+    assert verdict["generated_sample_count"] == 4
+    started = next(event for event in run.events if event["type"] == "generation_started")
+    assert started["sample_count"] == 2  # the dataset draw, not the trajectory count
+    king_ids = [
+        call["sample_ids"][0]
+        for call in calls
+        if call.get("side") == "previous_king" and "sample_ids" in call
+    ]
+    assert sorted(set(king_ids)) == [
+        "data/train-00000.parquet:0:0#r1",
+        "data/train-00000.parquet:0:0#r2",
+        "data/train-00000.parquet:1:0#r1",
+        "data/train-00000.parquet:1:0#r2",
+    ]
+    assert len(king_ids) == 2 * (12 + 16)
 
 
 def test_prefetch_repo_context_fires_only_when_configured(monkeypatch):

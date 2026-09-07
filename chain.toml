@@ -1,6 +1,6 @@
 # Subnet constants for the SN97 (Albedo) config validator.
 # Mirrors the relevant pieces of albedo/chain.toml so the seed digest, arch-lock
-# keys, dedup threshold, and the strict file allowlist live in one place.
+# keys, and the strict file allowlist live in one place.
 
 [chain]
 name         = "Albedo"
@@ -54,7 +54,3 @@ allowed = [
 ]
 allowed_globs   = ["model-*-of-*.safetensors", "model.safetensors"]
 forbidden_globs = ["*.py"]
-
-[preeval]
-# Near-duplicate flag fires at/above this fingerprint similarity.
-similarity_threshold = 0.98

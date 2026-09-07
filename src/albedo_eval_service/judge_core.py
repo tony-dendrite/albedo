@@ -5,7 +5,8 @@ import re
 from statistics import mean
 from typing import Any
 
-from .evaluator.shared.questions import _CANDIDATE_BLOCK_RE, measurements_block
+from .evaluator.reference.prompt_milestones import MILESTONE_TAGS
+from .evaluator.shared.questions import _CANDIDATE_BLOCK_RE
 from .judge.prompt_judge import JUDGE_SYSTEM, JUDGE_USER
 from .shared.json_extract import extract_json
 from .shared.observation_format import (
@@ -14,16 +15,8 @@ from .shared.observation_format import (
 
 CHALLENGER_WIN_MARGIN = 0.025
 
-# per-question weights by tag; zero-weight behavior tags are dropped at question prep
-TAG_WEIGHTS: dict[str, float] = {
-    "reference:explore": 2.0,
-    "reference:action": 2.0,
-    "reference:claims": 1.5,
-    "reference:economy": 1.0,
-    "reference:grounding": 0.5,
-    "reference:verification": 0.5,
-    "behavior:anchored_edit": 0.25,
-}
+# per-question weights by tag: one entry per milestone category, equal today
+TAG_WEIGHTS: dict[str, float] = dict.fromkeys(MILESTONE_TAGS, 1.0)
 AMPUTATED_THINKING_MULTIPLIER = 0.5
 
 RESERVED_TOKEN_RE = re.compile(
@@ -38,9 +31,14 @@ def reserved_token_leak(document: str) -> str:
 
 
 def question_weight(question: dict[str, str]) -> float:
+    """What a question is worth, from its tag.
+
+    Every question of a tag is worth the same. A milestone decides which questions get written, not
+    what an answer to one is worth, so a milestone that yielded six questions carries three times
+    the weight of one that yielded two - that is the intended reading, and it is why nothing here
+    normalises per milestone.
+    """
     tag = str(question.get("tag") or "")
-    # reference-anchored questions are the trusted family: unlisted ones keep a
-    # conservative weight; anything else (behavior/style) is dropped unless listed
     default = 0.5 if tag.startswith("reference:") else 0.0
     return TAG_WEIGHTS.get(tag, default)
 
@@ -91,7 +89,6 @@ def build_judge_messages(*, response: str, questions: list[dict[str, str]]) -> l
             "role": "user",
             "content": JUDGE_USER.format(
                 response=cleaned,
-                measurements=measurements_block(cleaned),
                 questions_json=json.dumps(shown, ensure_ascii=False, indent=1),
             ),
         },
@@ -110,11 +107,11 @@ def answer_schema(question_ids: list[str]) -> dict[str, Any]:
                 "items": {
                     "type": "object",
                     "properties": {
-                        "id": {"type": "string", "enum": question_ids},
-                        "explanation": {"type": "string"},
-                        "answer": {"type": "integer", "enum": [1, 0]},
+                        "asked": {"type": "string", "enum": question_ids},
+                        "reason": {"type": "string"},
+                        "verdict": {"type": "integer", "enum": [1, 0]},
                     },
-                    "required": ["id", "explanation", "answer"],
+                    "required": ["asked", "reason", "verdict"],
                     "additionalProperties": False,
                 },
             }
@@ -138,11 +135,11 @@ def parse_answers(
         for item in items:
             if not isinstance(item, dict):
                 continue
-            qid = str(item.get("id", "")).strip()
-            value = str(item.get("answer", "")).strip().lower()
+            qid = str(item.get("asked") or item.get("id") or "").strip()
+            value = str(item.get("verdict", item.get("answer", ""))).strip().lower()
             if qid in answers and value in _ANSWER_TO_BIT:
                 answers[qid] = value
-                explanations[qid] = str(item.get("explanation", "")).strip()
+                explanations[qid] = str(item.get("reason") or item.get("explanation") or "").strip()
     parse_ok = all(value is not None for value in answers.values())
     return answers, explanations, parse_ok
 
@@ -162,6 +159,17 @@ def judge_yes_rate(
             return round(num / den, 6)
     bits = [_ANSWER_TO_BIT[v] for v in answers.values() if v in _ANSWER_TO_BIT]
     return round(mean(bits), 6) if bits else None
+
+
+def majority_answers(repeats: list[dict[str, str | None]]) -> dict[str, str | None]:
+    """Most common valid answer per question across judgings; the first one on a tie."""
+    if not repeats:
+        return {}
+    out: dict[str, str | None] = {}
+    for qid, first in repeats[0].items():
+        votes = [r.get(qid) for r in repeats if r.get(qid) in _ANSWER_TO_BIT]
+        out[qid] = max(votes, key=votes.count) if votes else first
+    return out
 
 
 def response_score(

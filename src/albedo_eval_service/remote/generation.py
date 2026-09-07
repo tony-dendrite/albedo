@@ -1,16 +1,20 @@
 from __future__ import annotations
 
-import multiprocessing as mp
+import json
 import os
-import queue as queue_module
 import signal
+import subprocess
+import sys
+import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
+import httpx
 from loguru import logger
 
-from .dataset import EvalSample
+from .dataset import EvalSample, _load_tokenizer
 from .prompt_remote import QWEN3_IM_END_TOKEN_ID
 
 
@@ -59,12 +63,20 @@ def format_scored_trajectory(turns: list[dict[str, Any]]) -> str:
     return "\n".join(parts).strip()
 
 
-class VllmProcessGenerator:
+_CONTEXT_SAFETY_MARGIN_TOKENS = 64
+_SERVED_MODEL_NAME = "candidate"
+
+
+class VllmServerGenerator:
+    """One `vllm serve` per model. Requests are independent, so every trajectory runs at its
+    own pace while the engine batches whatever is in flight."""
+
     def __init__(
         self,
         *,
         model: str,
         gpu_ids: list[str],
+        port: int,
         max_new_tokens: int,
         temperature: float,
         top_p: float,
@@ -74,10 +86,13 @@ class VllmProcessGenerator:
         compile_cache_dir: str = "",
         gpu_memory_utilization: float = 0.95,
         kv_cache_dtype: str = "auto",
+        max_num_seqs: int = 256,
+        startup_timeout_seconds: float = 1800.0,
         result_timeout_seconds: float = 900.0,
     ):
         self.model = model
         self.gpu_ids = gpu_ids
+        self.port = port
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
         self.top_p = top_p
@@ -87,258 +102,125 @@ class VllmProcessGenerator:
         self.compile_cache_dir = compile_cache_dir
         self.gpu_memory_utilization = gpu_memory_utilization
         self.kv_cache_dtype = kv_cache_dtype
+        self.max_num_seqs = max_num_seqs
+        self.startup_timeout_seconds = startup_timeout_seconds
         self.result_timeout_seconds = result_timeout_seconds
-        self._ctx = mp.get_context("spawn")
-        self._request_queue = None
-        self._result_queue = None
-        self._process = None
-        self._request_id = 0
+        self._process: subprocess.Popen | None = None
+        self._tokenizer = None
+        self._lock = threading.Lock()
+        self._client = httpx.Client(
+            base_url=f"http://127.0.0.1:{port}", timeout=httpx.Timeout(result_timeout_seconds)
+        )
 
     def generate(self, samples: list[EvalSample]) -> list[GenerationResult]:
         if not samples:
             return []
-
         self._start()
-        self._request_id += 1
-        request_id = str(self._request_id)
-        self._request_queue.put(
-            {
-                "id": request_id,
-                "prompts": [sample.prompt for sample in samples],
-                "sample_ids": [sample.sample_id for sample in samples],
-            }
-        )
-        payload = self._wait_for_payload(request_id, samples)
-        if payload.get("error"):
-            return [
-                GenerationResult(sample_id=sample.sample_id, text="", error=payload["error"])
-                for sample in samples
-            ]
-        return [GenerationResult(**item) for item in payload["results"]]
+        return [self._complete(sample) for sample in samples]
 
     def close(self) -> None:
         if self._process is None:
             return
-        if self._process.is_alive() and self._request_queue is not None:
-            self._request_queue.put(None)
-            self._process.join(timeout=30)
-        if self._process.is_alive():
-            self._kill_process_tree()
-            self._process.join(timeout=10)
-        self._process = None
-        self._request_queue = None
-        self._result_queue = None
-
-    def _kill_process_tree(self) -> None:
-        pid = self._process.pid
-        if pid is None:
-            self._process.terminate()
-            return
         try:
-            os.killpg(os.getpgid(pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
-            self._process.terminate()
-
-    def _start(self) -> None:
-        if self._process is not None and self._process.is_alive():
-            return
-        self._request_queue = self._ctx.Queue()
-        self._result_queue = self._ctx.Queue()
-        self._process = self._ctx.Process(
-            target=_vllm_worker,
-            kwargs={
-                "model": self.model,
-                "gpu_ids": self.gpu_ids,
-                "prompts": None,
-                "sample_ids": None,
-                "max_new_tokens": self.max_new_tokens,
-                "temperature": self.temperature,
-                "top_p": self.top_p,
-                "top_k": self.top_k,
-                "max_model_len": self.max_model_len,
-                "enforce_eager": self.enforce_eager,
-                "compile_cache_dir": self.compile_cache_dir,
-                "gpu_memory_utilization": self.gpu_memory_utilization,
-                "kv_cache_dtype": self.kv_cache_dtype,
-                "queue": self._result_queue,
-                "request_queue": self._request_queue,
-            },
-        )
-        self._process.start()
-
-    def _wait_for_payload(self, request_id: str, samples: list[EvalSample]) -> dict[str, Any]:
-        payload = None
-        deadline = time.monotonic() + max(1.0, self.result_timeout_seconds)
-        while self._process is not None and self._process.is_alive():
-            if time.monotonic() >= deadline:
-                payload = {
-                    "error": (
-                        f"vLLM process produced no result payload after "
-                        f"{self.result_timeout_seconds:g}s"
-                    )
-                }
-                break
-            try:
-                candidate = self._result_queue.get(timeout=1)
-                if candidate.get("id") == request_id or (
-                    "id" not in candidate and candidate.get("error")
-                ):
-                    payload = candidate
-                    break
-            except queue_module.Empty:
-                continue
-        if payload is None:
-            try:
-                payload = self._result_queue.get_nowait()
-            except queue_module.Empty:
-                payload = {
-                    "error": f"vLLM process exited {self._process.exitcode} without result payload"
-                }
-        if self._process is not None and self._process.exitcode not in (None, 0):
-            payload["error"] = (
-                payload.get("error") or f"vLLM process exited {self._process.exitcode}"
-            )
-        return payload
-
-
-def _vllm_worker(
-    *,
-    model: str,
-    gpu_ids: list[str],
-    prompts: list[str] | None,
-    sample_ids: list[str] | None,
-    max_new_tokens: int,
-    temperature: float,
-    top_p: float,
-    top_k: int | None,
-    max_model_len: int | None,
-    enforce_eager: bool,
-    compile_cache_dir: str = "",
-    gpu_memory_utilization: float = 0.95,
-    kv_cache_dtype: str = "auto",
-    queue=None,
-    request_queue=None,
-) -> None:
-    try:
-        try:
-            os.setsid()
-        except OSError:
+            os.killpg(self._process.pid, signal.SIGTERM)
+            self._process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            os.killpg(self._process.pid, signal.SIGKILL)
+            self._process.wait(timeout=10)
+        except ProcessLookupError:
             pass
-        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_ids)
+        self._process = None
 
-        from vllm import LLM, SamplingParams
-
-        llm_kwargs = {
-            "model": model,
-            "tensor_parallel_size": len(gpu_ids),
-            "trust_remote_code": True,
-            "generation_config": "vllm",
-            "reasoning_parser": "qwen3",
-            "enable_prefix_caching": True,
-            "gpu_memory_utilization": gpu_memory_utilization,
-            "kv_cache_dtype": kv_cache_dtype,
-            "limit_mm_per_prompt": {"image": 0, "video": 0},
-        }
-        if max_model_len is not None:
-            llm_kwargs["max_model_len"] = max_model_len
-        if enforce_eager:
-            llm_kwargs["enforce_eager"] = True
-        if compile_cache_dir:
-            llm_kwargs["compilation_config"] = {"cache_dir": compile_cache_dir}
-        llm = LLM(**llm_kwargs)
-        params_kwargs = {
-            "max_tokens": max_new_tokens,
-            "temperature": temperature,
-            "top_p": top_p,
+    def _complete(self, sample: EvalSample) -> GenerationResult:
+        if self.max_model_len and (
+            len(self._tokenizer(sample.prompt).input_ids)
+            >= self.max_model_len - _CONTEXT_SAFETY_MARGIN_TOKENS
+        ):
+            return GenerationResult(sample.sample_id, "", truncated=True)
+        body = {
+            "model": _SERVED_MODEL_NAME,
+            "prompt": sample.prompt,
+            "max_tokens": self.max_new_tokens,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
             "stop_token_ids": [QWEN3_IM_END_TOKEN_ID],
         }
-        if top_k is not None:
-            params_kwargs["top_k"] = top_k
-        params = SamplingParams(**params_kwargs)
-
-        if request_queue is None:
-            queue.put(
-                _generate_payload(
-                    llm,
-                    params,
-                    prompts or [],
-                    sample_ids or [],
-                    max_new_tokens,
-                    max_model_len=max_model_len,
-                )
+        if self.top_k is not None:
+            body["top_k"] = self.top_k
+        try:
+            response = self._client.post("/v1/completions", json=body)
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            logger.exception(
+                f"[remote-gen] vLLM request failed model={self.model} "
+                f"sample={sample.sample_id}: {exc}"
             )
-            return
-
-        while True:
-            request = request_queue.get()
-            if request is None:
-                return
-            try:
-                payload = _generate_payload(
-                    llm,
-                    params,
-                    request["prompts"],
-                    request["sample_ids"],
-                    max_new_tokens,
-                    max_model_len=max_model_len,
-                )
-            except Exception as exc:
-                logger.exception(
-                    f"[remote-gen] vLLM request failed model={model} gpu_ids={gpu_ids}: {exc}"
-                )
-                payload = {"error": f"{type(exc).__name__}: {exc}"}
-            payload["id"] = request["id"]
-            queue.put(payload)
-    except Exception as exc:
-        logger.exception(f"[remote-gen] vLLM worker failed model={model} gpu_ids={gpu_ids}: {exc}")
-        queue.put({"error": f"{type(exc).__name__}: {exc}"})
-
-
-_CONTEXT_SAFETY_MARGIN_TOKENS = 64
-
-
-def _generate_payload(
-    llm: Any,
-    params: Any,
-    prompts: list[str],
-    sample_ids: list[str],
-    token_limit: int,
-    max_model_len: int | None = None,
-) -> dict[str, Any]:
-    results_by_id: dict[str, dict[str, Any]] = {}
-    keep_prompts: list[str] = []
-    keep_ids: list[str] = []
-    if max_model_len:
-        tokenizer = llm.get_tokenizer()
-        budget = max_model_len - _CONTEXT_SAFETY_MARGIN_TOKENS
-        for sample_id, prompt in zip(sample_ids, prompts, strict=True):
-            if len(tokenizer(prompt).input_ids) >= budget:
-                results_by_id[sample_id] = {
-                    "sample_id": sample_id,
-                    "text": "",
-                    "error": None,
-                    "truncated": True,
-                }
-            else:
-                keep_ids.append(sample_id)
-                keep_prompts.append(prompt)
-    else:
-        keep_ids = list(sample_ids)
-        keep_prompts = list(prompts)
-
-    outputs = llm.generate(keep_prompts, params) if keep_prompts else []
-    for sample_id, output in zip(keep_ids, outputs, strict=True):
-        completion = output.outputs[0] if output.outputs else None
-        text = completion.text if completion is not None else ""
-        truncated = (
-            completion is not None
-            and completion.finish_reason == "length"
-            and len(completion.token_ids or ()) >= token_limit
+            return GenerationResult(sample.sample_id, "", f"{type(exc).__name__}: {exc}")
+        choice = payload["choices"][0]
+        completion_tokens = int((payload.get("usage") or {}).get("completion_tokens") or 0)
+        return GenerationResult(
+            sample_id=sample.sample_id,
+            text=choice.get("text") or "",
+            truncated=choice.get("finish_reason") == "length"
+            and completion_tokens >= self.max_new_tokens,
         )
-        results_by_id[sample_id] = {
-            "sample_id": sample_id,
-            "text": text,
-            "error": None,
-            "truncated": truncated,
-        }
-    return {"results": [results_by_id[sample_id] for sample_id in sample_ids]}
+
+    def _start(self) -> None:
+        with self._lock:
+            if self._process is not None and self._process.poll() is None:
+                return
+            self._process = subprocess.Popen(
+                self._command(),
+                env={**os.environ, "CUDA_VISIBLE_DEVICES": ",".join(self.gpu_ids)},
+                start_new_session=True,
+            )
+            deadline = time.monotonic() + max(1.0, self.startup_timeout_seconds)
+            while time.monotonic() < deadline:
+                if self._process.poll() is not None:
+                    raise RuntimeError(
+                        f"vLLM server exited {self._process.returncode} during startup"
+                    )
+                try:
+                    if self._client.get("/health", timeout=5.0).status_code == 200:
+                        self._tokenizer = self._tokenizer or _load_tokenizer(self.model)
+                        return
+                except httpx.HTTPError:
+                    pass
+                time.sleep(3)
+            self.close()
+            raise TimeoutError(f"vLLM server not ready after {self.startup_timeout_seconds:g}s")
+
+    def _command(self) -> list[str]:
+        command = [
+            str(Path(sys.executable).with_name("vllm")),
+            "serve",
+            self.model,
+            "--served-model-name",
+            _SERVED_MODEL_NAME,
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(self.port),
+            "--tensor-parallel-size",
+            str(len(self.gpu_ids)),
+            "--gpu-memory-utilization",
+            str(self.gpu_memory_utilization),
+            "--kv-cache-dtype",
+            self.kv_cache_dtype,
+            "--max-num-seqs",
+            str(self.max_num_seqs),
+            "--trust-remote-code",
+            "--generation-config",
+            "vllm",
+            "--enable-prefix-caching",
+            "--limit-mm-per-prompt",
+            json.dumps({"image": 0, "video": 0}),
+        ]
+        if self.max_model_len is not None:
+            command += ["--max-model-len", str(self.max_model_len)]
+        if self.enforce_eager:
+            command.append("--enforce-eager")
+        if self.compile_cache_dir:
+            command += ["--compilation-config", json.dumps({"cache_dir": self.compile_cache_dir})]
+        return command

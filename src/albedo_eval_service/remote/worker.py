@@ -36,11 +36,17 @@ from ..shared.sampling import multi_source_manifest_sample_ids
 from ..shared.submit_protocol import is_exact_submission
 from ..simulator.prompt_simulator import COMPLETE_MARKER, missing_command_output
 from .artifacts import ArtifactUploader, RunArtifactSpool, build_artifact_uploader
-from .dataset import EvalSample, apply_submit_protocol, format_messages, load_manifest_samples
+from .dataset import (
+    EvalSample,
+    apply_submit_protocol,
+    dataset_sample_id,
+    format_messages,
+    load_manifest_samples,
+)
 from .generation import (
     GenerationResult,
     Generator,
-    VllmProcessGenerator,
+    VllmServerGenerator,
     format_scored_trajectory,
 )
 from .state import RemoteRun
@@ -142,6 +148,7 @@ class RemoteEvalWorker:
                 "generation_batch_size": request.dataset.generation_batch_size,
             }
         )
+        samples = _rollouts(samples, self.settings.rollouts_per_sample)
 
         king_generator = self._generator_factory(
             "previous_king", topology.previous_king, king_model.local_path
@@ -312,9 +319,12 @@ class RemoteEvalWorker:
         if not model:
             raise ValueError(f"missing model setting for {side}")
         sampling_config = self._effective_sampling_config()
-        return VllmProcessGenerator(
+        return VllmServerGenerator(
             model=model,
             gpu_ids=gpu_ids,
+            port=self.settings.previous_king_vllm_port
+            if side == "previous_king"
+            else self.settings.challenger_vllm_port,
             max_new_tokens=self.settings.max_new_tokens,
             temperature=sampling_config["temperature"],
             top_p=sampling_config["top_p"],
@@ -324,6 +334,8 @@ class RemoteEvalWorker:
             compile_cache_dir=self.settings.compile_cache_dir,
             gpu_memory_utilization=self.settings.gpu_memory_utilization,
             kv_cache_dtype=self.settings.kv_cache_dtype,
+            max_num_seqs=self.settings.vllm_max_num_seqs,
+            startup_timeout_seconds=self.settings.vllm_startup_timeout_seconds,
             result_timeout_seconds=self.settings.generation_result_timeout_seconds,
         )
 
@@ -335,90 +347,64 @@ class RemoteEvalWorker:
         king_generator: Generator,
         challenger_generator: Generator,
     ) -> tuple[list[GenerationResult], list[GenerationResult]]:
-        horizons = assign_horizons(samples)
+        """Every trajectory runs on its own thread: generate a turn, fetch its observation, go
+        again. No sample waits for another, so the engines stay busy while observations are
+        simulated, and extra rollouts only add threads."""
+        horizons = _rollout_horizons(samples)
         turn_count = max(
             horizons.values(), default=max(1, int(self.settings.trajectory_assistant_turns))
         )
         generators = {"previous_king": king_generator, "challenger": challenger_generator}
-        current_samples = {"previous_king": samples, "challenger": samples}
-        all_results: dict[str, list[list[GenerationResult]]] = {
-            "previous_king": [],
-            "challenger": [],
-        }
-        all_observations: dict[str, list[dict[tuple[str, str], ObservationResult]]] = {
-            "previous_king": [],
-            "challenger": [],
-        }
+        results = {side: [[] for _ in range(turn_count)] for side in generators}
+        observations = {side: [{} for _ in range(turn_count)] for side in generators}
+        simulator_slots = threading.BoundedSemaphore(
+            max(1, self.settings.scoring_batch_concurrency)
+        )
+
+        def trajectory(side: str, sample: EvalSample) -> None:
+            for turn_index in range(horizons[sample.sample_id]):
+                result = _generate_retrying_bad_turns(generators[side], [sample])[0]
+                results[side][turn_index].append(result)
+                if turn_index == horizons[sample.sample_id] - 1:
+                    return
+                with simulator_slots:
+                    observed = self._simulate_observations(
+                        request=request,
+                        samples_by_side={side: [sample]},
+                        results_by_side={side: [result]},
+                    )
+                observations[side][turn_index].update(observed)
+                following = _next_turn_samples([sample], [result], observed, side=side)
+                if not following:
+                    return
+                sample = following[0]
 
         try:
-            for turn_index in range(turn_count):
-                with ThreadPoolExecutor(max_workers=2) as executor:
-                    futures = {
-                        side: executor.submit(
-                            _generate_retrying_bad_turns, generators[side], side_samples
-                        )
-                        for side, side_samples in current_samples.items()
-                    }
-                    turn_results = {side: future.result() for side, future in futures.items()}
-                for side, results in turn_results.items():
-                    all_results[side].append(results)
-
-                if turn_index == turn_count - 1:
-                    break
-
-                continuing_samples = {
-                    side: [
-                        s
-                        for s in side_samples
-                        if horizons.get(s.sample_id, turn_count) > turn_index + 1
-                    ]
-                    for side, side_samples in current_samples.items()
-                }
-                continuing_results = {
-                    side: [
-                        r
-                        for r in turn_results[side]
-                        if horizons.get(r.sample_id, turn_count) > turn_index + 1
-                    ]
+            with ThreadPoolExecutor(max_workers=max(1, 2 * len(samples))) as executor:
+                futures = [
+                    executor.submit(trajectory, side, sample)
                     for side in generators
-                }
-                if not any(continuing_samples.values()):
-                    break
-
-                observations = self._simulate_observations(
-                    request=request,
-                    samples_by_side=continuing_samples,
-                    results_by_side=continuing_results,
-                )
-                for side in generators:
-                    all_observations[side].append(observations)
-                    current_samples[side] = _next_turn_samples(
-                        continuing_samples[side], continuing_results[side], observations, side=side
-                    )
-
-            return (
-                _merge_trajectory_results(
-                    samples,
-                    all_results["previous_king"],
-                    all_observations["previous_king"],
-                    side="previous_king",
-                    token_limit=self.settings.max_new_tokens,
-                    horizons=horizons,
-                ),
-                _merge_trajectory_results(
-                    samples,
-                    all_results["challenger"],
-                    all_observations["challenger"],
-                    side="challenger",
-                    token_limit=self.settings.max_new_tokens,
-                    horizons=horizons,
-                ),
-            )
+                    for sample in samples
+                ]
+                for future in futures:
+                    future.result()
         finally:
             for generator in generators.values():
                 close = getattr(generator, "close", None)
                 if callable(close):
                     close()
+
+        return tuple(
+            _merge_trajectory_results(
+                samples,
+                results[side],
+                observations[side],
+                side=side,
+                token_limit=self.settings.max_new_tokens,
+                horizons=horizons,
+            )
+            for side in ("previous_king", "challenger")
+        )
 
     def _simulate_observations(
         self,
@@ -804,6 +790,23 @@ def _remote_log_summary(run: RemoteRun, verdict: dict[str, object]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _rollouts(samples: list[EvalSample], count: int) -> list[EvalSample]:
+    if count <= 1:
+        return samples
+    return [
+        replace(sample, sample_id=f"{sample.sample_id}#r{index}")
+        for index in range(1, count + 1)
+        for sample in samples
+    ]
+
+
+def _rollout_horizons(samples: list[EvalSample]) -> dict[str, int]:
+    """Rollouts of one dataset row keep that row's horizon instead of taking new strata slots."""
+    rows = {dataset_sample_id(sample.sample_id): sample for sample in samples}
+    horizons = assign_horizons([replace(sample, sample_id=row) for row, sample in rows.items()])
+    return {sample.sample_id: horizons[dataset_sample_id(sample.sample_id)] for sample in samples}
+
+
 def _valid_generated_pair_count(
     samples: list[EvalSample],
     king_results: list[GenerationResult],
@@ -1028,6 +1031,7 @@ def _missing_command_observation(sample: EvalSample) -> str:
 
 
 def _cleanup_stale_vllm_resources() -> None:
+    subprocess.run(["pkill", "-9", "-f", "vllm serve"], check=False)
     subprocess.run(["pkill", "-9", "-f", "vllm.v1.engine.core"], check=False)
     subprocess.run(["pkill", "-9", "-f", "vllm.v1.executor.multiproc"], check=False)
     subprocess.run(["pkill", "-9", "-f", "multiprocessing.spawn.spawn_main"], check=False)

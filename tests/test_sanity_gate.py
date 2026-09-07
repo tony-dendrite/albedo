@@ -10,6 +10,7 @@ from loguru import logger
 
 from albedo_config import SanitySettings
 from albedo_eval_service.judge_llm_client import JudgeRawResponse
+from albedo_eval_service.shared.observation_memo import ObservationMemo
 from sanity_remote.models import SanityRunRequest
 from sanity_remote.state import SanityRunStore
 from sanity_remote.worker import _model_ref_parts
@@ -618,3 +619,183 @@ def test_teardown_is_skipped_while_runs_are_active(monkeypatch):
     result = asyncio.run(api.teardown_worker())
     assert result == {"state": "ok"}
     assert torn == [True]
+
+
+# --- grounding ------------------------------------------------------------------------------
+
+
+def _sim_settings():
+    """Only the fields _simulate_observation_uncached reads."""
+    return SimpleNamespace(
+        evaluator_model="evaluator",
+        simulation_model="simulator",
+        simulation_max_tokens=4096,
+        simulation_providers="",
+        evaluator_providers="",
+    )
+
+
+def _grounding_state(command: str = "grep -n 'def clear' pkg/core.py"):
+    return SimpleNamespace(
+        sample_id="shard.parquet:1:1",
+        prompt="prompt",
+        messages=[{"role": "user", "content": "task"}],
+        turns=[],
+    ), f"THOUGHT: look\n```bash\n{command}\n```"
+
+
+class _StubRepoContext:
+    """Stands in for RepoContextClient and counts calls."""
+
+    def __init__(self, grounding):
+        self.grounding = grounding
+        self.calls = 0
+
+    async def context_for(self, sample_id, assistant_output, messages=None):
+        self.calls += 1
+        return self.grounding
+
+    async def aclose(self):
+        return None
+
+
+def _no_llm(*_args, **_kwargs):
+    raise AssertionError("the simulator was called when it should not have been")
+
+
+def test_exact_grounding_returns_unsimulated(monkeypatch):
+    """The feature: a command resolved against the real snapshot reaches the model verbatim with
+    no LLM call. If this stops holding, pre-eval is silently back to inventing observations."""
+    state, assistant = _grounding_state()
+    repo = _StubRepoContext(D.Grounding(None, "12:def clear(self):", 0, "state-1"))
+    monkeypatch.setattr(D, "detect_format", lambda *_a, **_k: D.RETURNCODE)
+
+    observation = asyncio.run(
+        D._simulate_observation_uncached(
+            client=SimpleNamespace(complete=_no_llm),
+            settings=_sim_settings(),
+            eval_run_id="run",
+            state=state,
+            assistant_output=assistant,
+            repo_context=repo,
+        )
+    )
+    assert "12:def clear(self):" in observation
+    assert "<returncode>0</returncode>" in observation
+
+
+def test_resolved_context_reaches_the_simulator_prompt(monkeypatch):
+    """The other half of the feature: when the answer cannot be computed outright, the real repo
+    context must still reach the simulator. Dropping it reverts tier 2 to blind improvisation."""
+    state, assistant = _grounding_state()
+    block = (
+        f"{D.COMPUTED_BLOCK_MARKER} this search was executed against the repository\n12:def clear"
+    )
+    repo = _StubRepoContext(D.Grounding(block, None, None, "state-1"))
+    monkeypatch.setattr(D, "detect_format", lambda *_a, **_k: D.RETURNCODE)
+    seen: dict[str, str] = {}
+
+    async def _complete(**kwargs):
+        seen["system"] = kwargs["messages"][0]["content"]
+        seen["user"] = kwargs["messages"][1]["content"]
+        return SimpleNamespace(
+            raw="<returncode>0</returncode>\n<output>\n12:def clear\n</output>", error=None
+        )
+
+    asyncio.run(
+        D._simulate_observation_uncached(
+            client=SimpleNamespace(complete=_complete),
+            settings=_sim_settings(),
+            eval_run_id="run",
+            state=state,
+            assistant_output=assistant,
+            repo_context=repo,
+        )
+    )
+    assert block in seen["system"]
+    assert seen["user"].startswith("$ grep -n")
+
+
+def test_memo_queries_repo_context_once_for_a_repeated_command(monkeypatch):
+    """Pre-eval memoises on its own mutation fingerprint and grounding sits behind that memo. If
+    grounding ever moved in front of it, a looping model would get inconsistent answers to the
+    same command - the contradictions this work exists to remove."""
+    state, assistant = _grounding_state()
+    state.observation_memo = ObservationMemo()
+    repo = _StubRepoContext(D.Grounding(None, "12:def clear(self):", 0, "state-1"))
+    monkeypatch.setattr(D, "detect_format", lambda *_a, **_k: D.RETURNCODE)
+
+    async def _twice():
+        for _ in range(2):
+            await D._simulate_observation(
+                client=SimpleNamespace(complete=_no_llm),
+                settings=_sim_settings(),
+                eval_run_id="run",
+                state=state,
+                assistant_output=assistant,
+                repo_context=repo,
+            )
+
+    asyncio.run(_twice())
+    assert repo.calls == 1
+
+
+def test_prefetch_is_awaited_before_the_first_turn(monkeypatch):
+    """Snapshots download synchronously inside /repo-context, which the per-call budget cannot
+    absorb, so turns must not start until the warm-up returns. It also must stay out of
+    _build_request, which runs inside the claim transaction's advisory lock."""
+    order: list[str] = []
+
+    async def _warm(_settings, sample_ids):
+        order.append(f"prefetch:{','.join(sample_ids)}")
+
+    async def _fake_remote(_client, _request, _claimed):
+        order.append("turn")
+        return {
+            "state": "succeeded",
+            "responses": ["```bash\nls\n```"],
+            "heuristics": [{"passed": True, "reason": ""}],
+        }
+
+    async def _noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(D, "_warm_repo_context", _warm)
+    monkeypatch.setattr(
+        D, "RepoContextClient", lambda _s: _StubRepoContext(D.Grounding(None, None, None, ""))
+    )
+    monkeypatch.setattr(
+        D, "get_judge_settings", lambda: SimpleNamespace(repo_context_url="http://rc")
+    )
+    monkeypatch.setattr(D, "_append_observations", _noop)
+    monkeypatch.setattr(D, "_inject_microtasks", _noop)
+
+    request = SanityRunRequest(
+        run_id="run",
+        model_uri="m",
+        digest="d",
+        prompts=["p"],
+        sample_ids=["s-a"],
+        assistant_turns=1,
+    )
+    dispatcher = D.SanityDispatcher(settings=SanitySettings(), repository=_FakeRepo())
+    monkeypatch.setattr(dispatcher, "_run_remote_request", _fake_remote)
+
+    asyncio.run(
+        dispatcher._run_multiturn(
+            SimpleNamespace(),
+            SimpleNamespace(request=request, attempt_id=uuid4(), submission_id=uuid4()),
+        )
+    )
+    assert order == ["prefetch:s-a", "turn"]
+
+
+def test_warm_repo_context_never_raises():
+    """Grounding is optional. If the warm-up ever propagated, an unreachable repo-context service
+    would fail every attempt as INFRA_FAULT instead of simulating ungrounded."""
+
+    async def _run(url):
+        await D._warm_repo_context(SimpleNamespace(repo_context_url=url), ["s"])
+
+    asyncio.run(_run(""))
+    asyncio.run(_run("http://127.0.0.1:1"))

@@ -68,16 +68,23 @@ class _Views:
         return self.read_base(path) is not None or path in self.state.index
 
 
+def _differs_from(views: _Views, path: str, against: str) -> bool:
+    """Whether the working copy of a path differs from HEAD or from the index.
+
+    A working copy we cannot read counts as differing: the caller can only prove a path is
+    clean by comparing the two texts, never by failing to find one.
+    """
+    reference = views.head(path) if against == "head" else views.staged(path)
+    current = views.work(path)
+    return current is None or reference is None or current != reference
+
+
 def _dirty_paths(views: _Views, scope: list[str], against: str) -> list[str]:
-    out: list[str] = []
-    for path in views.touched():
-        if not _in_scope(path, scope) or not views.tracked(path):
-            continue
-        reference = views.head(path) if against == "head" else views.staged(path)
-        current = views.work(path)
-        if current is None or reference is None or current != reference:
-            out.append(path)
-    return out
+    return [
+        path
+        for path in views.touched()
+        if _in_scope(path, scope) and views.tracked(path) and _differs_from(views, path, against)
+    ]
 
 
 def _resolve_head(views: _Views, meta: GitMeta) -> str | None:

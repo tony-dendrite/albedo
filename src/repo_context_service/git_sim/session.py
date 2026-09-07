@@ -273,10 +273,10 @@ def apply_git(
         if plan.redirect and not state.unknown:
             capture = GitPlan(sub=plan.sub, args=plan.args, pipeline=plan.pipeline, raw=plan.raw)
             captured = run_git(capture, overlay, read_base, listing, GitMeta())
+            target = _to_repo_relative(plan.redirect, set(listing)) or plan.redirect
             if isinstance(captured, GitResult) and captured.exact:
-                target = _to_repo_relative(plan.redirect, set(listing)) or plan.redirect
                 overlay.know(target, captured.output + "\n" if captured.output else "")
-                overlay.created.add(target)
+            overlay.created.add(target)
         mutator = _MUTATORS.get(plan.sub)
         if mutator is None or state.unknown:
             continue

@@ -1,13 +1,16 @@
 import { DATA_ENDPOINTS, STATE_ENDPOINTS, BENCHMARK_ENDPOINTS, PULLED_SUITES, MANIFEST_ENDPOINTS, LLMS_URLS, REGISTRATION_ENDPOINTS } from "./config.js";
 
-let llmsTextCache = null;
 const registrationCacheKey = "albedo.registrationHistory.v2";
 
-async function fetchFirstJson(endpoints, { revalidate = false } = {}) {
-  const suffix = revalidate ? "" : "?t=" + Date.now();
+// Every feed is served with a validator and answers 304, so a conditional request is
+// both always-fresh and cheap; a cache-busting query would force a full re-download
+// on every poll instead.
+const NO_CACHE = { cache: "no-cache" };
+
+async function fetchFirstJson(endpoints) {
   for (const url of endpoints) {
     try {
-      const r = await fetch(url + suffix, { cache: revalidate ? "no-cache" : "no-store" });
+      const r = await fetch(url, NO_CACHE);
       if (!r.ok) continue;
       return await r.json();
     } catch {}
@@ -24,14 +27,14 @@ export async function fetchState() {
 }
 
 export async function fetchBenchmarks() {
-  return fetchFirstJson(BENCHMARK_ENDPOINTS, { revalidate: true });
+  return fetchFirstJson(BENCHMARK_ENDPOINTS);
 }
 
 // One score file per pulled suite, keyed by suite so callers never have to know
 // which file a suite came from.
 export async function fetchPulledScores() {
   const entries = await Promise.all(PULLED_SUITES.map(async pulled => {
-    const rows = await fetchFirstJson(pulled.scoreEndpoints, { revalidate: true });
+    const rows = await fetchFirstJson(pulled.scoreEndpoints);
     return [pulled.suite, Array.isArray(rows) ? rows : []];
   }));
   return new Map(entries);
@@ -42,7 +45,7 @@ export async function fetchBenchmarkRun(run) {
   for (const endpoint of BENCHMARK_ENDPOINTS) {
     const base = endpoint.slice(0, endpoint.lastIndexOf("/") + 1);
     try {
-      const r = await fetch(base + run.detail_path, { cache: "no-cache" });
+      const r = await fetch(base + run.detail_path, NO_CACHE);
       if (!r.ok) continue;
       const payload = await r.json();
       return payload?.run || payload;
@@ -56,13 +59,11 @@ export async function fetchManifest() {
 }
 
 export async function fetchLlmsText() {
-  if (llmsTextCache) return llmsTextCache;
   for (const url of LLMS_URLS) {
     try {
-      const r = await fetch(url + "?t=" + Date.now(), { cache: "no-store" });
+      const r = await fetch(url, NO_CACHE);
       if (!r.ok) continue;
-      llmsTextCache = await r.text();
-      return llmsTextCache;
+      return await r.text();
     } catch {}
   }
   return null;
@@ -71,7 +72,7 @@ export async function fetchLlmsText() {
 export async function fetchRegistrationHistory() {
   for (const url of REGISTRATION_ENDPOINTS) {
     try {
-      const r = await fetch(url, { cache: "no-store" });
+      const r = await fetch(url, NO_CACHE);
       if (!r.ok) continue;
       const data = await r.json();
       try { localStorage.setItem(registrationCacheKey, JSON.stringify(data)); } catch {}
@@ -90,6 +91,8 @@ function countMarkers(text) {
   return n;
 }
 
+// Ranged read of a file that is still being appended to: byte offsets only line up
+// against the live object, so this one request must never be served from a cache.
 async function readPredsTail(url, offset) {
   const from = Math.max(0, offset - PRED_MARKER.length + 1);
   const r = await fetch(url, { cache: "no-store", headers: from ? { Range: `bytes=${from}-` } : {} });
@@ -110,7 +113,7 @@ export async function fetchPredsProgress(bases, runIds) {
     for (const base of bases) {
       const url = `${base}/${runId}/preds.json`;
       try {
-        const head = await fetch(url, { method: "HEAD", cache: "no-store" });
+        const head = await fetch(url, { method: "HEAD", ...NO_CACHE });
         if (!head.ok) continue;
         const size = Number(head.headers.get("content-length"));
         if (!Number.isFinite(size) || size <= 0) continue;
@@ -148,7 +151,7 @@ export async function fetchPredsProgress(bases, runIds) {
 
 export async function fetchText(url) {
   try {
-    const r = await fetch(url, { cache: "no-store" });
+    const r = await fetch(url, NO_CACHE);
     if (!r.ok) return null;
     return await r.text();
   } catch { return null; }

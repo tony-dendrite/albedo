@@ -201,7 +201,7 @@ async function downloadZip(btn, entries, map, zipName) {
   try {
     const zip = new JSZip();
     await Promise.all(entries.map(async a => {
-      try { const r = await fetch(map[a.key]); if (r.ok) zip.file(a.label, await r.blob()); } catch {}
+      try { const r = await fetch(map[a.key], { cache: "no-cache" }); if (r.ok) zip.file(a.label, await r.blob()); } catch {}
     }));
     const blob = await zip.generateAsync({ type: "blob" });
     const url = URL.createObjectURL(blob);

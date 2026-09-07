@@ -1,0 +1,36 @@
+{
+  "_README": [
+    "Input for: uv run python scripts/dedup_seed_bank.py --manifest <this file> [--from-db]",
+    "Unknown top-level keys (like this one) are ignored by load_manifest().",
+    "root: index the chain.toml seed as the bank root. Keep true unless it is already indexed.",
+    "kings: romans on the <king_namespace>/<king_prefix>-<ROMAN> HF mirror. A bare string pins",
+    "  to the repo's current head at run time; the object form takes an explicit 40-hex revision",
+    "  plus the hotkey/coldkey that owns it (needed for OWN-COPY to work on that miner later).",
+    "models: any other repo, as {repo, revision} or a huggingface.co URL. The entry below shows the explicit-revision form; leave revision \"\" to pin to head like the kings above.",
+    "Order is root -> --from-db accepted submissions (oldest block first) -> kings -> models,",
+    "and each model is judged by the LIVE gate against whatever is already banked, so seed in",
+    "chronological order or a later king can read as a copy of one it actually preceded.",
+    "Every entry costs a ~67 GiB download that is deleted after indexing (--keep to retain)."
+  ],
+  "root": true,
+  "king_namespace": "dendriteholdings",
+  "king_prefix": "albedo-qwen3.6-35b-king",
+  "kings": [
+    "CXVIII",
+    "CXIX",
+    "CXX",
+    {
+      "roman": "CXXI",
+      "hotkey": "",
+      "coldkey": ""
+    }
+  ],
+  "models": [
+    {
+      "repo": "dendriteholdings/albedo-qwen3.6-35b-king-CXXII",
+      "revision": "7d8c0251648cf5823d857b9b9c794b9e9b9e4641",
+      "hotkey": "",
+      "coldkey": ""
+    }
+  ]
+}

@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import tarfile
 import tempfile
@@ -31,13 +32,17 @@ from albedo_eval_service.remote.dataset import (
 from albedo_eval_service.shared.dataset_manifest import load_manifest_file
 from albedo_eval_service.shared.observation_format import (
     OPENHANDS_TRUNCATION_NOTICE,
+    command_stages,
     detect_format,
+    heredoc_bodies,
+    strip_leading_comments,
 )
 from albedo_eval_service.shared.submit_protocol import ANY_MARKER_RE
 
 from .command_search import (
     ParseFailure,
     SearchResult,
+    _mask_quoted,
     _number_lines,
     parse_search,
     run_search,
@@ -258,6 +263,9 @@ def _is_permanent_github_error(exc: Exception) -> bool:
     return False
 
 
+_PULL_ID_RE = re.compile(r"(.+?)_(.+)_pr(\d+)")
+
+
 def parse_instance(source: str, instance_id: str) -> RepoRef | None:
     try:
         if source.startswith("mini-coder"):
@@ -276,6 +284,15 @@ def parse_instance(source: str, instance_id: str) -> RepoRef | None:
                         commit=tokens[index],
                     )
             return None
+        pull = _PULL_ID_RE.fullmatch(instance_id)
+        if pull is not None:
+            return RepoRef(
+                instance_id=instance_id,
+                source=source,
+                owner=pull.group(1),
+                repo=pull.group(2),
+                pr=pull.group(3),
+            )
         owner_repo, tail = instance_id.rsplit("-", 1)
         owner, repo = owner_repo.split("__", 1)
         if tail.isdigit():
@@ -291,7 +308,7 @@ def parse_instance(source: str, instance_id: str) -> RepoRef | None:
 
 def _first_command(text: str) -> str:
     match = _TAGGED_BLOCK_RE.search(text or "") or _COMMAND_BLOCK_RE.search(text or "")
-    return match.group(1).strip() if match else ""
+    return strip_leading_comments(match.group(1)) if match else ""
 
 
 def _name_patterns(cmd: str) -> list[str]:
@@ -345,6 +362,42 @@ def _resolve_path(token: str, listing_set: set[str], index: dict[str, str]) -> s
 _WRITE_TARGET = re.compile(r">>?\s*[^\s|;&()\"'<>]+")
 _WRITE_DEST = re.compile(r"\b(?:cp|mv|install)\s+(?:-\S+\s+)*\S+\s+(\S+)|\btee\s+(?:-\S+\s+)*(\S+)")
 _CD_ONLY = re.compile(r"^cd\s+\S+$")
+# a stage that changes the tree, or sends its output into it: composing a chain around one would
+# answer a later stage from a world the earlier stage has already left behind
+_CHAIN_MUTATES = re.compile(
+    r"^(?:rm|mkdir|rmdir|mv|cp|install|touch|chmod|chown|ln|tee|patch|truncate"
+    r"|sed\s+(?:-i|--in-place)"
+    r"|git\s+(?:add|apply|checkout|restore|stash|commit|reset|rm|mv|clean))\b"
+)
+_CHAIN_REDIRECTS = re.compile(r"(?<![0-9<>])>>?[ \t]*\S")
+
+
+def _sed_scripts(cmd: str) -> list[str]:
+    """The script arguments of every `sed` stage: the patterns, not the files they run against."""
+    scripts: list[str] = []
+    for stage in command_stages(cmd):
+        try:
+            tokens = shlex.split(stage)
+        except ValueError:  # an unbalanced quote is not a sed script this can read
+            continue
+        if not tokens or tokens[0].rsplit("/", 1)[-1] != "sed":
+            continue
+        expecting = False
+        taken = False
+        for token in tokens[1:]:
+            if expecting:
+                scripts.append(token)
+                expecting, taken = False, True
+                continue
+            if token in ("-e", "-f", "--expression", "--file"):
+                expecting = True
+                continue
+            if token.startswith("-"):
+                continue
+            if not taken:
+                scripts.append(token)
+                taken = True
+    return scripts
 
 
 def _referenced_paths(cmd: str, listing: list[str]) -> tuple[list[str], list[str]]:
@@ -355,6 +408,14 @@ def _referenced_paths(cmd: str, listing: list[str]) -> tuple[list[str], list[str
     missing: list[str] = []
     # a copy/move/tee destination does not exist yet, which is normal rather than an error
     dests = {m.group(1) or m.group(2) for m in _WRITE_DEST.finditer(cmd)}
+    # a heredoc body is the data being written, not shell words naming files. Its tokens may still
+    # resolve to real files worth listing as present, but one that does not resolve must never be
+    # asserted absent: `dt.datetime.now` is an attribute chain, and telling the simulator it is a
+    # missing file is a fabrication that invites it to invent a failure.
+    # a sed script is data too: `s/self.font.bold/None/` and `/has_metadata_file/d` are patterns,
+    # and tokenising them invents paths out of the text being matched
+    data = list(heredoc_bodies(cmd)) + _sed_scripts(cmd)
+    in_data = {token for span in data for token in re.split(r"[\s|;&<>()\"']+", span) if token}
     for tok in re.split(r"[\s|;&<>()\"']+", _WRITE_TARGET.sub(" ", cmd)):
         if not tok or tok.startswith("-"):
             continue
@@ -373,6 +434,8 @@ def _referenced_paths(cmd: str, listing: list[str]) -> tuple[list[str], list[str
         if not norm or norm in (".", "..") or norm in missing or tok in dests:
             continue
         if any(x.startswith(norm + "/") for x in listing_set):
+            continue
+        if tok in in_data:
             continue
         if tok.startswith(("/", "..")):
             missing.append(norm)
@@ -755,22 +818,33 @@ class RepoContextService:
         cache_path = snapshot / _HISTORY_NAME.format(key=_hashed(key))
         cached = _read_json(cache_path)
         if isinstance(cached, dict):
-            return cached if cached.get("commits") is not None else None
+            if cached.get("commits") is not None:
+                return cached
+            if self._failure_fresh(cache_path):
+                return None
         query = f"/repos/{owner}/{repo}/commits?sha={sha}&per_page={_HISTORY_PAGE}"
         if path:
             query += f"&path={quote(path, safe='')}"
         try:
             data = self._github_json(query)
         except Exception as exc:
+            kind = "absent" if isinstance(exc, _NotFound) else "transient"
             logger.info(
-                "repo_context_history_unavailable repo={}/{} path={} error={}",
+                "repo_context_history_unavailable repo={}/{} path={} kind={} error={}",
                 owner,
                 repo,
                 path or "-",
+                kind,
                 f"{type(exc).__name__}: {exc}",
+            )
+            _write_json_atomic(
+                cache_path, {"commits": None, "failed_at": time.time(), "kind": kind}
             )
             return None
         if not isinstance(data, list):
+            _write_json_atomic(
+                cache_path, {"commits": None, "failed_at": time.time(), "kind": "absent"}
+            )
             return None
         payload = {
             "commits": [
@@ -865,7 +939,8 @@ class RepoContextService:
         failed = _read_json(failed_path)
         if failed is None:
             return False
-        ttl = _NEGATIVE_TTL_SECONDS if failed.get("kind") == "oversized" else _TRANSIENT_TTL_SECONDS
+        settled = failed.get("kind") in ("oversized", "absent")
+        ttl = _NEGATIVE_TTL_SECONDS if settled else _TRANSIENT_TTL_SECONDS
         return time.time() - float(failed.get("failed_at", 0)) < ttl
 
     def _download_tarball(self, owner: str, repo: str, sha: str, dest: Path) -> None:
@@ -1045,7 +1120,7 @@ class RepoContextService:
         fmt: str = "",
         attested: set[str] | None = None,
         root: str = "",
-    ) -> tuple[str, str | None] | None:
+    ) -> tuple[str, str | None, int | None] | None:
         result = self._run_command(snapshot_dir, listing, cmd, overlay, attested, root)
         if result is None:
             return None
@@ -1059,6 +1134,7 @@ class RepoContextService:
         else:
             exact = _scaffold_truncate(result.output, fmt)
             block = COMPUTED_HEADER + "\n" + exact + "\n"
+        returncode = result.returncode
         if result.incomplete:
             block += (
                 "\n"
@@ -1066,8 +1142,69 @@ class RepoContextService:
                 + "\n".join(f"- {p}" for p in result.incomplete[:_MAX_MISSING_PATHS])
                 + "\n"
             )
-            exact = None
-        return _truncate(block, self.settings.max_context_chars), exact
+            exact, returncode = None, None
+        return _truncate(block, self.settings.max_context_chars), exact, returncode
+
+    def _computed_chain_block(
+        self,
+        snapshot_dir: Path,
+        listing: list[str],
+        cmd: str,
+        overlay: Overlay,
+        fmt: str = "",
+        attested: set[str] | None = None,
+        root: str = "",
+    ) -> tuple[str, str | None, int | None] | None:
+        """One computed answer for an `&&` chain whose every stage is a repository query.
+
+        `parse_search` reads a whole command, and strips a leading `cd` prefix to do it, so a
+        chain of one query already computes; two or more of them do not, and until now the stages
+        were run only to be quoted back as evidence. Running the same stages and joining their
+        output answers the turn instead.
+
+        `&&` stops at the first stage that fails and that stage's status is the command's, so the
+        join stops there too. Three shapes are declined rather than composed, because each would
+        put a stage's answer in the wrong world: a stage that writes or redirects, which a later
+        stage could read back; a `cd` anywhere but the head of the chain, which moves where the
+        later stages resolve their paths; and a stage that reports a path missing, which after a
+        `cd` this does not follow could be a file that is present where the command was actually
+        run.
+        """
+        stages = split_chain(cmd)
+        if stages is None:
+            return None
+        # only the head may be a `cd`: that one is the prefix parse_search itself strips, and
+        # every stage is then resolved from the repository root. A later one would move where
+        # the stages after it resolve their paths, and dropping it here would answer them from
+        # a directory the shell had already left
+        if any(_CD_ONLY.match(stage.strip()) for stage in stages[1:]):
+            return None
+        payload = [stage for stage in stages if not _CD_ONLY.match(stage.strip())]
+        if len(payload) < 2 or any(
+            _CHAIN_MUTATES.match(stage.strip()) or _CHAIN_REDIRECTS.search(_mask_quoted(stage))
+            for stage in payload
+        ):
+            return None
+        parts: list[str] = []
+        returncode = 0
+        for stage in payload:
+            result = self._run_command(snapshot_dir, listing, stage, overlay, attested, root)
+            if result is None or result.incomplete or result.missing:
+                return None
+            if result.returncode is None:
+                return None
+            if not result.empty:
+                parts.append(result.output)
+            returncode = result.returncode
+            if returncode:
+                break
+        output = "\n".join(parts)
+        if not output:
+            block, exact = COMPUTED_EMPTY, ""
+        else:
+            exact = _scaffold_truncate(output, fmt)
+            block = COMPUTED_HEADER + "\n" + exact + "\n"
+        return _truncate(block, self.settings.max_context_chars), exact, returncode
 
     def _build_repo_block(
         self,
@@ -1084,11 +1221,16 @@ class RepoContextService:
             snapshot_dir, listing, cmd, overlay, fmt, attested, root
         )
         if computed is not None:
-            return computed[0], computed[1], None
+            return computed
         meta = meta or GitMeta()
         computed_git = self._computed_git_block(snapshot_dir, listing, cmd, overlay, fmt, meta)
         if computed_git is not None:
             return computed_git
+        computed_chain = self._computed_chain_block(
+            snapshot_dir, listing, cmd, overlay, fmt, attested, root
+        )
+        if computed_chain is not None:
+            return computed_chain
         evidence = self._chain_evidence(
             snapshot_dir, listing, cmd, overlay, attested, root
         ) + self._git_hints(snapshot_dir, listing, cmd, overlay, meta)

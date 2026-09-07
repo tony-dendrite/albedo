@@ -16,7 +16,7 @@ from albedo_config.models import JUDGE_MODELS
 
 from ..evaluator.shared.questions import assign_horizons
 from ..judge_core import aggregate_scores
-from ..remote.dataset import EvalSample
+from ..remote.dataset import EvalSample, dataset_sample_id
 from ..remote.generation import GenerationResult
 from ..shared.models import EvalRequest
 from .score_bridge import score_bridge_hub
@@ -297,7 +297,7 @@ def _simulate_observation_payload(
 ) -> dict[str, Any]:
     return {
         "eval_run_id": str(request.eval_run_id),
-        "sample_id": sample.sample_id,
+        "sample_id": dataset_sample_id(sample.sample_id),
         "prompt": sample.prompt,
         "messages": sample.messages,
         "assistant_output": assistant_output,
@@ -335,7 +335,7 @@ def _score_batch_payloads(
                 "category_prep_id": category_prep_id,
                 "samples": [
                     {
-                        "sample_id": sample.sample_id,
+                        "sample_id": dataset_sample_id(sample.sample_id),
                         "prompt": sample.prompt,
                         "previous_king_output": king_by_id[sample.sample_id].text,
                         "challenger_output": challenger_by_id[sample.sample_id].text,

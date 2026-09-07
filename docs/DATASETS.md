@@ -144,7 +144,7 @@ same samples, and no miner can influence the draw.
 sources**, then fills a stratified grid:
 
 - **phase** (`STEP_TRIM`) — where the trajectory is cut, anchored on the instance's `first_edit`:
-  `pre_edit` 45% (`first_edit - 2`), `at_edit` 35% (`first_edit`), `cold` 20% (turn 1 or 2).
+  `cold` 65% (turn 1 or 2), `pre_edit` 15% (`first_edit - 2`), `at_edit` 20% (`first_edit`).
 - **bug family** (`FAMILY_MIX`) — `pr` 50%, `lm` 15%, `combine` 10%, `mechanical` 25%.
 - `REPO_CAP = 2` — at most two samples from any one repository.
 - `NON_BENCHMARK_LANGUAGE_FRACTION = 0.30` — 30% of the draw is non-`python`.
@@ -152,7 +152,7 @@ sources**, then fills a stratified grid:
 
 Sample ids are `"<source>/data/train-XXXXX.parquet:<row>:<turn>"`. Defaults: `sample_count = 100`
 (`ALBEDO_EVAL_SAMPLE_COUNT`; the function's own default is 64). The number of candidate turns per
-sample is **not** a single constant — `HORIZON_STRATA = (8, 12, 16)` in
+sample is **not** a single constant — `HORIZON_STRATA = (12, 16)` in
 `evaluator/shared/questions.py` assigns a horizon round-robin within each phase bucket, and
 `ALBEDO_REMOTE_TRAJECTORY_ASSISTANT_TURNS` (8) is only the fallback when no horizon is assigned.
 

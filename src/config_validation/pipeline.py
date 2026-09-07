@@ -13,15 +13,13 @@ from config_validation.chain import CommitRecord
 from config_validation.checks import (
     CheckOutcome,
     architecture,
-    duplicate,
     files,
     genesis_metadata,
     revision,
 )
-from config_validation.fingerprint.store import FingerprintStore, NullFingerprintStore
 from config_validation.models import ModelRef
 from config_validation.result import ValidationResult
-from config_validation.storage import download_config, download_full, list_files
+from config_validation.storage import download_config, list_files
 
 
 def _load_config_json(local_dir: str) -> dict[str, Any]:
@@ -42,11 +40,8 @@ def load_seed_config() -> dict[str, Any]:
 def validate_commit(
     record: CommitRecord,
     *,
-    store: FingerprintStore | None = None,
     seed_cfg: dict[str, Any] | None = None,
-    record_fingerprint: bool = False,
 ) -> ValidationResult:
-    store = store or NullFingerprintStore()
     result = ValidationResult(
         block=record.block,
         hotkey=record.hotkey,
@@ -103,26 +98,5 @@ def validate_commit(
         result.checks.append(
             CheckOutcome(architecture.NAME, False, f"could not load config.json: {exc}")
         )
-
-    if all(c.ok for c in result.checks):
-        try:
-            model_dir = download_full(ref)
-            dup = duplicate.check(model_dir, store, hotkey=record.hotkey)
-            result.checks.append(dup)
-            if record_fingerprint and dup.ok and dup.details.get("fingerprint"):
-                store.add(
-                    ref.immutable_ref,
-                    dup.details["fingerprint"],
-                    hotkey=record.hotkey,
-                    repo=record.repo,
-                    digest=record.digest,
-                )
-        except Exception as exc:
-            logger.exception(
-                f"[config-val] could not fingerprint model repo={record.repo} digest={record.digest}: {exc}"  # noqa: E501
-            )
-            result.checks.append(
-                CheckOutcome(duplicate.NAME, False, f"could not fingerprint model: {exc}")
-            )
 
     return result

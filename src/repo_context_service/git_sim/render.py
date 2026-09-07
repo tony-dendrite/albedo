@@ -30,7 +30,14 @@ from .templates import (
     UNTRACKED_ONLY_TRAILER,
     UPDATED_PATHS_LINE,
 )
-from .views import _dirty_paths, _in_scope, _normalize_paths, _resolve_head, _Views
+from .views import (
+    _differs_from,
+    _dirty_paths,
+    _in_scope,
+    _normalize_paths,
+    _resolve_head,
+    _Views,
+)
 
 
 def _entry(label: str, path: str) -> str:
@@ -294,13 +301,10 @@ def _run_show(plan: GitPlan, views: _Views, meta: GitMeta) -> GitResult | ParseF
             return ParseFailure("unsupported_form", "show --stat with pathspec")
         lines += ["", *patch["stat"]]
     else:
-        abbrev = views.state.abbrev
-        if abbrev is None:
-            return ParseFailure("unsupported_form", "abbrev length unknown")
         diff = _filter_diff(patch["diff"], wanted) if wanted else patch["diff"]
         if wanted and not diff:
             return ParseFailure("unsupported_form", "commit does not touch the pathspec")
-        lines += ["", *_retarget_funcnames(_reabbrev(diff, abbrev), views)]
+        lines += ["", *_retarget_funcnames(_reabbrev(diff, views.abbrev), views)]
     lines = _apply_pipeline(lines, SearchPlan(pattern="", targets=[], pipeline=plan.pipeline))
     return GitResult(output="\n".join(lines), empty=not lines)
 
@@ -343,9 +347,6 @@ def _run_log(plan: GitPlan, views: _Views, meta: GitMeta) -> GitResult | ParseFa
 
     if len(paths) > 1:
         return ParseFailure("unsupported_form", "log with several pathspecs")
-    abbrev = views.state.abbrev
-    if abbrev is None:
-        return ParseFailure("unsupported_form", "abbrev length unknown")
     scoped = None
     if paths:
         scoped = _to_repo_relative(paths[0], views.listing_set)
@@ -362,8 +363,10 @@ def _run_log(plan: GitPlan, views: _Views, meta: GitMeta) -> GitResult | ParseFa
             return ParseFailure("unsupported_form", "history incomplete for an unlimited log")
         limit = EVIDENCE_LOG_LIMIT
 
-    lines = [f"{entry['sha'][:abbrev]} {entry['subject']}" for entry in commits]
-    if scoped is None and not (views.state.detached or meta.detached):
+    lines = [f"{entry['sha'][: views.abbrev]} {entry['subject']}" for entry in commits]
+    heads_at_checkout = bool(meta.sha) and commits[0]["sha"] == meta.sha
+    if scoped is None and not (views.state.detached or meta.detached or heads_at_checkout):
+        # a commit sits on top of the history the API knows, and only an observation can name it
         head = views.state.head_short
         if not head:
             return ParseFailure("unsupported_form", "harness commit sha unknown")
@@ -386,7 +389,7 @@ def _run_checkout(plan: GitPlan, views: _Views, meta: GitMeta) -> GitResult | Pa
     normalized = _normalize_paths(operands, views.listing_set)
     if not all(p in views.listing_set for p in normalized):
         return ParseFailure("unsupported_form", "checkout target not a tracked path")
-    count = len(normalized)
+    count = sum(1 for path in normalized if _differs_from(views, path, "index"))
     return GitResult(
         output=UPDATED_PATHS_LINE.format(n=count, s="" if count == 1 else "s"), empty=False
     )

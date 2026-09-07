@@ -11,88 +11,130 @@ For what the models are scored *on*, see [DATASETS.md](DATASETS.md).
 ## The shape of one eval
 
 An eval is a **duel**, not a benchmark run. Both models answer the same sampled coding-trajectory
-prefixes, and each sample is scored by the same checklist for both sides.
+prefixes, and each sample is scored by the same checklist for both sides. Each side rolls every
+sample out `ALBEDO_REMOTE_ROLLOUTS_PER_SAMPLE` (2) times and the score is the mean over all
+trajectories, so one lucky or unlucky rollout weighs half as much.
 
 ```
 sample prefix ──► king model      ──► king trajectory      ─┐
               └─► challenger model──► challenger trajectory ─┤
                                                              ├─► judges answer the SAME
-reference model ──► reference trajectory ──► checklist ──────┘   yes/no checklist per side
+reference model ──► N reference runs ──► vector of change ────┘   yes/no checklist per side
+                                          └─► question ladder
 ```
 
 Per sample the pipeline is:
 
-1. **Reference trajectory** — a SOTA model (`ALBEDO_JUDGE_SOTA_MODELS`) runs the same task through
-   the same simulated-observation loop the candidates face, for
-   `ALBEDO_JUDGE_SOTA_TRAJECTORY_TURNS` (8) turns.
-2. **Checklist generation** — the evaluator model (`ALBEDO_JUDGE_EVALUATOR_MODEL`) writes up to
-   `RUBRIC_MAX_QUESTIONS` (40) yes/no questions anchored on that reference trajectory, plus 18
-   behaviour questions from three separate calls; the result is filtered and self-pruned (below).
-3. **Judging** — each judge model answers the whole checklist twice: once for the king's
-   trajectory, once for the challenger's. Judges never see which side is which, and never see the
+1. **Reference runs** — `ALBEDO_JUDGE_REFERENCE_RUNS` (3) trajectories are generated concurrently
+   from the same prefix by the SOTA model (`ALBEDO_JUDGE_SOTA_MODELS`), each through the same
+   simulated-observation loop the candidates face, for `ALBEDO_JUDGE_SOTA_TRAJECTORY_TURNS` (8)
+   turns. They share one world: the observation simulator memoises on
+   `(sample_id, format, repo state, command)`, so the same command in the same state resolves to
+   the same observation in every run and the runs diverge only where the model chose differently.
+   Losing one run is survivable; below two there is nothing to compare and the sample is dropped.
+2. **Vector of change** — ONE evaluator call reads every run at once and reduces them to an ordered
+   list of task-level **milestones** (`prompt_milestones.py`).
+3. **Question ladder** — ONE evaluator call turns the surviving milestones into questions at a
+   spread of depths (`prompt_ladder.py`).
+4. **Judging** — each judge model answers the whole checklist twice: once for the king's
+   trajectory, once for the challenger's. Judges never see which side is which, and never see any
    reference (leak-filtered, see below).
-4. **Aggregation** — weighted yes-rate per judge → mean across judges → mean across samples.
+5. **Aggregation** — weighted yes-rate per judge → mean across judges → mean across samples.
 
-If the reference cannot be produced (and a re-roll also fails), or the sample carries no prior
-context to anchor a reference to, `QuestionService.prepare` raises `QuestionScoringUnavailable` —
-there is no task-only fallback checklist. `question_source.question_mode` is always
-`"sota_anchored"`.
+If fewer than two reference runs survive, or the sample carries no prior context to anchor them to,
+`QuestionService.prepare` raises `QuestionScoringUnavailable` — there is no task-only fallback
+checklist. `question_source.question_mode` is always `"milestone_ladder"`.
 
 ---
 
 ## The checklist
 
-The checklist is built from **two regimes in parallel**, not from fixed section shares (the old
-`STEP_SHARES_PCT` split no longer exists):
+### The vector of change
 
-| regime | size | source | what it asks about |
-|---|---|---|---|
-| **reference rubric** | up to `RUBRIC_MAX_QUESTIONS` (40) | one evaluator call, anchored on the reference trajectory | the actual work, evidence, continuity, output economy |
-| **behaviour checks** | `3 × BEHAVIOR_K` = 18 | three independent evaluator calls | per-trim behaviour, not derived from the reference |
+The extractor (`EXTRACTOR_SKELETON`) is shown the TASK block — system prompt, problem
+description, and the conversation that already ran, observations included — followed by every
+reference run. It returns an ordered list of milestones, each of exactly one category:
 
-Behaviour questions are only generated when `ALBEDO_JUDGE_NUM_QUESTIONS >= 3 * BEHAVIOR_K`. That
-setting (50) therefore **gates** the second regime rather than sizing the checklist — the final count
-is whatever survives filtering, which is typically well under 58.
-
-Rubric questions come back with a **tag**, and `RUBRIC_TAG_REQUIRES` maps each tag onto the `requires`
-label that the gate and the label caps run on:
-
-| tag | `requires` | meaning |
+| category | what it asserts | admissible evidence (`SOURCES_BY_CATEGORY`) |
 |---|---|---|
-| `action` | `action` | needs real work |
-| `continuity` | `action` | must build on what the trajectory already established |
-| `verification` | `action` | must check its own result |
-| `explore` | `read` | a read-only step can satisfy it |
-| `economy` | `neutral` | output hygiene — capped at `RUBRIC_ECONOMY_CAP` (6), with `RUBRIC_LENGTH_BOUNDS` (5) length bounds |
+| `claims` | what the runs found when they put the task's own claim to the repository | `output`, `stated` |
+| `explore` | a mechanism established in the code | `output`, `stated` |
+| `action` | what the code now does that it did not before, and where | `edit`, `output`, `command` |
+| `verification` | a check run, named by the behaviour it exercises — never its result | `command`, `stated` |
+
+Each milestone carries `necessary` + `necessity_reason` (a counterfactual — *what breaks without
+it* — explicitly **not** a majority vote across runs), `in_prefix` (whether the TASK block already
+handed it over), `consensus` (which runs reached it), `depends_on`, and one `{run, step, source,
+span}` evidence entry per consenting run.
+
+`validate_vector` then enforces mechanically what the prompt asks for, recording every drop:
+
+- `optional` — `necessary: false`.
+- `given_by_task` — `in_prefix: true`, or a span that occurs in the TASK block.
+- `source_<x>_inadmissible_for_<category>` — an `explore` resting on a block the agent authored
+  (it was assumed, not discovered), or a `verification` resting on what came back.
+- `span_not_in_<source>` — the span does not occur in that kind of block in the run it cites. Spans
+  are compared after `normalise_span`, which folds whitespace, smart quotes and `nl`/`grep -n` line
+  prefixes so a faithfully copied span is not rejected for formatting.
+- `unreached` — every evidence entry failed, so no run demonstrably got there.
+
+A milestone whose `depends_on` names a dropped milestone has that id pruned, so nothing grounds
+itself on something that no longer exists.
+
+If the surviving count falls outside `[MILESTONE_MIN, MILESTONE_MAX]` = **3..12**, the extractor is
+asked again, up to `MILESTONE_RETRIES` (2) more times. Too **thin** only earns a retry when the loss
+was the extractor's to avoid (`RECOVERABLE_DROPS`: mis-copied spans, wrong source labels) —
+`optional` and `given_by_task` are the corpus's verdict and a second reading returns them the same
+way. Too **bloated** retries on the bare count. The best attempt wins outright rather than being
+merged: two passes name the same facts under different ids, and concatenating them would give one
+fact several sets of questions and so several times the weight.
+
+### The ladder
+
+`project_vector` renders each surviving milestone for one question-writing call: its category and
+statement, why it is required, the statements it depends on, whether the runs' spans point at the
+same code (`spans_agree`, token Jaccard ≥ 0.6 — fewer than two spans is not agreement but the
+absence of a comparison, and answers no, so a milestone only one run reached licenses no naming),
+what every run worked on en route (the intersection of the runs' command targets over their
+approach windows), each run's own sentences from that window, and up to three distinct spans.
+Run numbers and consensus lists are withheld — the writer needs to know that the routes differed,
+never which agent took which.
+
+`LADDER_SKELETON` then writes a set of questions per milestone, up to `RUNGS_MAX` (6) each and
+`QUESTIONS_MAX` (60) overall. Where the runs reached a milestone through **different** code, a
+question may name no file, function or expression at all — naming either route would punish every
+candidate that took the other.
+
+The prompt asks for questions at a range of difficulties within a milestone, and each question
+records the depth it was written at in a `rung` field. Every question is answered independently
+and weighs the same, so a milestone's contribution to the score is just the number of its
+questions answered yes. `rung` is renumbered contiguously per milestone by `parse_ladder` and is
+carried into the scoring record for analysis only.
+
+
+If any milestone comes back under `LADDER_MIN` (2) questions, one more call asks for those alone.
+The retry re-sends the **whole** vector: approach windows partition the milestone sequence, so
+projecting a subset would silently widen them.
 
 ### Enforcement at parse time
 
-Prose rules in a prompt get ignored, so `enforce_question_labels` re-enforces them on the parsed
-output and records the drops in `question_source.enforcement_drops`:
+Prose rules in a prompt get ignored, so the parsed output is re-checked in code and the drops are
+recorded in `question_source`:
 
-- `read_cap` — how many read-only-passable questions survive depends on the sample's phase:
-  `READ_CAPS_BY_PHASE` = `cold` 10 / `pre_edit` 7 / `at_edit` 5, falling back to
-  `READ_ONLY_QUESTION_CAP` (5) for an unknown phase. A `cold` cut is early in the trajectory, where
-  reading *is* the right move; at the edit point it is not.
-- `unfolded_avoid` — "avoids X" checks with no action verb are dropped; inaction sweeps them.
-- `no_edit_dead_weight` — when the reference never edited in its window, `requires: action`
-  questions about completed edits are dropped.
+- `unfolded_avoid` (`enforce_question_labels`) — "avoids X" checks with no action verb are dropped;
+  inaction sweeps them.
+- `reference_leak` (`filter_reference_leaks`) — a question that mentions the reference, milestones,
+  a vector of change, or the other agents is dropped. The judge sees one candidate and one
+  question; a question naming any of that invites it to score against something it cannot see.
+  duplicates, template stamping, generic-hygiene and negative-form caps.
 
-A sample is rejected outright if fewer than `question_floor(n)` = **22%** of the requested questions
-come back well-formed (`QUESTION_FLOOR_FRACTION`).
+### Pruning against the reference runs
 
-### Self-pruning against the reference
+Every reference run is judged against the finished checklist, and a question that **not one of them**
+earns is dropped (`_prune_unreachable`, gated by `ALBEDO_JUDGE_REFERENCE_PRUNE`).
+If no run returns a readable verdict the unpruned checklist is kept rather than deleted blind.
 
-After enforcement, the reference trajectory is scored on its own checklist and the questions **it**
-fails are dropped (`_prune_against_reference`), down to a floor of `PRUNE_MIN_SURVIVORS` (8) — a
-question the reference itself cannot pass is measuring the rubric, not the candidate. The reference's
-own pass rate is recorded as `reference_self_score`. If pruning errors out, the unpruned checklist is
-kept rather than failing the sample.
-
-Every question dropped at any stage — parse, leak filter, enforcement, pruning, rejected attempts — is
-recorded in the scoring artifact under `question_source`, so a run's checklist is fully reconstructible.
-
----
+A sample is rejected outright if fewer than `QUESTION_FLOOR` (6) milestone questions survive
 
 ## Before the judge: degenerate sides are scored 0 outright
 
@@ -118,27 +160,34 @@ trajectories, looped sides were scoring 0.578 against 0.673 for clean ones — a
 worst looped trajectory scoring 0.913 while repeating one `grep` in 10 of its 12 commands.
 `sanity_service/tail_check.py` applies the same heuristic earlier, at pre-eval.
 
+
 ## From answers to a score
 
 ### 1. Per judge: a weighted yes-rate
 
+`judge_yes_rate` is the mean of every answered bit (1/0), weighted per question by tag. 
 
-`judge_yes_rate` is the plain mean of every answered bit (1/0), measurement/size questions
-included — there is no separate size multiplier or per-`requires` weighting in the running code, size questions vote like any other question.
 
-### 2. The measurement gate
+| tag | weight |
+|---|---|
+| `reference:claims` | 1.0 |
+| `reference:explore` | 1.0 |
+| `reference:action` | 1.0 |
+| `reference:verification` | 1.0 |
 
-Before weighting, `apply_measurement_gate` applies two deterministic corrections per candidate — no
-judge involved:
+A question's tag is the category of the milestone it was written for, assigned in code from the
+validated vector rather than taken from what the writer emitted. The four are equal today: what a
+milestone is worth is decided by how many questions it supports, not by which category it is. They
+are separate entries so a category can be re-weighted on its own, and so the dashboard's
+score-by-tag table says whether a duel was decided on claims, exploration, actions or
+verifications.
 
-- A candidate that made **no edit** has inaction-conditional do-no-harm questions **removed from its
-  denominator**. They are dropped, never awarded: inaction is the adversary, and a free `1` would
-  reward it.
-- If the reference proved an edit was reachable, the candidate made no edit, **and** its final turn
-  is still a read, every `requires: action` question is forced to `0`. Well-groomed exploration
-  must not out-score imperfect work.
+**Nothing normalises per milestone.** A milestone decides which questions get written, not what an
+answer to one is worth, so a milestone that yielded six questions carries three times the weight of
+one that yielded two. That is the intended reading: a milestone with more distinct ground in it is
+worth more of the score.
 
-### 3. Across judges and samples
+### 2. Across judges and samples
 
 - `response_score` — mean of the per-judge rates for one side of one sample.
 - `aggregate_scores` — mean across samples, per side. **King and challenger scores are
@@ -146,7 +195,7 @@ judge involved:
 - `by_judge` in the verdict is **challenger-only**. The dashboard recomputes the king's per-judge
   rates from the `SCORING_RESULTS` artifact (`website/monitor.py`).
 
-### 4. The verdict
+### 3. The verdict
 
 ```python
 challenger_beats_king = (score_challenger - score_king) >= CHALLENGER_WIN_MARGIN   # 0.025
@@ -169,18 +218,18 @@ sample counts as scored only when **every** judge parsed for **both** sides.
 
 ## Anti-gaming
 
-The checklist is generated per sample from a model's own reference trajectory, so it cannot be
-pre-computed. On top of that:
+The checklist is generated per sample from several reference runs of that very task, so it cannot
+be pre-computed. On top of that:
 
-- **Reference leak filter** — `filter_reference_leaks` drops questions that reveal the reference as
-  shared history; judges must never learn a "correct" trajectory exists.
-- **Near-duplicate questions** — questions too similar to each other are collapsed
-  (`_near_duplicate`: Jaccard 0.75 / containment 0.90 / char-ratio 0.87) so one property cannot be
-  asked five ways to inflate its weight.
-- **Template caps** — at most 4 questions per template key (`_TEMPLATE_MAX_PER_KEY`).
-- **Generic hygiene cap** — `GENERIC_HYGIENE_QUESTION_LIMIT` (3) — questions any competent output
-  passes.
-- **Negative-question cap** — `NEGATIVE_QUESTION_LIMIT` (8).
+- **Necessity, not consensus** — a milestone is kept because the task's own logic requires it, not
+  because the runs agreed on it. A step all three runs wasted is still dropped, and a milestone only
+  one run reached is still kept when the others failed or stalled.
+- **The given-material floor** — anything the TASK block already handed over is dropped
+  (`in_prefix`, `span_from_task`), so a candidate cannot earn a question by restating its prompt.
+- **Verbatim spans, checked in code** — every milestone must quote the run it came from, in a block
+  of the kind its `source` claims. An invented or misattributed span deletes the evidence.
+- **Reference leak filter** — `filter_reference_leaks` drops questions that mention the reference,
+  milestones, a vector of change or the other agents; judges must never learn any of it exists.
 - **Prompt-injection stripping** — `strip_reply_injection` removes verdict-shaped text
   (`accept` / `weak_pass` / `reject`) and delimiter injections from a candidate's own output before
   a judge reads it, so a model cannot address the judge directly. The scan is a linear marker-first
@@ -198,9 +247,10 @@ Judge-side settings are `JudgeSettings` in `src/albedo_config/config.py`, prefix
 
 | setting | code default | meaning |
 |---|---|---|
-| `evaluator_model` | `z-ai/glm-5.2` | writes the checklist |
-| `sota_models` | `z-ai/glm-5.2` | pool the reference trajectory is drawn from |
-| `num_questions` | 50 | gates the behaviour regime (`>= 3 * BEHAVIOR_K`); **not** the checklist size |
+| `evaluator_model` | `z-ai/glm-5.2` | reads the vector and writes the ladder |
+| `sota_models` | `z-ai/glm-5.2` | pool the reference runs are drawn from |
+| `reference_runs` | 3 | how many reference trajectories are generated per sample |
+| `reference_prune` | `true` | judge every run against the checklist and drop what none of them earns |
 | `judge_count` | 1 | how many judges vote |
 | `sota_trajectory_turns` | 8 | reference trajectory length |
 | `min_valid_fraction` | 0.8 | below this the eval fails instead of scoring |

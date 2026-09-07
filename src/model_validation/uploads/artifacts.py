@@ -53,40 +53,6 @@ def _put(key: str, data: dict) -> str | None:
         return None
 
 
-def _get_json(key: str) -> dict:
-    try:
-        obj = _client().get_object(Bucket=config.S3_BUCKET, Key=key)
-        data = json.loads(obj["Body"].read())
-        return data if isinstance(data, dict) else {}
-    except Exception as exc:
-        log.debug(f"S3 get_json({key}) failed, starting empty: {exc}")
-        return {}
-
-
-def update_fingerprint_corpus(model_uri: str, fingerprint: dict) -> tuple[str | None, str | None]:
-    if not ENABLED:
-        log.debug("S3 disabled; skipping corpus update for {}", model_uri)
-        return None, None
-
-    fkey, tkey = config.FP_FILE, config.TENSORS_FILE
-    fdict = _get_json(fkey)
-    fdict[model_uri] = {
-        "method": fingerprint.get("method"),
-        "layer_keys": fingerprint.get("layer_keys"),
-        "norm_vector": fingerprint.get("norm_vector"),
-    }
-    f_uri = _put(fkey, fdict)
-
-    tdict = _get_json(tkey)
-    tdict[model_uri] = {
-        "layer_keys": fingerprint.get("layer_keys"),
-        "tensor_samples": fingerprint.get("tensor_samples"),
-    }
-    t_uri = _put(tkey, tdict)
-    log.info("corpus updated: {} (now {} fingerprints)", model_uri, len(fdict))
-    return f_uri, t_uri
-
-
 def put_fault(hotkey: str, digest: str, detail: dict) -> str | None:
     key = f"hippius_validation/{hotkey}/{_safe_digest(digest)}/fault.json"
     return _put(key, detail)

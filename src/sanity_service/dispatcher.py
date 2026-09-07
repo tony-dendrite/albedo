@@ -16,13 +16,16 @@ from loguru import logger
 
 from albedo_config import JudgeSettings, SanitySettings, get_judge_settings, get_sanity_settings
 from albedo_eval_service.remote.dataset import format_messages
+from albedo_eval_service.repo_context_client import Grounding, RepoContextClient
 from albedo_eval_service.shared.edit_detection import REMOVAL_RE as _REMOVAL_RE
 from albedo_eval_service.shared.edit_detection import named_in_removal
 from albedo_eval_service.shared.observation_format import (
     MAX_CONSECUTIVE_BAD_TURNS,
+    RETURNCODE,
     canonical_empty,
     claims_tracked_change,
     command_contract,
+    correct_returncode,
     degenerate_observation,
     deleted_files,
     detect_format,
@@ -40,6 +43,7 @@ from albedo_eval_service.shared.observation_format import (
     stuttered_lines,
     unusable_turn,
     valid_output,
+    with_body,
     without_tracked_changes,
     wrap,
 )
@@ -57,6 +61,7 @@ from albedo_eval_service.shared.submit_protocol import (
 )
 from albedo_eval_service.simulator.prompt_simulator import (
     COMPLETE_MARKER,
+    COMPUTED_BLOCK_MARKER,
     DEGENERATE_RETRY,
     MUST_PRINT_RETRY,
     simulation_system_prompt,
@@ -275,6 +280,12 @@ class SanityDispatcher:
         turn_count = max(1, int(request.assistant_turns))
         states = _trajectory_states(request)
         await _inject_microtasks(states)
+        judge_settings = get_judge_settings()
+        repo_context = (
+            RepoContextClient(judge_settings) if judge_settings.repo_context_url else None
+        )
+        if repo_context is not None:
+            await _warm_repo_context(judge_settings, [state.sample_id for state in states])
         kept_warm = False
         decided_early = False
         halt = asyncio.Event()
@@ -331,7 +342,12 @@ class SanityDispatcher:
                     _apply_turn_result([state], redo_result)
                 if turn_index == turn_count - 1:
                     return
-                await _append_observations([state], str(claimed.attempt_id), turn_index + 1)
+                await _append_observations(
+                    [state],
+                    str(claimed.attempt_id),
+                    turn_index + 1,
+                    repo_context=repo_context,
+                )
                 if turn_index >= turn_count - 8 and (turn_count - turn_index) % 4 == 0:
                     await _inject_submit_nudges([state])
 
@@ -344,6 +360,8 @@ class SanityDispatcher:
                 await asyncio.gather(run_tail_check(states), run_head_check(states))
             return _trajectory_result(str(claimed.attempt_id), states, turn_count)
         finally:
+            if repo_context is not None:
+                await repo_context.aclose()
             if kept_warm:
                 try:
                     await client.teardown()
@@ -625,6 +643,40 @@ def main() -> None:
         asyncio.run(dispatcher.run_forever())
 
 
+PREFETCH_WAIT_S = 60.0
+
+
+async def _warm_repo_context(settings: JudgeSettings, sample_ids: list[str]) -> None:
+    """Block until every sample's repository snapshot is on disk, or give up quietly.
+
+    A cold snapshot is downloaded and extracted synchronously inside `/repo-context`, which the
+    20s per-call budget cannot absorb, so without this the first turns would simulate ungrounded.
+    Grounding is optional: any failure here leaves the attempt to run ungrounded.
+    """
+    url = (settings.repo_context_url or "").rstrip("/")
+    if not url or not sample_ids:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=PREFETCH_WAIT_S) as client:
+            response = await client.post(
+                f"{url}/prefetch", json={"sample_ids": sample_ids, "wait": True}
+            )
+            response.raise_for_status()
+            summary = response.json()
+        logger.info(
+            "[sanity-dispatch] repo_context_prefetch samples={} instances={} ready={}",
+            summary.get("samples"),
+            summary.get("instances"),
+            summary.get("ready"),
+        )
+    except Exception as exc:
+        logger.warning(
+            "[sanity-dispatch] repo_context_prefetch_failed ({}); simulating ungrounded: {}",
+            type(exc).__name__,
+            exc,
+        )
+
+
 def _trajectory_states(request: SanityRunRequest) -> list[_TrajectoryState]:
     sample_ids = request.sample_ids or [f"sanity-sample:{i}" for i in range(len(request.prompts))]
     prompt_messages = request.prompt_messages or []
@@ -888,7 +940,11 @@ async def _confirm_silence(
 
 
 async def _append_observations(
-    states: list[_TrajectoryState], eval_run_id: str, turn_index: int
+    states: list[_TrajectoryState],
+    eval_run_id: str,
+    turn_index: int,
+    *,
+    repo_context: RepoContextClient | None = None,
 ) -> None:
     active = []
     submitted = []
@@ -918,6 +974,7 @@ async def _append_observations(
                     eval_run_id=eval_run_id,
                     state=state,
                     assistant_output=assistant_output,
+                    repo_context=repo_context,
                 )
                 for state, assistant_output in active
             ],
@@ -1110,6 +1167,7 @@ async def _simulate_observation(
     eval_run_id: str,
     state: _TrajectoryState,
     assistant_output: str,
+    repo_context: RepoContextClient | None = None,
 ) -> str:
     key = hashlib.sha1(
         "\0".join(
@@ -1128,6 +1186,7 @@ async def _simulate_observation(
             eval_run_id=eval_run_id,
             state=state,
             assistant_output=assistant_output,
+            repo_context=repo_context,
         ),
     )
 
@@ -1139,13 +1198,45 @@ async def _simulate_observation_uncached(
     eval_run_id: str,
     state: _TrajectoryState,
     assistant_output: str,
+    repo_context: RepoContextClient | None = None,
 ) -> str:
     sample_id, prompt, messages = state.sample_id, state.prompt, state.messages
     fmt = detect_format(sample_id, messages)
-    transcript = _simulation_transcript(
-        messages=messages, prompt=prompt, assistant_output=assistant_output
-    )
     command = first_bash_command(assistant_output)
+
+    resolved = Grounding(None, None, None, "")
+    if repo_context is not None:
+        resolved = await repo_context.context_for(sample_id, assistant_output, messages)
+
+    # exact tier: computed against the real snapshot, so it is returned unsimulated and ungated.
+    # Mirrors judge_api's ObservationSimulationService.simulate.
+    if (
+        resolved.exact_output is not None
+        and resolved.exact_returncode is not None
+        and fmt == RETURNCODE
+    ):
+        observation = correct_returncode(
+            wrap(resolved.exact_output, fmt, returncode=resolved.exact_returncode), fmt, command
+        )
+        logger.info(
+            "[sanity-dispatch] observation_simulation_exact sample_id={} fmt={} chars={}",
+            sample_id,
+            fmt,
+            len(observation),
+        )
+        return observation
+
+    # context tier: a computed block means the answer is already known, so the simulator is asked
+    # to transcribe it against the bare command rather than improvise from the transcript
+    context_block = resolved.context
+    computed = bool(context_block) and context_block.lstrip().startswith(COMPUTED_BLOCK_MARKER)
+    transcript = (
+        f"$ {command}"
+        if computed
+        else _simulation_transcript(
+            messages=messages, prompt=prompt, assistant_output=assistant_output
+        )
+    )
     observation = ""
     for attempt in range(MAX_CONSECUTIVE_DEGENERATE_OBSERVATIONS):
         ask = transcript if attempt == 0 else f"{transcript}\n\n{DEGENERATE_RETRY}"
@@ -1155,7 +1246,7 @@ async def _simulate_observation_uncached(
             if rescue
             else (settings.simulation_model or settings.evaluator_model),
             messages=[
-                {"role": "system", "content": simulation_system_prompt(fmt)},
+                {"role": "system", "content": simulation_system_prompt(fmt, context_block)},
                 {"role": "user", "content": ask},
             ],
             temperature=0.0 if attempt == 0 else _DEGENERATE_RETRY_TEMPERATURE,
@@ -1283,9 +1374,25 @@ async def _simulate_observation_uncached(
             command[:80],
         )
         observation = without_tracked_changes(observation, fmt)
+    if resolved.exact_output is not None:
+        corrected = with_body(observation, fmt, resolved.exact_output)
+        if corrected != observation:
+            logger.info(
+                "[sanity-dispatch] observation_body_replaced_with_exact sample_id={} fmt={}",
+                sample_id,
+                fmt,
+            )
+            observation = corrected
     observation = repair_to_contract(observation, fmt, command_contract(command))
     observation = renumbered_view(command, canonical_empty(observation, fmt))
-    if requires_output(command) and not has_content(observation, fmt):
+    # a return code the shell could not have produced, on simulated output as well as exact
+    observation = correct_returncode(observation, fmt, command)
+    # no point re-asking for output the snapshot already answered
+    if (
+        requires_output(command)
+        and resolved.exact_output is None
+        and not has_content(observation, fmt)
+    ):
         return await _retry_for_output(
             client=client,
             settings=settings,

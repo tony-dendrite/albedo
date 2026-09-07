@@ -29,6 +29,8 @@ class RepoContextResponse(BaseModel):
 
 class PrefetchRequest(BaseModel):
     sample_ids: list[str]
+    # callers that must not start work on a cold cache set this and wait for the summary
+    wait: bool = False
 
 
 def create_app(
@@ -58,6 +60,10 @@ def create_app(
 
     @app.post("/prefetch")
     async def prefetch(request: PrefetchRequest, background_tasks: BackgroundTasks) -> dict:
+        if request.wait:
+            # service.prefetch joins its thread pool before returning, so awaiting it here means
+            # every snapshot is on disk by the time the caller gets a response
+            return await asyncio.to_thread(service.prefetch, request.sample_ids)
         background_tasks.add_task(service.prefetch, request.sample_ids)
         return {"accepted": len(request.sample_ids)}
 

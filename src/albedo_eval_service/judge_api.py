@@ -2,16 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import random
 import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, NamedTuple
+from typing import Any
 from uuid import uuid4
 
-import httpx
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException
 from loguru import logger
@@ -21,29 +19,36 @@ from albedo_config import JudgeSettings, get_judge_settings
 from albedo_config.models import JUDGE_MODELS
 
 from .control.notifications import EvalErrorNotification, notify_eval_error
-from .evaluator.behavior.prompt_behavior import BEHAVIOR_K, BEHAVIOR_PHASES
-from .evaluator.behavior.questions import (
-    behavior_question_schema,
-    build_behavior_messages,
-    filter_behavior_questions,
+from .evaluator.reference.prompt_ladder import (
+    LADDER_MIN,
+    build_ladder_messages,
+    ladder_schema,
+    parse_ladder,
+    project_vector,
 )
-from .evaluator.reference.prompt_reference_split import REFERENCE_SPECIALISTS
+from .evaluator.reference.prompt_milestones import (
+    build_extractor_messages,
+    extractor_schema,
+    milestone_tag,
+    validate_vector,
+)
 from .evaluator.reference.questions import (
-    build_reference_specialist_messages,
     filter_reference_leaks,
     format_reference_trajectory,
-    reference_specialist_schema,
-    verify_spans,
 )
-from .evaluator.shared.budgets import RUBRIC_MAX_QUESTIONS
+from .evaluator.reference.vector_merge import (
+    build_merge_messages,
+    build_question_merge_messages,
+    exact_groups,
+    merge_schema,
+    merge_vectors,
+    needs_alignment,
+    parse_clusters,
+    select_questions,
+)
 from .evaluator.shared.questions import (
-    RUBRIC_TAG_REQUIRES,
-    apply_measurement_gate,
-    candidate_turn_texts_from_merged,
     enforce_question_labels,
-    parse_questions,
     sample_phase,
-    tests_visible,
     trajectory_made_edit,
 )
 from .judge_core import (
@@ -53,6 +58,7 @@ from .judge_core import (
     answer_schema,
     build_judge_messages,
     judge_yes_rate,
+    majority_answers,
     parse_answers,
     question_weight,
     reserved_token_leak,
@@ -60,11 +66,12 @@ from .judge_core import (
 )
 from .judge_llm_client import JudgeLLMClient
 from .remote.generation import format_scored_trajectory
+from .repo_context_client import Grounding, RepoContextClient
 from .shared.edit_detection import any_shows_work, named_in_removal
+from .shared.json_extract import extract_json
 from .shared.loop_check import LoopVerdict, loop_explanation, loop_verdict_for_document
 from .shared.observation_format import (
     NOT_DERIVABLE,
-    RETURNCODE,
     ROLE_MARKER_RE,
     CommandContract,
     absent_tool_output,
@@ -72,18 +79,22 @@ from .shared.observation_format import (
     claims_tracked_change,
     command_contract,
     contract_violation,
+    correct_returncode,
     degenerate_observation,
     deleted_files,
     detect_format,
     echoed_command,
     empty_output,
     first_bash_block,
+    grounded_observation,
     has_content,
+    impossible_success,
     is_abandoned,
     is_file_read,
     is_truncated,
     no_output_notice,
     output_expectation,
+    pipeline_returncode_override,
     renumbered_view,
     repair_output,
     repair_to_contract,
@@ -95,7 +106,7 @@ from .shared.observation_format import (
     wrap,
 )
 from .shared.observation_memo import ObservationMemo
-from .shared.pip_check import fabricated_pip_error, pip_success_body
+from .shared.pip_check import fabricated_pip_error
 from .shared.sed_check import fabricated_sed_error, misdiagnosed_sed
 from .shared.submit_protocol import first_bash_command, is_exact_submission
 from .simulator.prompt_simulator import (
@@ -240,36 +251,54 @@ class ReferenceTrajectoryService:
 
     async def generate(
         self, sample: QuestionPrepSample, *, eval_run_id: str = ""
-    ) -> tuple[str, str, bool]:
-        reference, model, made_edit, _ = await self._generate_once(
+    ) -> tuple[str, str, bool, list[dict[str, Any]]]:
+        reference, model, made_edit, _, turns = await self._generate_once(
             sample, eval_run_id, extra_turns=0
         )
-        return reference, model, made_edit
+        return reference, model, made_edit, turns
 
-    async def reroll_for_material(
-        self, sample: QuestionPrepSample, *, eval_run_id: str = "", exclude_model: str
-    ) -> tuple[str, str, bool] | None:
-        window = min(_REROLL_WINDOW_TURNS, self.settings.sota_trajectory_turns)
-        extra = window - max(1, sample.assistant_turns or self.settings.sota_trajectory_turns)
-        try:
-            reference, model, made_edit, steps = await self._generate_once(
-                sample, eval_run_id, extra_turns=extra, model_offset=1
-            )
-        except QuestionScoringUnavailable as exc:
-            logger.warning("reference_reroll_failed sample_id={} error={}", sample.sample_id, exc)
-            return None
-        pool = [m.strip() for m in self.settings.sota_models.split(",") if m.strip()]
-        if steps < 2 or (model == exclude_model and len(pool) > 1):
-            return None
-        logger.info(
-            "reference_reroll_used sample_id={} replaced={} with={}/{}steps window={}",
-            sample.sample_id,
-            exclude_model,
-            model,
-            steps,
-            window,
+    async def generate_many(
+        self, sample: QuestionPrepSample, n: int, *, eval_run_id: str = ""
+    ) -> list[tuple[str, str, bool, list[dict[str, Any]]]]:
+        """N runs of the same task, walking the SOTA pool where there is more than one model in it.
+
+        The runs diverge on their own: the model is not deterministic at a fixed temperature, and
+        the simulator answers each run's own commands. Several runs are what keeps one degenerate
+        simulation from deciding the whole checklist, and what lets the extractor tell a fact the
+        task requires from one run's detour.
+
+        Run concurrently. The observation memo keys on (sample_id, format, repo state, command) and
+        dedupes in-flight work, so two runs issuing the same command in the same state still share
+        one simulation rather than racing for two - the shared world survives the parallelism.
+
+        One run may fail without taking the sample with it: two runs still support consensus, and
+        `validate_vector` records which runs reached each milestone either way. Below two there is
+        nothing left to compare and the sample is unusable.
+        """
+        results = await asyncio.gather(
+            *(
+                self._generate_once(sample, eval_run_id, extra_turns=0, model_offset=index)
+                for index in range(max(1, n))
+            ),
+            return_exceptions=True,
         )
-        return reference, model, made_edit
+        runs: list[tuple[str, str, bool, list[dict[str, Any]]]] = []
+        for index, result in enumerate(results, start=1):
+            if isinstance(result, BaseException):
+                logger.warning(
+                    "reference_run_failed sample_id={} run={} error={}",
+                    sample.sample_id,
+                    index,
+                    f"{type(result).__name__}: {result}",
+                )
+                continue
+            reference, model, made_edit, _, turns = result
+            runs.append((reference, model, made_edit, turns))
+        if len(runs) < min(2, max(1, n)):
+            raise QuestionScoringUnavailable(
+                f"reference generation produced {len(runs)}/{n} usable runs"
+            )
+        return runs
 
     async def _generate_once(
         self,
@@ -278,7 +307,7 @@ class ReferenceTrajectoryService:
         *,
         extra_turns: int,
         model_offset: int = 0,
-    ) -> tuple[str, str, bool, int]:
+    ) -> tuple[str, str, bool, int, list[dict[str, Any]]]:
         model = self._model_for(sample.sample_id, offset=model_offset)
         turn_count = (
             max(1, sample.assistant_turns or self.settings.sota_trajectory_turns) + extra_turns
@@ -340,30 +369,43 @@ class ReferenceTrajectoryService:
             raise QuestionScoringUnavailable("reference trajectory rendered empty")
         generated = [t["content"] for t in turns if t.get("score_target")]
         made_edit = trajectory_made_edit(generated)
-        return reference, model, made_edit, len(generated)
+
+        return reference, model, made_edit, len(generated), turns
 
 
-# Questions the reference itself fails are deleted; too few survivors means the
-# reference/checklist pair is unusable and the reference is rerolled.
-PRUNE_MIN_SURVIVORS = 8
-_REF_STEP_SPLIT_RE = re.compile(r"^REFERENCE STEP \d+:$", re.M)
+# Fewest questions a WHOLE checklist can have
+QUESTION_FLOOR = 6
 
 
-def _reference_document(messages: list[dict[str, str]], reference: str) -> str:
-    """Render the reference trajectory as a judgeable candidate document."""
-    turns: list[dict[str, Any]] = [
+def _reference_document(prefix: list[dict[str, str]] | None, turns: list[dict[str, Any]]) -> str:
+    """A reference run rendered as the judgeable document a candidate would be.
+
+    The prefix goes in as unscored context and every reference step becomes a CANDIDATE OUTPUT, so
+    a reference is judged in the same shape a candidate is - otherwise a difference in answer could
+    be a difference in framing rather than in the work.
+    """
+    context = [
         {"role": m.get("role", "user"), "content": m.get("content", "")}
-        for m in messages
+        for m in (prefix or [])
         if m.get("content")
     ]
-    for segment in _REF_STEP_SPLIT_RE.split(reference)[1:]:
-        body, _, observation = segment.partition("\nENVIRONMENT OBSERVATION:\n")
-        turns.append({"role": "assistant", "content": body.strip(), "score_target": True})
-        if observation.strip():
-            turns.append(
-                {"role": "user", "content": observation.strip(), "environment_observation": True}
-            )
-    return format_scored_trajectory(turns)
+    return format_scored_trajectory(context + turns)
+
+
+def _steps_from_turns(turns: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """The turns a reference run produced, as the {assistant, observation} pairs the vector wants.
+
+    Built from the turns themselves rather than by re-splitting the rendered `REFERENCE STEP n:`
+    text: the structure is already present here, and recovering it from the rendering loses any
+    step whose observation happens to contain the marker.
+    """
+    steps: list[dict[str, str]] = []
+    for turn in turns:
+        if turn.get("score_target"):
+            steps.append({"assistant": str(turn.get("content") or ""), "observation": ""})
+        elif turn.get("environment_observation") and steps:
+            steps[-1]["observation"] = str(turn.get("content") or "")
+    return steps
 
 
 class QuestionService:
@@ -384,389 +426,330 @@ class QuestionService:
             raise QuestionScoringUnavailable(
                 "sample carries no prior context to anchor a reference trajectory"
             )
-        try:
-            reference, reference_model, reference_made_edit = await self.reference_service.generate(
-                sample, eval_run_id=eval_run_id
+        runs = await self.reference_service.generate_many(
+            sample, self.settings.reference_runs, eval_run_id=eval_run_id
+        )
+        return await self._prepare_once(sample, runs)
+
+    async def _extract_vector(
+        self, task: str, references: list[str], candidate_turns: int
+    ) -> tuple[list[dict[str, Any]], str]:
+        """The runs, read against each other, become an ordered vector of milestones."""
+        response = await self.client.complete(
+            purpose="questions",
+            model=self.settings.evaluator_model,
+            messages=build_extractor_messages(
+                task=task, references=references, candidate_turns=candidate_turns
+            ),
+            temperature=self.settings.temperature,
+            max_tokens=self.settings.question_max_tokens,
+            provider=_evaluator_provider(self.settings),
+            response_schema=extractor_schema(),
+        )
+        if response.error:
+            raise QuestionScoringUnavailable(f"milestone extraction failed: {response.error}")
+        payload = extract_json(response.raw or "", prefer_keys=("milestones",))
+        if isinstance(payload, list):
+            payload = {"milestones": payload}
+        milestones = (payload or {}).get("milestones") if isinstance(payload, dict) else None
+        return list(milestones or []), response.provider or ""
+
+    async def _extract_validated_vector(
+        self,
+        task: str,
+        references: list[str],
+        candidate_turns: int,
+        trajectories: list[dict[str, Any]],
+        problem: str = "",
+    ) -> tuple[list[dict[str, Any]], list[dict[str, str]], str, int, int]:
+        """`milestone_readings` independent readings of the same runs, merged by fact.
+
+        One reading is the degenerate case and needs no special path: a single vector clusters to
+        itself, `needs_alignment` is false so no aligner is called, and `merge_vectors` returns
+        that reading in causal order.
+        """
+        readings = max(1, int(getattr(self.settings, "milestone_readings", 1) or 1))
+
+        async def read() -> tuple[
+            list[dict[str, Any]], list[dict[str, Any]], list[dict[str, str]], str
+        ]:
+            raw, provider = await self._extract_vector(task, references, candidate_turns)
+            milestones, dropped = validate_vector(raw, trajectories, task)
+            return raw, milestones, dropped, provider
+
+        results = await asyncio.gather(*[read() for _ in range(readings)], return_exceptions=True)
+        held = [r for r in results if not isinstance(r, BaseException)]
+        if not held:
+            first = next(r for r in results if isinstance(r, BaseException))
+            raise QuestionScoringUnavailable(
+                f"milestone extraction failed in all {readings} readings: {first}"
             )
-        except Exception as exc:
-            logger.warning(
-                "reference_trajectory_failed sample_id={} error={} retrying=reference_reroll",
-                sample.sample_id,
-                f"{type(exc).__name__}: {exc}",
+        vectors = [milestones for _, milestones, _, _ in held]
+        dropped = [
+            {**record, "reading": index}
+            for index, (_, _, records, _) in enumerate(held, 1)
+            for record in records
+        ]
+        provider = next((p for _, _, _, p in held if p), "")
+        emitted = sum(len(raw) for raw, _, _, _ in held)
+
+        clusters = exact_groups(vectors)
+        aligned = "exact"
+        if needs_alignment(clusters, vectors):
+            response = await self.client.complete(
+                purpose="questions",
+                model=self.settings.evaluator_model,
+                messages=build_merge_messages(problem=problem or task[-1500:], readings=vectors),
+                temperature=self.settings.temperature,
+                max_tokens=4000,
+                provider=_evaluator_provider(self.settings),
+                response_schema=merge_schema(),
             )
-            rerolled = await self.reference_service.reroll_for_material(
-                sample, eval_run_id=eval_run_id, exclude_model=""
+            parsed = (
+                None
+                if response.error
+                else parse_clusters(
+                    extract_json(response.raw or "", prefer_keys=("clusters",)), vectors
+                )
             )
-            if rerolled is None:
-                raise QuestionScoringUnavailable(
-                    f"reference unavailable: {type(exc).__name__}: {exc}"
-                ) from exc
-            reference, reference_model, reference_made_edit = rerolled
-        try:
-            return await self._prepare_once(sample, reference, reference_model, reference_made_edit)
-        except QuestionScoringUnavailable as exc:
-            logger.warning(
-                "anchored_questions_failed sample_id={} error={} retrying=reference_reroll",
-                sample.sample_id,
-                exc,
+            if parsed is None:
+                logger.warning("milestone_alignment_unparseable readings={}", len(held))
+                aligned = "exact_fallback"
+            else:
+                clusters, aligned = parsed, "model"
+        merged = merge_vectors(vectors, clusters)
+        logger.info(
+            "milestone_readings held={}/{} kept_per_reading={} merged={} alignment={}",
+            len(held),
+            readings,
+            [len(v) for v in vectors],
+            len(merged),
+            aligned,
+        )
+        return merged, dropped, provider, len(held), emitted
+
+    async def _write_ladders(
+        self, milestones: list[dict[str, Any]], approach: dict[int, list[str]]
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        """`question_readings` calls for the whole vector, merged by what each question tests.
+
+        Every reading is sent the WHOLE vector. Approach windows are a partition across the
+        milestone sequence, so projecting a subset would silently widen them - every surviving
+        milestone would look like the first in its run - and a reading over a slice would be
+        answering a different question from the one that was asked.
+
+        Milestones left under LADDER_MIN are returned for reporting; independent readings are what
+        covers a writer that stops after the opening milestones, so nothing is re-asked.
+        """
+        vector = project_vector(milestones, approach)
+        known = {str(m.get("id")) for m in milestones}
+
+        async def ask(messages: list[dict[str, str]]) -> list[dict[str, Any]]:
+            response = await self.client.complete(
+                purpose="questions",
+                model=self.settings.evaluator_model,
+                messages=messages,
+                temperature=self.settings.temperature,
+                max_tokens=self.settings.question_max_tokens,
+                provider=_evaluator_provider(self.settings),
+                response_schema=ladder_schema(),
             )
-            rerolled = await self.reference_service.reroll_for_material(
-                sample, eval_run_id=eval_run_id, exclude_model=reference_model or ""
+            return [] if response.error else parse_ladder(response.raw, known)
+
+        order = [str(m.get("id")) for m in milestones]
+        readings = max(1, int(getattr(self.settings, "question_readings", 1) or 1))
+        lists = await asyncio.gather(
+            *[ask(build_ladder_messages(vector=vector)) for _ in range(readings)]
+        )
+        lists = [q for q in lists if q]
+        clusters = exact_groups(lists)
+        if lists and needs_alignment(clusters, lists):
+            response = await self.client.complete(
+                purpose="questions",
+                model=self.settings.evaluator_model,
+                messages=build_question_merge_messages(lists),
+                temperature=self.settings.temperature,
+                max_tokens=6000,
+                provider=_evaluator_provider(self.settings),
+                response_schema=merge_schema(),
             )
-            if rerolled is None:
-                raise
-            return await self._prepare_once(sample, *rerolled)
+            parsed = (
+                None
+                if response.error
+                else parse_clusters(
+                    extract_json(response.raw or "", prefer_keys=("clusters",)), lists
+                )
+            )
+            if parsed is None:
+                logger.warning("question_alignment_unparseable readings={}", len(lists))
+            else:
+                clusters = parsed
+        by_id = select_questions(lists, clusters, LADDER_MIN)
+        thin = [i for i in order if len(by_id.get(i, [])) < LADDER_MIN]
+        logger.info(
+            "question_readings held={}/{} per_reading={} kept={} thin={}",
+            len(lists),
+            readings,
+            [len(q) for q in lists],
+            sum(len(g) for g in by_id.values()),
+            len(thin),
+        )
+
+        tags = {str(m.get("id")): milestone_tag(str(m.get("category") or "")) for m in milestones}
+        merged = [
+            {**question, "rung": index, "tag": tags[mid]}
+            for mid in order
+            for index, question in enumerate(by_id.get(mid, []), start=1)
+        ]
+        return merged, thin
+
+    async def _prune_unreachable(
+        self,
+        questions: list[dict[str, Any]],
+        runs: list[tuple[str, str, bool, list[dict[str, Any]]]],
+        prefix: list[dict[str, str]] | None,
+        discarded: list[dict[str, str]],
+    ) -> list[dict[str, Any]]:
+        """Drop questions that no reference run can answer.
+
+        A milestone is extracted FROM these runs and its questions are written from that milestone,
+        so a run should be able to answer them: it is the trajectory that did the work being asked
+        about. A question none of them earns is asking for something no run did, or asking in a way
+        the judge cannot see.
+        """
+        judges = [self.settings.evaluator_model]
+        results = await asyncio.gather(
+            *[
+                _judge_side(
+                    client=self.client,
+                    settings=self.settings,
+                    side=f"reference_{index}",
+                    response_text=_reference_document(prefix, turns),
+                    questions=questions,
+                    judge_models=judges,
+                )
+                for index, (_, _, _, turns) in enumerate(runs, start=1)
+            ]
+        )
+        earned: set[str] = set()
+        unreadable = 0
+        for _, records in results:
+            for record in records:
+                if not record.get("parse_ok"):
+                    unreadable += 1
+                    continue
+                earned.update(
+                    qid for qid, value in (record.get("answers") or {}).items() if value == "1"
+                )
+        if unreadable == len(results):
+            # no usable verdict from any run: keep the checklist rather than delete it blind
+            logger.warning("reference_prune_unreadable runs={} keeping_unpruned", len(results))
+            return questions
+        kept = [q for q in questions if q["id"] in earned]
+        for question in questions:
+            if question["id"] not in earned:
+                discarded.append(
+                    {
+                        "stage": "reference_prune",
+                        "reason": "no_reference_earned_it",
+                        "text": question.get("text", ""),
+                        "origin": "content",
+                    }
+                )
+        return kept
 
     async def _prepare_once(
         self,
         sample: QuestionPrepSample | JudgeSample,
-        reference: str,
-        reference_model: str | None,
-        reference_made_edit: bool,
+        runs: list[tuple[str, str, bool, list[dict[str, Any]]]],
     ) -> QuestionPrepResult:
-        n = self.settings.num_questions
         prefix = getattr(sample, "messages", None)
         phase = sample_phase(prefix)
-        # behaviour questions are calibrated by the measured model deltas rather than pruned
-        # against the reference the way reference questions are below
-        do_behavior = n >= 3 * BEHAVIOR_K
-        n_generic = RUBRIC_MAX_QUESTIONS
-        generic_floor = 6
-        prefix_tail = "\n".join(
-            f"[{m.get('role')}] {(m.get('content') or '')[:800]}" for m in (prefix or [])[-3:]
-        )
-        context_text = (sample.prompt or "") + "\n" + prefix_tail
+        # what the extractor calls the TASK: the system prompt, the problem, and the conversation
+        # that already ran. All of it is free to the candidate, which is why validate_vector drops
+        # a milestone whose evidence comes from it.
+        task = "\n\n".join(str(m.get("content") or "") for m in (prefix or []))
+        references = [text for text, _, _, _ in runs]
+        made_edit = any(edit for _, _, edit, _ in runs)
         discarded: list[dict[str, str]] = []
-        parse_budget = max(1, self.settings.parse_retries)
 
-        def _reject_logger(reason: str, origin: str):
-            attempts = 0
-
-            def record(detail: str) -> bool:
-                nonlocal attempts
-                attempts += 1
-                exhausted = attempts >= parse_budget
-                discarded.append(
-                    {
-                        "stage": "generation_retry",
-                        "reason": reason,
-                        "text": "",
-                        "origin": origin,
-                        "detail": detail
-                        + (
-                            "; retries exhausted, this attempt was kept as-is"
-                            if exhausted
-                            else "; whole attempt discarded and regenerated"
-                        ),
-                    }
-                )
-                return not exhausted
-
-            return record
-
-        def _record_rejected_attempt(
-            entries: list[dict[str, str]], survivors: list[dict[str, str]], origin: str
-        ) -> None:
-            discarded.extend(
-                {**entry, "stage": f"rejected_attempt:{entry['stage']}"} for entry in entries
-            )
-            discarded.extend(
-                {
-                    "stage": "rejected_attempt",
-                    "reason": "attempt_regenerated",
-                    "text": question.get("text", ""),
-                    "origin": origin,
-                    "detail": "parsed cleanly, binned with the attempt that fell short",
-                }
-                for question in survivors
-            )
-
-        def _behavior_call(index: int):
-            _rejected = _reject_logger("behavior_batch_rejected", "behavior")
-
-            def _behavior_accept(raw: str) -> bool:
-                attempt_discards: list[dict[str, str]] = []
-                qs, _ = parse_questions(
-                    raw, BEHAVIOR_K, discards=attempt_discards, origin="behavior"
-                )
-                accepted = len(qs) >= 5
-                if not accepted and _rejected(
-                    f"phase={phase} index={index}: {len(qs)} well-formed questions "
-                    "parsed, needed >= 5"
-                ):
-                    _record_rejected_attempt(attempt_discards, qs, "behavior")
-                return accepted
-
-            return self.client.complete(
-                purpose="questions",
-                model=self.settings.evaluator_model,
-                messages=build_behavior_messages(
-                    phase=phase,
-                    index=index,
-                    task=sample.prompt,
-                    prefix_tail=prefix_tail,
-                    k=BEHAVIOR_K,
-                    tests_seen=tests_visible(prefix),
-                ),
-                temperature=self.settings.temperature,
-                max_tokens=self.settings.question_max_tokens,
-                provider=_evaluator_provider(self.settings),
-                response_schema=behavior_question_schema(BEHAVIOR_K),
-                accept=_behavior_accept,
-            )
-
-        weighted_parts = [
-            i
-            for i, part in enumerate(BEHAVIOR_PHASES[phase].parts)
-            if question_weight({"tag": f"behavior:{part.name}"}) > 0
+        trajectories = [
+            {"run": index, "steps": _steps_from_turns(turns)}
+            for index, (_, _, _, turns) in enumerate(runs, start=1)
         ]
-        behavior_calls = [_behavior_call(i) for i in weighted_parts] if do_behavior else []
-
-        def _specialist_call(specialist):
-            _rejected = _reject_logger("content_batch_rejected", f"content:{specialist.name}")
-
-            def _accept(raw: str) -> bool:
-                # a class with no established, required facts is entitled to return nothing, so
-                # the only failure worth a retry is output this cannot be read at all
-                try:
-                    parse_questions(raw, specialist.hi, origin=f"content:{specialist.name}")
-                except Exception as exc:
-                    _rejected(f"{specialist.name}: unreadable output: {exc}")
-                    return False
-                return True
-
-            return self.client.complete(
-                purpose="questions",
-                model=self.settings.evaluator_model,
-                messages=build_reference_specialist_messages(
-                    specialist=specialist,
-                    task=sample.prompt,
-                    reference=reference,
-                    fmt=detect_format(sample.sample_id, prefix),
-                    prefix_turns=sum(1 for m in prefix or [] if m.get("role") == "assistant"),
-                    candidate_turns=getattr(sample, "assistant_turns", 0)
-                    or self.settings.sota_trajectory_turns,
-                ),
-                temperature=self.settings.temperature,
-                max_tokens=self.settings.question_max_tokens,
-                provider=_evaluator_provider(self.settings),
-                response_schema=reference_specialist_schema(specialist),
-                accept=_accept,
-            )
-
-        # a class that only has facts to work from once the reference edited something is not
-        # called against a read-only reference: its own rules would have it emit nothing, and
-        # anything it did emit could not be answered YES by the reference itself
-        specialists = [
-            s for s in REFERENCE_SPECIALISTS if reference_made_edit or not s.requires_reference_edit
-        ]
-        reference_calls = [_specialist_call(s) for s in specialists]
-        calls = reference_calls + behavior_calls
-        responses = await asyncio.gather(*calls)
-        for r in responses:
-            if r.error:
-                raise QuestionScoringUnavailable(r.error)
-        # every specialist runs against the same evaluator and provider pin, so any of them
-        # names the source of the checklist as a whole
-        first_reference_response = responses[0]
-
-        # each class is parsed on its own so a question's tag names the writer that produced it,
-        # but the per-call caps in parse_questions must not apply five times over — the merged
-        # list is put back through the same parser once, which dedupes and caps across the union
-        merged: list[dict[str, str]] = []
-        per_class: dict[str, int] = {}
-        for specialist, raw in zip(specialists, responses[: len(reference_calls)]):
-            qs, _ = parse_questions(
-                raw.raw,
-                specialist.hi,
-                discards=discarded,
-                origin=f"content:{specialist.name}",
-            )
-            per_class[specialist.tag] = len(qs)
-            merged.extend(qs)
-        logger.info(
-            "reference_specialists sample_id={} per_class={} skipped={} merged={}",
-            sample.sample_id,
-            per_class,
-            [s.tag for s in REFERENCE_SPECIALISTS if s not in specialists],
-            len(merged),
+        (
+            milestones,
+            dropped,
+            provider,
+            readings_held,
+            milestones_emitted,
+        ) = await self._extract_validated_vector(
+            task,
+            references,
+            int(getattr(sample, "assistant_turns", 0) or self.settings.sota_trajectory_turns),
+            trajectories,
+            problem=str(getattr(sample, "prompt", "") or ""),
         )
-        reference_qs, _ok = parse_questions(
-            json.dumps({"questions": merged}), n_generic, discards=discarded, origin="content"
-        )
-
-        reference_qs, span_counts = verify_spans(
-            reference_qs,
-            reference,
-            sample.prompt or "",
-            enforce=self.settings.reference_enforce_spans,
-            discards=discarded,
-        )
-
-        for q in reference_qs:
-            q["requires"] = RUBRIC_TAG_REQUIRES.get(q.get("tag"), q.get("requires") or "neutral")
-            q["tag"] = "reference:" + (q.get("tag") or "")
-
-        reference_qs = filter_reference_leaks(reference_qs, discards=discarded)
-        reference_qs, drops = enforce_question_labels(
-            reference_qs,
-            phase=phase,
-            reference_made_edit=reference_made_edit,
-            discards=discarded,
-        )
-
-        if len(reference_qs) < generic_floor:
+        discarded.extend(dropped)
+        if not milestones:
             raise QuestionScoringUnavailable(
-                f"evaluator returned {len(reference_qs)}/{generic_floor}+ well-formed questions"
+                f"no milestone survived validation in any of {readings_held} reading(s)"
             )
-        pruned_info: dict[str, object] = {}
 
-        try:
-            kept_qs, dropped_qs, self_rate = await self._prune_against_reference(
-                sample, reference, reference_qs
+        questions, thin = await self._write_ladders(
+            milestones,
+            {
+                int(t["run"]): [str(step.get("assistant") or "") for step in t["steps"]]
+                for t in trajectories
+            },
+        )
+        # build_judge_messages shows the judge id/tag/text/example_bad and nothing else, so the
+        # near-miss has to arrive under the name it reads
+        for question in questions:
+            question["example_bad"] = question.pop("unearned", "")
+
+        questions = filter_reference_leaks(questions, discards=discarded)
+        questions, drops = enforce_question_labels(questions, discards=discarded)
+        pruned_from = len(questions)
+        if self.settings.reference_prune:
+            questions = await self._prune_unreachable(questions, runs, prefix, discarded)
+        pruned_out = pruned_from - len(questions)
+        if len(questions) < QUESTION_FLOOR:
+            raise QuestionScoringUnavailable(
+                f"evaluator returned {len(questions)}/{QUESTION_FLOOR}+ well-formed questions"
             )
-        except Exception as exc:
-            logger.warning(
-                "reference_prune_failed sample_id={} error={} keeping_unpruned",
-                sample.sample_id,
-                f"{type(exc).__name__}: {exc}",
-            )
-        else:
-            prune_floor = min(PRUNE_MIN_SURVIVORS, max(4, len(reference_qs) // 2))
-            if len(kept_qs) < prune_floor:
-                raise QuestionScoringUnavailable(
-                    f"reference pruning left {len(kept_qs)}/{len(reference_qs)} questions"
-                )
-            pruned_info = {
-                "reference_self_score": self_rate,
-                "pruned_out": len(reference_qs) - len(kept_qs),
-            }
-            reference_qs = kept_qs
-            discarded.extend(dropped_qs)
-        behavior_qs: list[dict[str, str]] = []
-        for index, r in enumerate(responses[len(reference_calls) :]):
-            qs, _ = parse_questions(r.raw, BEHAVIOR_K, discards=discarded, origin="behavior")
-            part_name = BEHAVIOR_PHASES[phase].parts[weighted_parts[index]].name
-            for q in qs:
-                q["tag"] = f"behavior:{part_name}"
-            behavior_qs.extend(qs)
-        behavior_qs = filter_behavior_questions(behavior_qs, context_text, discards=discarded)
-        for q in behavior_qs:
-            q["requires"] = "action"
-        behavior_qs = [q for q in behavior_qs if question_weight(q) > 0]
-        questions = behavior_qs + reference_qs
         for position, question in enumerate(questions, start=1):
             question["id"] = f"q_{position:02d}"
+
+        logger.info(
+            "reference_ladder sample_id={} runs={} milestones={} readings={} questions={} thin={}",
+            sample.sample_id,
+            len(runs),
+            len(milestones),
+            readings_held,
+            len(questions),
+            len(thin),
+        )
         source: dict[str, object] = {
-            "provider": first_reference_response.provider,
+            "provider": provider,
             "model": self.settings.evaluator_model,
             "n_questions": len(questions),
-            "question_mode": "sota_anchored",
+            "question_mode": "milestone_ladder",
             "sample_phase": phase,
-            "behavior_questions_kept": len(behavior_qs),
-            "reference_made_edit": reference_made_edit,
+            "reference_made_edit": made_edit,
+            "reference_runs": len(runs),
+            "reference_models": [model for _, model, _, _ in runs],
+            "readings_held": readings_held,
+            "milestones_emitted": milestones_emitted,
+            "milestones_kept": len(milestones),
+            "pruned_unreachable": pruned_out,
+            "milestones_thin": thin,
             "enforcement_drops": drops,
-            "span_check": span_counts,
-            "reference_trajectory": reference,
+            "reference_trajectory": references[0] if references else "",
+            "reference_trajectories": references,
             "discarded_questions": discarded,
         }
-        if reference_model:
-            source["reference_model"] = reference_model
-        source.update(pruned_info)
         return QuestionPrepResult(questions=questions, source=source)
-
-    async def _prune_against_reference(
-        self,
-        sample: QuestionPrepSample | JudgeSample,
-        reference: str,
-        questions: list[dict[str, str]],
-    ) -> tuple[list[dict[str, str]], list[dict[str, str]], float | None]:
-        document = _reference_document(getattr(sample, "messages", None) or [], reference)
-        _, recs = await _judge_side(
-            client=self.client,
-            settings=self.settings,
-            side="reference",
-            response_text=document,
-            questions=questions,
-            judge_models=[self.settings.evaluator_model],
-            reference_made_edit=None,
-        )
-        record = recs[0] if recs else {}
-        if not record.get("parse_ok"):
-            raise RuntimeError("reference judge returned unparseable answers")
-        answers = record.get("answers") or {}
-        explanations = record.get("explanations") or {}
-        kept: list[dict[str, str]] = []
-        dropped: list[dict[str, str]] = []
-        for q in questions:
-            if str(answers.get(q["id"], "1")) == "1":
-                kept.append(q)
-            else:
-                entry = {
-                    "stage": "reference_prune",
-                    "reason": "reference_answered_no",
-                    "text": q["text"],
-                    "origin": "content",
-                }
-                explanation = explanations.get(q["id"])
-                if explanation:
-                    entry["detail"] = explanation
-                dropped.append(entry)
-        return kept, dropped, record.get("yes_rate")
-
-
-class Grounding(NamedTuple):
-    context: str | None
-    exact_output: str | None
-    exact_returncode: int | None
-    state: str
-
-
-class RepoContextClient:
-    def __init__(self, settings: JudgeSettings):
-        self._client = httpx.AsyncClient(
-            base_url=settings.repo_context_url.rstrip("/"),
-            timeout=settings.repo_context_timeout_seconds,
-        )
-        self._last_warning = 0.0
-
-    async def context_for(
-        self, sample_id: str, assistant_output: str, messages: list[dict[str, str]] | None = None
-    ) -> Grounding:
-        try:
-            response = await self._client.post(
-                "/repo-context",
-                json={
-                    "sample_id": sample_id,
-                    "assistant_output": assistant_output,
-                    "messages": messages or [],
-                },
-            )
-            response.raise_for_status()
-            body = response.json()
-            context = body.get("context")
-            exact = body.get("exact_output")
-            returncode = body.get("exact_returncode")
-            state = body.get("state")
-            return Grounding(
-                context if isinstance(context, str) and context else None,
-                exact if isinstance(exact, str) else None,
-                returncode if isinstance(returncode, int) else None,
-                state if isinstance(state, str) else "",
-            )
-        except Exception as exc:
-            now = time.monotonic()
-            if now - self._last_warning > 60.0:
-                self._last_warning = now
-                logger.warning(
-                    "repo_context_unavailable sample_id={} error={}",
-                    sample_id,
-                    f"{type(exc).__name__}: {exc}",
-                )
-            return Grounding(None, None, None, "")
-
-    async def aclose(self) -> None:
-        await self._client.aclose()
 
 
 class ObservationSimulationService:
@@ -816,7 +799,11 @@ class ObservationSimulationService:
         candidate = (
             ""
             if response.error
-            else repair_to_contract(repair_output(response.raw, fmt), fmt, contract)
+            else correct_returncode(
+                repair_to_contract(repair_output(response.raw, fmt), fmt, contract),
+                fmt,
+                command,
+            )
         )
         recovered = valid_output(candidate, fmt) and has_content(candidate, fmt)
         logger.info(
@@ -845,6 +832,11 @@ class ObservationSimulationService:
         absent = absent_tool_output(command)
         if absent is not None:
             body, returncode = absent
+            # a refusal reached through a head/tail pipe still exits with the filter's code, so
+            # the shape has to be settled here: this path returns before correct_returncode runs
+            override = pipeline_returncode_override(command)
+            if override is not None:
+                returncode = override
             logger.info(
                 "observation_simulation_absent_tool eval_run_id={} sample_id={} command={!r}",
                 request.eval_run_id,
@@ -861,17 +853,31 @@ class ObservationSimulationService:
         exact_output = resolved.exact_output
         exact_returncode = resolved.exact_returncode
         state = resolved.state
-        computed_git = exact_output is not None and exact_returncode is not None
-        if (exact_output or computed_git) and fmt == RETURNCODE:
-            observation = wrap(exact_output, fmt, returncode=exact_returncode or 0)
+        if exact_output is not None:
+            observation = grounded_observation(
+                fmt, exact_output, exact_returncode, command, request.messages
+            )
+            if observation is not None:
+                # a computed status still passes the shape check: only the last stage of a
+                # pipeline owns the exit code, and a read failure fixes it regardless
+                observation = correct_returncode(observation, fmt, command)
+                logger.info(
+                    "observation_simulation_exact eval_run_id={} sample_id={} fmt={} chars={}",
+                    request.eval_run_id,
+                    request.sample_id,
+                    fmt,
+                    len(observation),
+                )
+                return observation
             logger.info(
-                "observation_simulation_exact eval_run_id={} sample_id={} fmt={} chars={}",
+                "observation_simulation_exact_unwrapped eval_run_id={} sample_id={} fmt={} "
+                "rc={} command={!r}",
                 request.eval_run_id,
                 request.sample_id,
                 fmt,
-                len(observation),
+                exact_returncode,
+                command[:80],
             )
-            return observation
         if not state:
             return await self._simulate_uncached(
                 request, command, fmt, context_block, exact_output, exact_returncode
@@ -969,7 +975,11 @@ class ObservationSimulationService:
                     if model != fallback_model:
                         break
                     raise ObservationSimulationUnavailable(response.error)
-                candidate = repair_to_contract(repair_output(response.raw, fmt), fmt, contract)
+                candidate = correct_returncode(
+                    repair_to_contract(repair_output(response.raw, fmt), fmt, contract),
+                    fmt,
+                    command,
+                )
                 rank = _candidate_rank(
                     candidate, fmt, require_content=require_content, contract=contract
                 )
@@ -1025,14 +1035,6 @@ class ObservationSimulationService:
                 diagnostic,
             )
             observation = wrap(diagnostic, fmt, returncode=1)
-        if fabricated_pip_error(command, observation):
-            logger.warning(
-                "observation_simulation_pip_fabrication eval_run_id={} sample_id={} command={!r}",
-                request.eval_run_id,
-                request.sample_id,
-                command[:80],
-            )
-            observation = wrap(pip_success_body(command), fmt)
         if echoed_command(command, observation):
             logger.warning(
                 "observation_simulation_echoed eval_run_id={} sample_id={} command={!r}",
@@ -1459,6 +1461,7 @@ def _usable_simulation_output(
         and not _role_violation(raw)
         and not _looping_output(raw)
         and not degenerate_observation(raw)
+        and not impossible_success(raw, fmt, command)
         and not stuttered_lines(raw)
         and not (command and fabricated_sed_error(command, raw))
         and not (command and fabricated_pip_error(command, raw))
@@ -1483,6 +1486,8 @@ def _unusable_reason(
         return "looping"
     if degenerate_observation(raw):
         return "degenerate_lines"
+    if impossible_success(raw, fmt, command):
+        return "shell_error_with_rc_0"
     if reason := stuttered_lines(raw):
         return f"stuttered: {reason}"
     if command and fabricated_sed_error(command, raw):
@@ -1569,11 +1574,13 @@ async def _judge_side(
     response_text: str,
     questions: list[dict[str, str]],
     judge_models: list[str],
-    reference_made_edit: bool | None = None,
+    repeats: int = 1,
 ) -> tuple[dict[str, dict[str, str | None]], list[dict[str, Any]]]:
+    """Each judge model answers `repeats` times; a question's answer is the majority."""
     question_ids = [q["id"] for q in questions]
     schema = answer_schema(question_ids)
     messages = build_judge_messages(response=response_text, questions=questions)
+    repeats = max(1, repeats)
     raws = await asyncio.gather(
         *[
             client.score(
@@ -1585,33 +1592,40 @@ async def _judge_side(
                 accept=lambda raw: parse_answers(raw, question_ids)[2],
             )
             for model in judge_models
+            for _ in range(repeats)
         ]
     )
     per_judge_answers: dict[str, dict[str, str | None]] = {}
     records: list[dict[str, Any]] = []
-    gate_turns = (
-        candidate_turn_texts_from_merged(response_text) if reference_made_edit is not None else None
-    )
-    for raw, model in zip(raws, judge_models):
-        answers, explanations, parse_ok = parse_answers(raw.raw, question_ids)
-        if gate_turns is not None:
-            answers = apply_measurement_gate(
-                answers,
-                questions,
-                candidate_turn_texts=gate_turns,
-                reference_made_edit=bool(reference_made_edit),
-            )
+    for index, model in enumerate(judge_models):
+        parsed = [
+            parse_answers(raw.raw, question_ids)
+            for raw in raws[index * repeats : (index + 1) * repeats]
+        ]
+        held = [
+            (a, e, raw)
+            for (a, e, ok), raw in zip(parsed, raws[index * repeats : (index + 1) * repeats])
+            if ok and not raw.error
+        ]
+        answers = majority_answers([a for a, _, _ in held]) if held else parsed[0][0]
+        explanations = held[0][1] if held else parsed[0][1]
+        first = held[0][2] if held else raws[index * repeats]
         per_judge_answers[model] = answers
         records.append(
             {
                 "side": side,
                 "judge_model": model,
-                "provider": raw.provider,
+                "provider": first.provider,
                 "answers": answers,
                 "explanations": explanations,
                 "yes_rate": judge_yes_rate(answers, questions),
-                "parse_ok": parse_ok and not raw.error,
-                "error": raw.error,
+                "parse_ok": bool(held),
+                "error": None if held else first.error,
+                "repeats": repeats,
+                "repeats_held": len(held),
+                "disputed": sum(
+                    1 for qid in question_ids if len({a.get(qid) for a, _, _ in held}) > 1
+                ),
             }
         )
     return per_judge_answers, records
@@ -1669,10 +1683,6 @@ async def _score_samples(
         if prepared.error:
             raise QuestionScoringUnavailable(prepared.error)
         questions = prepared.questions
-        gate_flag = prepared.source.get("reference_made_edit")
-        gate_flag = bool(gate_flag) if gate_flag is not None else None
-        if prepared.source.get("pruned_out") is not None:
-            gate_flag = None  # pruning already calibrated the checklist to the reference
 
         async def _side(side: str, response_text: str):
             if is_truncated(response_text):
@@ -1731,7 +1741,7 @@ async def _score_samples(
                 response_text=response_text,
                 questions=questions,
                 judge_models=request.judge_models,
-                reference_made_edit=gate_flag,
+                repeats=int(getattr(settings, "judge_repeats", 1) or 1),
             )
 
         (king_answers, king_recs), (chal_answers, chal_recs) = await asyncio.gather(

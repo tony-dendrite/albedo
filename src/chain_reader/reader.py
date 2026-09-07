@@ -14,6 +14,19 @@ from private_store import intake
 config = get_chain_reader_settings()
 
 
+async def resolve_missing_coldkeys(pool, subtensor, registered: set[str], at_block: int) -> int:
+    missing = [hk for hk in await db.hotkeys_missing_coldkey(pool) if hk in registered]
+    n = 0
+    for hk in missing:
+        ck = await asyncio.to_thread(chain.hotkey_owner, subtensor, hk, at_block)
+        if ck:
+            await db.set_coldkey(pool, hk, ck)
+            n += 1
+    if missing:
+        log.info("coldkeys resolved={}/{}", n, len(missing))
+    return n
+
+
 async def run() -> None:
     pool = await db.connect(config.DB_URL)
     subtensor = await asyncio.to_thread(chain.connect, config.NETWORK)
@@ -86,6 +99,7 @@ async def run() -> None:
                     )
                     n_new = await db.insert_new_commits(pool, commits)
                     n_signals = await intake.handle_signals(pool, signals)
+                    await resolve_missing_coldkeys(pool, subtensor, set(uid_map), at_block)
                     log.info(
                         "block={} scanned={} new={} signals_applied={}",
                         cur,

@@ -1,4 +1,4 @@
-import { POLL_MS, PREDS_POLL_MS, PULLED_SUITES } from "../config.js";
+import { POLL_MS, PREDS_POLL_MS, SLOW_POLL_MS, PULLED_SUITES } from "../config.js";
 import { fetchDashboard, fetchState, fetchBenchmarks, fetchPulledScores, fetchManifest, fetchLlmsText, fetchRegistrationHistory, fetchPredsProgress } from "../fetch.js";
 import { normalize } from "../data.js";
 import { el, mount } from "../dom.js";
@@ -120,14 +120,24 @@ async function tickPreds() {
   paintBenchmarks();
 }
 
-async function loadDatasets() {
+let manifestSig = null;
+async function tickDatasets() {
   const manifest = await fetchManifest();
   if (!manifest) return;
+  const sig = JSON.stringify(manifest);
+  if (sig === manifestSig) return;
+  manifestSig = sig;
   renderDatasets($("datasets-wrap"), $("datasets-meta"), manifest);
 }
 
-async function loadRegistrations() {
-  registrations = await fetchRegistrationHistory();
+let registrationSig = null;
+async function tickRegistrations() {
+  const next = await fetchRegistrationHistory();
+  if (!next) return;
+  const sig = JSON.stringify(next);
+  if (sig === registrationSig) return;
+  registrationSig = sig;
+  registrations = next;
   renderRegistrationChart($("registration-chart"), registrations);
 }
 
@@ -211,9 +221,11 @@ $("hero-llms-btn")?.addEventListener("click", copyLlmsTxt);
 tick();
 tickPipeline();
 tickBenchmarks().then(tickPreds);
-loadDatasets();
-loadRegistrations();
+tickDatasets();
+tickRegistrations();
 setInterval(tick, POLL_MS);
 setInterval(tickPipeline, POLL_MS);
 setInterval(tickBenchmarks, POLL_MS);
 setInterval(tickPreds, PREDS_POLL_MS);
+setInterval(tickDatasets, SLOW_POLL_MS);
+setInterval(tickRegistrations, SLOW_POLL_MS);

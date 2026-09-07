@@ -10,9 +10,6 @@ from fastapi.testclient import TestClient
 
 from albedo_config import JudgeSettings
 from albedo_config.models import JUDGE_MODELS
-from albedo_eval_service.evaluator.reference.prompt_reference_split import (
-    REFERENCE_SPECIALISTS,
-)
 from albedo_eval_service.judge_api import (
     Grounding,
     JudgeSample,
@@ -57,9 +54,70 @@ _RC_PREFIX = [
 ]
 
 
+# The one span every fake reference run displays, and the one the fake vector cites. It has to
+# survive validate_vector, so it must appear in the run's own assistant block and NOT in the task.
+_FAKE_SPAN = "checked-the-thing"
+_FAKE_REFERENCE_TURN = f"```bash\n{_FAKE_SPAN}\n```"
+_ANCHOR_SPAN = "lib/x.py"
+_ANCHOR_CATEGORIES = ("verification", "action")
+
+
+def _fake_milestones(
+    span: str = "", n: int = 1, categories: tuple[str, ...] = ("verification",)
+) -> dict:
+    span = span or _FAKE_SPAN
+    return {
+        "milestones": [
+            {
+                "id": f"m{i}",
+                "category": categories[(i - 1) % len(categories)],
+                "statement": f"Run the check that exercises behaviour {i}.",
+                "necessary": True,
+                "necessity_reason": "without it nothing downstream is established",
+                "in_prefix": False,
+                "consensus": [1],
+                "depends_on": [],
+                "assertion": "",
+                "backing_span": "",
+                "evidence": [{"run": 1, "step": 1, "source": "command", "span": span}],
+            }
+            for i in range(1, n + 1)
+        ]
+    }
+
+
+def _fake_ladder(milestones: dict, per: int) -> dict:
+    return {
+        "questions": [
+            {
+                "milestone": m["id"],
+                "rung": rung,
+                "tag": "reference:milestone",
+                "text": f"Did the candidate establish {m['id']} at depth {rung}?",
+                "unearned": "a candidate that stopped short",
+            }
+            for m in milestones["milestones"]
+            for rung in range(1, per + 1)
+        ]
+    }
+
+
 class FakeClient:
     def __init__(self, n_questions: int = 3):
         self.n_questions = n_questions
+
+    def _answer(self, purpose, response_schema):
+        """Reference runs are prose; the extractor wants milestones; the writer wants questions."""
+        if purpose == "reference":
+            return _FAKE_REFERENCE_TURN
+        properties = (response_schema or {}).get("properties") or {}
+        if "milestones" in properties:
+            return json.dumps(_fake_milestones())
+        if "questions" in properties and "milestone" in str(response_schema):
+            per = max(3, self.n_questions)
+            return json.dumps(_fake_ladder(_fake_milestones(), per))
+        questions = [{"text": f"q{i}?", "example_bad": "bad"} for i in range(self.n_questions)]
+        return json.dumps({"questions": questions})
 
     async def complete(
         self,
@@ -76,9 +134,8 @@ class FakeClient:
         force_openrouter=False,
         hedge_after_seconds=None,
     ):
-        questions = [{"text": f"q{i}?", "example_bad": "bad"} for i in range(self.n_questions)]
         return JudgeRawResponse(
-            model=model, provider="fake", raw=json.dumps({"questions": questions})
+            model=model, provider="fake", raw=self._answer(purpose, response_schema)
         )
 
     async def score(
@@ -93,11 +150,11 @@ class FakeClient:
         accept=None,
         purpose="",
     ):
-        ids = response_schema["properties"]["answers"]["items"]["properties"]["id"]["enum"]
+        ids = response_schema["properties"]["answers"]["items"]["properties"]["asked"]["enum"]
         content = messages[1]["content"]
         answer = 0 if "KING" in content and "CHAL" not in content else 1
         raw = json.dumps(
-            {"answers": [{"id": qid, "answer": answer, "explanation": "e"} for qid in ids]}
+            {"answers": [{"asked": qid, "reason": "e", "verdict": answer} for qid in ids]}
         )
         return JudgeRawResponse(model=model, provider="fake", raw=raw)
 
@@ -341,11 +398,11 @@ class OneJudgeBrokenClient:
         accept=None,
         purpose="",
     ):
-        ids = response_schema["properties"]["answers"]["items"]["properties"]["id"]["enum"]
+        ids = response_schema["properties"]["answers"]["items"]["properties"]["asked"]["enum"]
         if model == JUDGE_MODELS[0]:
             raw = "garbage, not json"
         else:
-            raw = json.dumps({"answers": [{"id": i, "answer": 1, "explanation": "e"} for i in ids]})
+            raw = json.dumps({"answers": [{"asked": i, "reason": "e", "verdict": 1} for i in ids]})
         return JudgeRawResponse(model=model, provider="fake", raw=raw)
 
 
@@ -418,7 +475,7 @@ def test_truncated_side_scores_zero_without_calling_the_judge():
     assert all(r["parse_ok"] for r in challenger_results)
     assert all(r["yes_rate"] == 0.0 for r in challenger_results)
 
-    assert len(fake.judged) == 1
+    assert len(fake.judged) == JudgeSettings().judge_repeats
     assert all("KING" in judged for judged in fake.judged)
 
 
@@ -516,7 +573,7 @@ def test_looped_side_scores_zero_without_calling_the_judge():
         assert result["loop_commands"][0]["command"] == "git status"
         assert result["loop_commands"][0]["count"] == 5
 
-    assert len(fake.judged) == 1
+    assert len(fake.judged) == JudgeSettings().judge_repeats
     assert all("KING" in judged for judged in fake.judged)
 
 
@@ -554,18 +611,29 @@ def test_a_clean_challenger_is_still_judged_normally():
 
 def test_scoring_regenerates_questions_when_async_prep_failed():
     class PrepFailsOnceClient(FakeClient):
-        def __init__(self):
+        """Breaks the first extraction, which is the first thing that fails a whole prep.
+
+        A single failed reference RUN would not do it: `generate_many` tolerates losing one of
+        three, so the prep would quietly succeed on the survivors and never regenerate.
+        """
+
+        def __init__(self, readings: int):
             super().__init__(n_questions=8)
             self.complete_calls = 0
+            self.broken = 0
+            self.readings = readings
 
         async def complete(self, **kwargs):
             self.complete_calls += 1
-            if self.complete_calls == 1:
+            schema = kwargs.get("response_schema") or {}
+            # every reading of the first prep breaks: one surviving reading would carry the prep
+            if self.broken < self.readings and "milestones" in (schema.get("properties") or {}):
+                self.broken += 1
                 raise RuntimeError("prep broke")
             return await super().complete(**kwargs)
 
     settings = JudgeSettings(num_questions=3, sota_trajectory_turns=1)
-    fake = PrepFailsOnceClient()
+    fake = PrepFailsOnceClient(settings.milestone_readings)
     store = QuestionPrepStore(settings, _reference_backed_service(settings, fake))
 
     async def run():
@@ -610,11 +678,13 @@ def test_scoring_regenerates_questions_when_async_prep_failed():
     records = asyncio.run(run())
 
     assert records[0]["scored"] is True
-    # the failed prep call, then a full regeneration: one reference trajectory, one call per
-    # reference specialist the reference supports, and one judge call. The fake reference edits
-    # nothing, so the edit-dependent classes are not called.
-    called = [s for s in REFERENCE_SPECIALISTS if not s.requires_reference_edit]
-    assert fake.complete_calls == 1 + 1 + len(called) + 1
+    # the broken attempt reached the extractor, so: N reference runs plus the K failed readings,
+    # then a full regeneration of N runs, K readings and the question-writer readings. Identical
+    # readings are merged without an alignment call. The judge goes through score(), not
+    # complete(), so it is not counted here.
+    runs, readings = settings.reference_runs, settings.milestone_readings
+    writers = settings.question_readings
+    assert fake.complete_calls == (runs + readings) + (runs + readings + writers)
 
 
 class _AnchorFakeClient:
@@ -650,19 +720,49 @@ class _AnchorFakeClient:
                 provider="fake",
                 raw="THOUGHT: fix lib/x.py\n\n```bash\nsed -i 's/a/b/' lib/x.py\n```",
             )
-        if "REFERENCE TRAJECTORY" in messages[1]["content"]:
+        if "STRONG-AGENT ACCOUNTS" in messages[1]["content"]:
             self.saw_reference_prompt = True
-        questions = [
-            {"text": f"q{i} gate{i}?", "example_bad": "bad"} for i in range(self.n_questions)
-        ]
-        questions.append(
+        properties = response_schema.get("properties") or {}
+        if "milestones" in properties:
+            return JudgeRawResponse(
+                model=model,
+                provider="fake",
+                raw=json.dumps(_fake_milestones(_ANCHOR_SPAN, 2, _ANCHOR_CATEGORIES)),
+            )
+        # two milestones at four depths: a vector this size is what QUESTION_FLOOR is set for
+        payload = _fake_ladder(_fake_milestones(_ANCHOR_SPAN, 2, _ANCHOR_CATEGORIES), 4)
+        # one question that names the reference, so the leak filter has something to catch
+        payload["questions"].append(
             {
+                "milestone": "m1",
+                "rung": 4,
+                "tag": "reference:milestone",
                 "text": "Does it avoid re-running the grep the reference already ran?",
-                "example_bad": "bad",
+                "unearned": "bad",
             }
         )
+        return JudgeRawResponse(model=model, provider="fake", raw=json.dumps(payload))
+
+    async def score(
+        self,
+        *,
+        model,
+        messages,
+        response_schema=None,
+        schema_name="",
+        max_tokens=None,
+        provider=None,
+        accept=None,
+        purpose="",
+    ):
+        # every reference answers every question, so pruning removes nothing here
+        ids = response_schema["properties"]["answers"]["items"]["properties"]["asked"]["enum"]
         return JudgeRawResponse(
-            model=model, provider="fake", raw=json.dumps({"questions": questions})
+            model=model,
+            provider="fake",
+            raw=json.dumps(
+                {"answers": [{"asked": qid, "reason": "e", "verdict": 1} for qid in ids]}
+            ),
         )
 
 
@@ -687,20 +787,70 @@ def test_prepare_anchors_on_reference_and_filters_leaks():
     )
     result = asyncio.run(service.prepare(sample, eval_run_id="run-1"))
     assert fake.saw_reference_prompt
-    assert result.source["question_mode"] == "sota_anchored"
-    assert result.source["reference_model"] == "z-ai/glm-5.2"
+    assert result.source["question_mode"] == "milestone_ladder"
+    assert result.source["reference_runs"] == 3
+    assert result.source["reference_models"] == ["z-ai/glm-5.2"] * 3
     assert "REFERENCE STEP" in result.source["reference_trajectory"]
+    assert result.source["milestones_kept"] == 2
     assert all("the reference" not in q["text"].casefold() for q in result.questions)
-    # zero-weight behavior tags are dropped at prep (question rebalance);
-    # only tags with a positive TAG_WEIGHTS entry may survive
+
     from albedo_eval_service.judge_core import question_weight
 
-    behavior_tags = {q["tag"] for q in result.questions if q["tag"].startswith("behavior:")}
-    assert behavior_tags <= {"behavior:anchored_edit"}
-    assert all(question_weight(q) > 0 for q in result.questions)
+    # the tag is the category of the milestone the question came from, not what the writer
+    # emitted:
+    # the fixture's writer tags every question "reference:milestone" and none survives with it
+    assert {q["tag"] for q in result.questions} == {
+        "reference:verification",
+        "reference:action",
+    }
+    # the near-miss has to survive under the name the judge reads it by
+    assert all(q["example_bad"] for q in result.questions)
+    assert all("unearned" not in q for q in result.questions)
+    # every question weighs the same: a milestone chooses what is asked, not what an answer is
+    # worth, so nothing normalises per milestone and no question carries its own weight
+    assert all("weight" not in q for q in result.questions)
+    assert {question_weight(q) for q in result.questions} == {1.0}
 
 
-def test_prepare_raises_when_reference_generation_and_reroll_both_fail():
+def test_prepare_drops_questions_no_reference_can_answer():
+    """The prune bar is ALL references, not any one: a question one run earns is route-specific."""
+    from albedo_eval_service.judge_api import QuestionPrepSample
+
+    class OneQuestionRejected(_AnchorFakeClient):
+        async def score(self, **kwargs):
+            ids = kwargs["response_schema"]["properties"]["answers"]["items"]["properties"][
+                "asked"
+            ]["enum"]
+            # q_01 is answered by nobody; q_02 by this run only
+            answers = [
+                {"asked": qid, "reason": "e", "verdict": 0 if qid in ("q_01", "q_02") else 1}
+                for qid in ids
+            ]
+            if self.seen == 0:
+                answers = [
+                    {**a, "verdict": 1 if a["asked"] == "q_02" else a["verdict"]} for a in answers
+                ]
+            self.seen += 1
+            return JudgeRawResponse(
+                model=kwargs["model"], provider="fake", raw=json.dumps({"answers": answers})
+            )
+
+    fake = OneQuestionRejected()
+    fake.seen = 0
+    service = _anchor_service(fake)
+    sample = QuestionPrepSample(
+        sample_id="s:1:1",
+        prompt="TASK",
+        messages=[{"role": "user", "content": "fix the bug"}],
+        assistant_turns=2,
+    )
+    result = asyncio.run(service.prepare(sample, eval_run_id="run-1"))
+    kept = {q["text"] for q in result.questions}
+    assert result.source["pruned_unreachable"] == 1, "only the question nobody earned is dropped"
+    assert len(kept) == result.source["n_questions"]
+
+
+def test_prepare_raises_when_every_reference_run_fails():
     from albedo_eval_service.judge_api import QuestionPrepSample, QuestionScoringUnavailable
 
     fake = _AnchorFakeClient(fail_reference=True)
@@ -1256,50 +1406,3 @@ def test_a_git_command_the_snapshot_can_compute_never_reaches_the_memo():
     assert first == second == "<returncode>0</returncode>\n<output>\nM app.py\n</output>"
     assert client.calls == 0
     assert service._observations._memo == {}
-
-
-def test_edit_dependent_specialists_are_called_only_when_the_reference_edited():
-    """The action class costs one evaluator call per sample; skip it on a read-only reference."""
-
-    class RecordingClient(FakeClient):
-        def __init__(self):
-            super().__init__(n_questions=8)
-            self.prompts: list[str] = []
-
-        async def complete(self, **kwargs):
-            self.prompts.append(kwargs["messages"][-1]["content"])
-            return await super().complete(**kwargs)
-
-    def classes_called(reference_made_edit: bool) -> set[str]:
-        settings = JudgeSettings(num_questions=3, sota_trajectory_turns=1)
-        fake = RecordingClient()
-        service = _reference_backed_service(settings, fake)
-        sample = JudgeSample(
-            sample_id="s1",
-            prompt="task",
-            previous_king_output="",
-            challenger_output="",
-            messages=_MESSAGES,
-        )
-        asyncio.run(
-            service._prepare_once(
-                sample,
-                "REFERENCE STEP 1:\nwork\n",
-                "ref-model",
-                reference_made_edit,
-            )
-        )
-        # each specialist prompt ends with its own class block, which names the class
-        return {
-            s.tag
-            for s in REFERENCE_SPECIALISTS
-            for prompt in fake.prompts
-            if f"YOUR CLASS: {s.name}" in prompt
-        }
-
-    edit_dependent = {s.tag for s in REFERENCE_SPECIALISTS if s.requires_reference_edit}
-    always = {s.tag for s in REFERENCE_SPECIALISTS} - edit_dependent
-    assert edit_dependent, "the skip has nothing to act on"
-
-    assert classes_called(True) == always | edit_dependent
-    assert classes_called(False) == always

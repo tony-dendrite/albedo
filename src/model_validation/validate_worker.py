@@ -1,20 +1,18 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import os
 import socket
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 
 import asyncpg
 from loguru import logger as log
 
 from albedo_config import get_model_validation_settings
-from config_validation.fingerprint import compute_fingerprint
-from model_validation import db
-from model_validation.opensearch import find_duplicate, health, index_fingerprint
+from model_validation import db, dedup
+from model_validation.dedup import bank
+from model_validation.opensearch import health
 from model_validation.storage import (
     download_config,
     download_full,
@@ -23,7 +21,7 @@ from model_validation.storage import (
     make_room,
     safetensors_dtypes,
 )
-from model_validation.uploads import put_fault, update_fingerprint_corpus
+from model_validation.uploads import put_fault
 from model_validation.validate import (
     check_architecture,
     check_dtypes,
@@ -82,19 +80,11 @@ def _is_not_found(exc: Exception) -> bool:
     return any(m in str(exc).lower() for m in _NOT_FOUND_MARKERS)
 
 
-def _weights_hash(model_dir: str) -> str:
-    hashes: list[str] = []
-    for path in Path(model_dir).glob("*.safetensors"):
-        h = hashlib.sha256()
-        with path.open("rb") as fh:
-            for chunk in iter(lambda: fh.read(1 << 20), b""):
-                h.update(chunk)
-        hashes.append(h.hexdigest())
-    return hashlib.sha256("\n".join(sorted(hashes)).encode()).hexdigest()
-
-
 def process_model(
-    model_uri: str, hotkey: str, protected_repos: frozenset[str] = frozenset()
+    model_uri: str,
+    hotkey: str,
+    coldkey: str = "",
+    protected_repos: frozenset[str] = frozenset(),
 ) -> Outcome:
     repo, _, digest = model_uri.partition("@")
     try:
@@ -163,76 +153,29 @@ def process_model(
         return _miner("safetensors_index", msg, {})
 
     try:
-        fp = compute_fingerprint(model_dir)
+        res = dedup.run(model_dir, model_uri, hotkey, repo, digest, coldkey)
     except Exception as exc:
-        return _infra("fingerprint_failed", f"could not fingerprint model: {exc}")
+        return _infra("dedup_failed", f"dedup stage failed: {type(exc).__name__}: {exc}")
+    if res.infra_error:
+        return _infra("dedup_failed", res.infra_error)
 
-    try:
-        whash = _weights_hash(model_dir)
-    except Exception as exc:
-        return _infra("weights_hash_failed", f"could not hash weight files: {exc}")
-
-    dim = len(fp.get("norm_vector") or [])
-    if dim > config.MAX_KNN_DIM:
-        return _miner(
-            "fingerprint_too_large",
-            f"model fingerprint has {dim} dimensions (tensors), over the "
-            f"{config.MAX_KNN_DIM} max — non-canonical architecture",
-            {"fingerprint_dim": dim, "max_dim": config.MAX_KNN_DIM},
-        )
-
-    fp_uri, tensors_uri = update_fingerprint_corpus(model_uri, fp)
-
-    try:
-        dedup = find_duplicate(fp, hotkey, weights_hash=whash)
-    except Exception as exc:
-        return _infra("opensearch_failed", f"dedup search failed: {exc}")
-
-    if dedup["is_duplicate"]:
-        if dedup.get("exact_weights_match"):
-            reason = f"duplicate of {dedup['matched_key']}: exact weights match (weights_hash)"
-        else:
-            reason = (
-                f"duplicate of {dedup['matched_key']}: similarity "
-                f"{dedup['similarity']:.6f} >= {dedup['threshold']} threshold"
-            )
-        summary = {
-            "reason": reason,
-            "similarity": dedup["similarity"],
-            "threshold": dedup["threshold"],
-            "duplicate_of": dedup["matched_key"],
-            "duplicate_of_hotkey": dedup["matched_hotkey"],
-            "candidates_checked": dedup["candidates_checked"],
-            "exact_weights_match": dedup.get("exact_weights_match", False),
-        }
-        fault_detail = {**summary, "fingerprint": fp}
-        return _miner("duplicate", reason, summary, fault_detail=fault_detail)
-
-    created_at = datetime.now(timezone.utc).isoformat()
-    try:
-        index_fingerprint(
+    summary = dedup.public_summary(res)
+    if res.rejected:
+        reason = res.verdict.reason if res.verdict else None
+        if dedup.enforces(reason):
+            code = dedup.fault_code(reason)
+            return _miner(code, dedup.public_message(res), summary, fault_detail=summary)
+        log.warning(
+            "[shadow] dedup REJECT {} — {} — not enforced (reason={} enforce={} allowed={})",
             model_uri,
-            fp,
-            hotkey=hotkey,
-            repo=repo,
-            digest=digest,
-            model_uri=model_uri,
-            created_at=created_at,
-            weights_hash=whash,
+            dedup.public_message(res),
+            reason,
+            config.DEDUP_ENFORCE,
+            sorted(dedup.enforced_reasons()),
         )
-    except Exception as exc:
-        return _infra("opensearch_index_failed", f"could not index fingerprint: {exc}")
+        summary = {"dedup": "pass"}
 
-    return Outcome(
-        "done",
-        result_summary={
-            "similarity": dedup["similarity"],
-            "threshold": dedup["threshold"],
-            "fingerprint_file": fp_uri,
-            "tensors_file": tensors_uri,
-            "n_tensors": len(fp.get("layer_keys", [])),
-        },
-    )
+    return Outcome("done", result_summary=summary)
 
 
 async def _heartbeat_loop(pool, attempt_id) -> None:
@@ -304,6 +247,7 @@ async def run() -> None:
     pool = await db.connect(config.DB_URL)
     if not health():
         raise RuntimeError(f"OpenSearch not healthy at {config.OPENSEARCH_URL}")
+    log.info("dedup bank: {} banked models in {}", bank.preflight(), bank.index_name())
 
     log.info("model_validation started — worker={} netuid={}", _WORKER_ID, config.NETUID)
     n = await db.enqueue_from_commits(pool, config.NETUID)
@@ -415,7 +359,11 @@ async def run() -> None:
             try:
                 protected = frozenset(await db.protected_pre_eval_repos(pool))
                 outcome = await asyncio.to_thread(
-                    process_model, attempt["model_uri"], attempt["hotkey"], protected
+                    process_model,
+                    attempt["model_uri"],
+                    attempt["hotkey"],
+                    coldkey=attempt["coldkey"] or "",
+                    protected_repos=protected,
                 )
             except Exception as exc:
                 outcome = _infra("unexpected", f"{type(exc).__name__}: {exc}")

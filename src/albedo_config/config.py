@@ -102,6 +102,13 @@ class JudgeSettings(BaseSettings):
     sota_models: str = SOTA_MODELS
     sota_max_tokens: int = 8192
     sota_trajectory_turns: int = 8
+    reference_runs: int = 3
+    # judge every reference run against the checklist and drop what none of them can
+    # answer. Costs one judge call per run per sample at prep time.
+    reference_prune: bool = True
+    milestone_readings: int = 4
+    question_readings: int = 3
+    judge_repeats: int = 3
     num_questions: int = 50
     question_max_tokens: int = 20000
     simulation_max_tokens: int = 4096
@@ -111,10 +118,11 @@ class JudgeSettings(BaseSettings):
     simulation_providers: str = SIMULATION_PROVIDERS
     answer_max_tokens: int = 20000
     question_prep_ttl_seconds: float = 14400.0
-    repo_context_url: str = ""
+    # defaults to the address RepoContextSettings serves on, so grounding is on unless the
+    # service is deliberately unconfigured; an empty value disables the lookup entirely
+    repo_context_url: str = "http://127.0.0.1:8093"
     repo_context_timeout_seconds: float = 20.0
     slack_error_webhook_url: str = ""
-    reference_enforce_spans: bool = False
 
 
 @lru_cache
@@ -183,6 +191,11 @@ class RemoteSettings(BaseSettings):
     challenger_model: str | None = None
     previous_king_gpu_ids: str = "0,1,2,3"
     challenger_gpu_ids: str = "4,5,6,7"
+    previous_king_vllm_port: int = 9201
+    challenger_vllm_port: int = 9202
+    vllm_max_num_seqs: int = 256
+    vllm_startup_timeout_seconds: float = 1800.0
+    rollouts_per_sample: int = 2
     max_new_tokens: int = 4096
     generation_result_timeout_seconds: float = 900.0
     trajectory_assistant_turns: int = 8
@@ -424,22 +437,43 @@ class ModelValidationSettings(BaseSettings):
     DB_URL: str = Field(default_factory=_control_db_url)
     NETUID: int = Field(97, validation_alias=AliasChoices("CHAIN_NETUID"))
     MODEL_CACHE_DIR: str = _MV_DEFAULT_CACHE_DIR
-    OPENSEARCH_URL: str = "http://127.0.0.1:9200"
+    OPENSEARCH_URL: str = "http://127.0.0.1:9270"
     OPENSEARCH_USER: str = ""
     OPENSEARCH_PASSWORD: str = ""
-    OPENSEARCH_INDEX: str = "albedo_fingerprints"
-    MAX_KNN_DIM: int = 16000
+    OPENSEARCH_INDEX: str = "albedo_dedup_ws_test"
     S3_BUCKET: str = ""
     S3_ENDPOINT: str = "https://s3.hippius.com"
     S3_ACCESS_KEY: str = ""
     S3_SECRET_KEY: str = ""
-    FP_FILE: str = "fingerprint.json"
-    TENSORS_FILE: str = "tensors.json"
     ARCH_SPEC_PATH: str = Field(
         _MV_ARCH_SPEC_PATH, validation_alias=AliasChoices("ALBEDO_ARCH_SPEC")
     )
-    SIM_THRESHOLD: float = 0.98
-    KNN_CANDIDATES: int = 20
+    DEDUP_SECRET: str = ""
+    DEDUP_SECRET_FILE: str = "/root/albedo-dedup-test/.albedo_dedup_secret"
+    DEDUP_REF_DIR: str = ""
+    DEDUP_GPU: int = 6
+    DEDUP_ENFORCE: bool = False
+    # Master switch above; this narrows WHICH reject reasons may actually fault a miner.
+    # Everything not listed is logged and stored as audit, and the miner still gets done.
+    # "*" (or "ALL") enforces every reason. Names are the Verdict.reason values.
+    DEDUP_ENFORCE_REASONS: str = "COPY,OWN-COPY"
+    DEDUP_NEAREST_K: int = 10
+    DEDUP_COPY_REL: float = 1e-5
+    DEDUP_LINEAR_RESID: float = 0.05
+    DEDUP_ALPHA_Z: float = 8.0
+    DEDUP_ALPHA_MIN: float = 0.02
+    DEDUP_F_NOISE: float = 0.10
+    DEDUP_EMBED_RATIO_NOISE: float = 0.80
+    DEDUP_DENS_MIN: float = 0.20
+    DEDUP_KURT_MAX: float = 100.0
+    DEDUP_REL_TRIVIAL: float = 0.0025
+    DEDUP_LORA_MAX_SPIKES: float = 40
+    DEDUP_LORA_MIN_F: float = 0.9
+    DEDUP_HEAD_SCALE_MAX: float = 0.02
+    DEDUP_GLOBAL_SCALE_MAX: float = 0.005
+    DEDUP_REUSE_COS: float = 0.8
+    DEDUP_TOPK_PARTNERS: int = 5
+    DEDUP_PERMUTED_MAX_IDENT: float = 0.5
     POLL_INTERVAL_S: float = Field(5.0, validation_alias=AliasChoices("ALBEDO_HV_POLL_S"))
     LEASE_SECONDS: int = Field(600, validation_alias=AliasChoices("ALBEDO_HV_LEASE_S"))
     HEARTBEAT_S: float = Field(30.0, validation_alias=AliasChoices("ALBEDO_HV_HEARTBEAT_S"))

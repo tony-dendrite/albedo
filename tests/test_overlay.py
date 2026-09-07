@@ -193,3 +193,21 @@ def test_a_git_command_we_cannot_model_retires_every_key():
 def test_an_unmodelled_git_command_is_recorded_once_not_on_every_later_step():
     overlay = _git("git rm big.py", f"cat {PATH}", "git status")
     assert overlay.opaque == [(None, "git rm big.py")]
+
+
+def test_a_heredoc_behind_a_cd_lands_in_the_directory_the_chain_moved_to():
+    overlay = _overlay_from(
+        [
+            "```bash\ncd /tmp && cat > repro.py <<'EOF'\nprint(1)\nEOF\n```",
+            "```bash\ncd /testbed && cat > inside.py <<'EOF'\nprint(2)\nEOF\n```",
+        ]
+    )
+    assert overlay.read("/tmp/repro.py") == "print(1)\n"
+    assert overlay.read("repro.py") is None
+    assert overlay.read("inside.py") == "print(2)\n"
+
+
+def test_a_heredoc_behind_a_relative_cd_is_left_untracked():
+    overlay = _overlay_from(["```bash\ncd subdir && cat > x.py <<'EOF'\nprint(1)\nEOF\n```"])
+    assert overlay.read("x.py") is None
+    assert overlay.read("subdir/x.py") is None

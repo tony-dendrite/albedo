@@ -116,8 +116,13 @@ def _original_submit(
     )
 
 
+def dataset_sample_id(sample_id: str) -> str:
+    """The dataset row behind a rollout id such as `shard:row:turn#r2`."""
+    return sample_id.split("#r", 1)[0]
+
+
 def _parse_sample_id(sample_id: str) -> tuple[str, int, int]:
-    shard_name, row_idx_raw, turn_idx_raw = sample_id.rsplit(":", 2)
+    shard_name, row_idx_raw, turn_idx_raw = dataset_sample_id(sample_id).rsplit(":", 2)
     if not _SHARD_RE.match(shard_name):
         raise ValueError(f"unsupported dataset shard in sample_id: {sample_id}")
     return shard_name, int(row_idx_raw), int(turn_idx_raw)

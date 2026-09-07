@@ -321,17 +321,31 @@ SUBMIT_NUDGE = (
 
 
 _NAME_RE = re.compile(r"[A-Za-z_][\w.\-/]{3,}")
+_CODE_SPAN_RE = re.compile(r"`([^`\n]{2,120})`")
 
 
-def _names(text: str) -> set[str]:
-    return {
-        t.lower()
-        for t in _NAME_RE.findall(text or "")
-        if any(c in t for c in "_./-") or not t.islower()
-    }
+def _names(text: str, *, code: bool = False) -> set[str]:
+    """Identifier-like tokens, for matching what a request named against what a command touched.
+
+    In prose a bare lowercase word is dropped as English unless it sits in a backticked span,
+    which is how a request names a plain identifier such as `buildver`. A shell command is all
+    code, so `code=True` keeps every token. Each path also contributes its basename, so the
+    absolute path a command uses matches the relative one the request wrote.
+    """
+    tokens = set(_NAME_RE.findall(text or "")) if code else set()
+    tokens |= {t for span in _CODE_SPAN_RE.findall(text or "") for t in _NAME_RE.findall(span)}
+    tokens |= {t for t in _NAME_RE.findall(text or "") if any(c in t for c in "_./-")}
+    tokens |= {t for t in _NAME_RE.findall(text or "") if not t.islower()}
+    return {n for t in tokens for n in (t.lower(), t.rsplit("/", 1)[-1].lower()) if n}
 
 
 def empty_submit_count(state: Any, marker: str) -> int:
+    """How often the agent ran the submit command without working since its previous submit.
+
+    Work is an edit, or a command naming something an injected request asked about. Requests
+    accumulate: a follow-up that only says "continue with the original issue" must not erase
+    what the micro-task named, or reading the file it pointed at stops counting as work.
+    """
     count = 0
     worked = False
     asked_to_submit_as_is = False
@@ -353,7 +367,8 @@ def empty_submit_count(state: Any, marker: str) -> int:
         if _EDIT_RE.search(content):
             edited |= _names(command)
         if not marker or marker not in command:
-            worked = worked or bool(_EDIT_RE.search(content)) or bool(_names(command) & asked)
+            hit = bool(_names(command, code=True) & asked)
+            worked = worked or bool(_EDIT_RE.search(content)) or hit
             continue
         worked = worked or bool(_EDIT_RE.search(content))
         count += not worked and not asked_to_submit_as_is and not repeated_demand

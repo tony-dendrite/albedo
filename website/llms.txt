@@ -148,9 +148,9 @@ albedo/
 │   │   │   └── state.py                    in-process run state machine (accepted→generating→scoring→succeeded)
 │   │   ├── scoring/                    score_bridge.py (hub) + score_bridge_client.py (backend) + scoring_client.py (batch builder)
 │   │   ├── evaluator/                  QUESTION GENERATION
-│   │   │   ├── reference/                  reference-anchored rubric questions (tags + economy bounds) + leak filter
-│   │   │   ├── behavior/                   per-trim behaviour checks (BEHAVIOR_K = 6, three calls)
-│   │   │   └── shared/                     label enforcement, phase read-caps, dup/template caps, HORIZON_STRATA, budgets
+│   │   │   ├── reference/                  prompt_milestones.py (vector of change + validate_vector), prompt_ladder.py
+│   │   │   │                               (questions per milestone), leak filter + normalise_span
+│   │   │   └── shared/                     label enforcement, sample_phase, HORIZON_STRATA
 │   │   ├── judge/prompt_judge.py       the judge-side prompt assembled by judge_core
 │   │   ├── simulator/prompt_simulator.py   simulator system prompt, per-format OUTPUT FORMAT block, transcribe prompt
 │   │   ├── modelstore/                 canonical_model_config.py (pin genesis configs over the challenger's — anti-tamper) + resolver.py (cache layout)
@@ -197,7 +197,7 @@ albedo/
 │
 ├── docs/
 │   ├── MINING.md                   miner-facing guide for the `albedo` CLI
-│   ├── SCORING.md                  checklist construction, measurement gate, loop short-circuit, win margin, anti-gaming
+│   ├── SCORING.md                  checklist construction, loop short-circuit, win margin, anti-gaming
 │   ├── DATASETS.md                 the four corpora, observation formats, grounding + simulator ladder, sampling, manifest pin
 │   ├── eval-service-status.md      eval-stack runbook (services, ports, PM2, smoke mode)
 │   └── reign-and-weight-pm2.md     set-reign + weight-setter dev notes
@@ -445,7 +445,7 @@ albedo-remote-eval-api  (GPU host)
     GPU split: king = ALBEDO_REMOTE_PREVIOUS_KING_GPU_IDS (0,1,2,3)
                challenger = ALBEDO_REMOTE_CHALLENGER_GPU_IDS (4,5,6,7)  (no overlap, 4 each)
     one vLLM subprocess per side (tensor_parallel_size = #gpus), generate king+chal in parallel
-    multiturn trajectories: the horizon is stratified per sample — HORIZON_STRATA (8, 12, 16)
+    multiturn trajectories: the horizon is stratified per sample — HORIZON_STRATA (12, 16)
       assistant turns, assigned round-robin within each phase bucket (evaluator/shared/questions.py);
       ALBEDO_REMOTE_TRAJECTORY_ASSISTANT_TURNS (8) is only the fallback when no horizon is assigned.
       Between turns the observation comes back over the score bridge (POST /simulate-observation
@@ -476,23 +476,36 @@ score bridge (backend-initiated WebSocket, GPU→backend)
 ```
 
 **Question prep (per sample)** (`/category-prep`, evaluator = OpenRouter `z-ai/glm-5.2`, fp8): before
-judging, a reference trajectory (GLM 5.2) is rolled through the same observation loop the candidates
-face; the evaluator then reads the task (the conversation prefix) and writes the checklist in two
-regimes, in parallel:
+judging, `ALBEDO_JUDGE_REFERENCE_RUNS` (3) reference trajectories (GLM 5.2) are rolled concurrently
+through the same observation loop the candidates face. They share one world — the observation memo
+keys on (sample_id, format, repo state, command) — so they diverge only where the model chose
+differently. Below two usable runs the sample is dropped; there is no task-only fallback checklist.
+The evaluator then builds the checklist in two regimes:
 
-- **reference rubric** — up to `RUBRIC_MAX_QUESTIONS` (40) questions anchored on that reference, each
-  carrying a tag (`action` / `continuity` / `verification` / `explore` / `economy`) that maps to a
-  `requires` label; `RUBRIC_ECONOMY_CAP` (6) caps economy questions and `RUBRIC_LENGTH_BOUNDS` (5)
-  the length bounds.
-- **behaviour checks** — three calls of `BEHAVIOR_K` (6) questions each = 18, enabled whenever
-  `num_questions >= 3 * BEHAVIOR_K`; these probe per-trim behaviour rather than the reference.
+- **vector of change → question ladder** (`evaluator/reference/`) — ONE call reads all runs at once
+  and reduces them to an ordered list of task-level **milestones**, each of exactly one category
+  (`claims` / `explore` / `action` / `verification`), justified for necessity by counterfactual
+  (never by majority vote) and backed by a verbatim span per consenting run tagged with where that
+  span came from. `validate_vector` then enforces this in code: a milestone survives only if it is
+  necessary, not already given by the TASK block (`in_prefix` must be quoted, and the quote is
+  checked), and evidenced by a span that really occurs in the kind of block its `source` claims.
+  Outside `[MILESTONE_MIN, MILESTONE_MAX]` = 3..12 the extractor is asked again, up to
+  `MILESTONE_RETRIES` (2) more times, and the best attempt wins outright. A second call then turns
+  each surviving milestone into a SET of questions at a spread of depths — `RUNGS_MAX` (6) per
+  milestone, `QUESTIONS_MAX` (60) overall — with one retry for any milestone left under
+  `LADDER_MIN` (2). Where the runs reached a milestone through different code, or only one run
+  reached it, the question may name no file, function or expression at all.
+  trim phase, enabled whenever `num_questions >= 3 * BEHAVIOR_K`; these probe working habits rather
+  than the reference, and only `behavior:anchored_edit` carries weight today.
 
-The result is then filtered: reference leaks dropped, labels re-enforced (phase-aware read caps —
-`READ_CAPS_BY_PHASE` cold 10 / pre_edit 7 / at_edit 5), near-duplicates and template repeats
-collapsed, and finally **self-pruned against the reference** — the reference is scored on its own
-questions and the ones it fails are dropped (floor `PRUNE_MIN_SURVIVORS` 8). `ALBEDO_JUDGE_NUM_QUESTIONS`
-(50) no longer sets the checklist size directly; it only gates the behaviour regime. Every discard is
-recorded in the scoring artifact. Questions are generated once per task and reused for both models.
+The result is then filtered: reference leaks dropped (`filter_reference_leaks`), inaction-earning
+"avoids X" checks dropped (`enforce_question_labels`), the behaviour batch additionally put through
+`parse_questions` hygiene (near-duplicates, template stamping, generic-hygiene and negative-form
+caps), and finally **pruned against every reference run** — each run is judged on the finished
+checklist and a question not one of them earns is dropped. A sample is rejected outright if fewer than `QUESTION_FLOOR` (6) milestone questions
+survive. `ALBEDO_JUDGE_NUM_QUESTIONS` (50) does not set the checklist size; it only gates the
+behaviour regime. Every discard is recorded in
+the scoring artifact. Questions are generated once per task and reused for both models.
 
 **Judge** (`albedo-judge-api`, OpenRouter): a single judge model (`z-ai/glm-5.2`) answers every
 question **1/0** (forced `json_schema`, fp8), seeing only the questions + one side's trajectory —
@@ -515,7 +528,7 @@ short-circuited the same way.
 
 **Deterministic sampling:** `shared/sampling.py` (`multi_source_manifest_sample_ids`) draws `sample_count`
 (100) **unique `instance_id`s** pooled across all four sources, one **random rollout** per instance,
-stratified by `STEP_TRIM` phase (`pre_edit` 45 / `at_edit` 35 / `cold` 20, anchored on the
+stratified by `STEP_TRIM` phase (`cold` 65 / `pre_edit` 15 / `at_edit` 20, anchored on the
 instance's `first_edit`) x `FAMILY_MIX` bug family (`pr` 50 / `lm` 15 / `combine` 10 /
 `mechanical` 25), with `REPO_CAP` 2 per repo, 30% non-`python`, and prefixes over
 `MAX_PREFIX_CHARS` (54k) skipped — seeded by the commit `block_hash`, so the same block always
@@ -709,7 +722,7 @@ Full reference in [.env.example](../.env.example) (backend + GPU host) and [.env
 | `ALBEDO_REMOTE_GENERATION_BACKEND` | `vllm` |
 | `ALBEDO_REMOTE_SCORING_BACKEND` | `websocket` (score bridge) or `http` |
 | `ALBEDO_REMOTE_SCORING_BATCH_CONCURRENCY` | concurrent /score-batch requests per eval (default 128) |
-| `ALBEDO_REMOTE_TRAJECTORY_ASSISTANT_TURNS` | fallback turn count only — the live horizon is stratified per sample via HORIZON_STRATA (8, 12, 16) |
+| `ALBEDO_REMOTE_TRAJECTORY_ASSISTANT_TURNS` | fallback turn count only — the live horizon is stratified per sample via HORIZON_STRATA (12, 16) |
 | `ALBEDO_REMOTE_COMPILE_CACHE_DIR` | shared vLLM torch.compile cache dir (e.g. /root/vllm_shared_compile) — same-arch models reuse backbone graphs; unset → per-model dirs pile up in ~/.cache/vllm |
 | `ALBEDO_REMOTE_MOCK_AUTO_VERDICT` | smoke mode — verdict without GPUs |
 | `ALBEDO_REMOTE_REPO_CONTEXT_URL` | the GPU box's own route to the grounding service |
@@ -724,9 +737,11 @@ Full reference in [.env.example](../.env.example) (backend + GPU host) and [.env
 | `ALBEDO_JUDGE_EVALUATOR_MODEL` | evaluator + judge model (default `z-ai/glm-5.2`) |
 | `ALBEDO_JUDGE_SOTA_MODELS` | reference-trajectory model (prod `z-ai/glm-5.2`) |
 | `ALBEDO_JUDGE_SOTA_TRAJECTORY_TURNS` | reference-trajectory length (default 8) |
+| `ALBEDO_JUDGE_REFERENCE_RUNS` | reference trajectories generated per sample (default 3); below two usable runs the sample is dropped |
+| `ALBEDO_JUDGE_REFERENCE_PRUNE` | judge every reference run against the checklist and drop what none of them earns (default true); costs one judge call per run per sample at prep |
 | `ALBEDO_JUDGE_SIMULATION_MODEL` | observation-simulator model (default `deepseek/deepseek-v4-flash-0731`; empty → evaluator model) |
 | `ALBEDO_JUDGE_SIMULATION_PROVIDERS` | provider list for the simulator, tried as one rung each in rotation (default `deepseek,cloudflare`; empty → no pin) |
-| `ALBEDO_JUDGE_NUM_QUESTIONS` | gates the behaviour regime (`>= 3 * BEHAVIOR_K`); it is **not** the checklist size — that is `RUBRIC_MAX_QUESTIONS` (40) + 18 behaviour questions, minus filtering (default 50) |
+| `ALBEDO_JUDGE_NUM_QUESTIONS` | gates the behaviour regime (`>= 3 * BEHAVIOR_K`); it is **not** the checklist size — that is the surviving milestones x `RUNGS_MAX` (6), capped at `QUESTIONS_MAX` (60), plus the behaviour questions, minus filtering and the reference prune (default 50) |
 | `ALBEDO_JUDGE_ENGY_MODELS` | model pool for grounded/engy calls (default `z-ai/glm-5.2,deepseek/deepseek-v4-flash-0731`) |
 
 ### Repo-context grounding

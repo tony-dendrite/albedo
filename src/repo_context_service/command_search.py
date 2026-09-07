@@ -23,7 +23,8 @@ _GREP_BOOL_FLAGS = {
     "v": "invert",
 }
 _GREP_VALUE_FLAGS = {"A": "after", "B": "before", "C": "context", "m": "max_count", "e": "pattern"}
-_PIPE_STAGES = {"head", "tail", "sort", "uniq", "wc", "grep", "cat", "sed"}
+_PIPE_STAGES = {"head", "tail", "sort", "uniq", "wc", "grep", "rg", "cat", "sed"}
+_GREP_CONTEXT_FLAG = re.compile(r"^-([ABC])(\d*)$")
 _QUOTED_SPAN = re.compile(r"'[^']*'|\"[^\"]*\"")
 
 
@@ -81,6 +82,7 @@ class SearchPlan:
     pipeline: list[Stage] = field(default_factory=list)
     absolute: bool = False
     root_prefix: str = ""
+    print_cwd: bool = False
 
 
 @dataclass
@@ -90,6 +92,22 @@ class SearchResult:
     incomplete: list[str] = field(default_factory=list)
     missing: list[str] = field(default_factory=list)
     empty: bool = False
+    # None means "not derivable": callers must not claim an exit status this run cannot stand
+    # behind, because a wrong one tells the assistant its command failed when it did not.
+    returncode: int | None = None
+
+
+def _returncode(plan: SearchPlan, empty: bool, base: int | None = 0) -> int | None:
+    """The exit status a shell would report for this pipeline.
+
+    The last command in a pipeline owns the status, so a trailing `wc -l`, `head` or `sort`
+    succeeds whatever the search found, while a trailing `grep` fails when it filtered
+    everything away. With no pipeline the search command's own status stands.
+    """
+    stages = [stage for stage in plan.pipeline if stage.name != "passthrough"]
+    if not stages:
+        return base
+    return (1 if empty else 0) if stages[-1].name == "filter" else 0
 
 
 @dataclass
@@ -373,7 +391,7 @@ def _parse_ls(tokens: list[str], plan: SearchPlan) -> ParseFailure | None:
     return None
 
 
-_LS_DIR_MODE = "drwxr-xr-x"
+_LS_DIR_MODE = "drwxrwxrwx"
 _LS_FILE_MODE = "-rw-r--r--"
 _LS_OWNER = "root root"
 _LS_DATE = "Jan  3 20:00"
@@ -406,9 +424,10 @@ def _run_list_dir(
     if base and base in listing_set:
         if plan.long:
             return SearchResult(
-                output=_long_row(target, False, _entry_size(read_file, size_file, base))
+                output=_long_row(target, False, _entry_size(read_file, size_file, base)),
+                returncode=_returncode(plan, False),
             )
-        return SearchResult(output=target)
+        return SearchResult(output=target, returncode=_returncode(plan, False))
     prefix = f"{base}/" if base else ""
     names: dict[str, bool] = {}
     for path in listing:
@@ -423,6 +442,7 @@ def _run_list_dir(
         return SearchResult(
             output=f"ls: cannot access '{target}': No such file or directory",
             missing=[target],
+            returncode=_returncode(plan, True, 2),
         )
     shown = sorted(n for n in names if plan.show_hidden or not n.startswith("."))
     if plan.show_dots:
@@ -436,10 +456,14 @@ def _run_list_dir(
             rows.append(_long_row(name, is_dir, size))
         shown = [f"total {blocks}"] + rows
     shown = _apply_pipeline(shown, plan)
-    return SearchResult(output="\n".join(shown), empty=not shown)
+    return SearchResult(
+        output="\n".join(shown), empty=not shown, returncode=_returncode(plan, not shown)
+    )
 
 
-_READ_CMDS = ("cat", "nl", "head", "tail", "sed")
+_READ_CMDS = ("cat", "nl", "head", "tail", "sed", "awk", "wc")
+# `awk 'NR>=190 && NR<=200' f.py` is a line-range read spelled a different way
+_AWK_RANGE = re.compile(r"^'?NR\s*>=?\s*(\d+)\s*&&\s*NR\s*<=?\s*(\d+)'?$")
 
 
 def _number_lines(text: str, grep_style: bool) -> str:
@@ -473,11 +497,32 @@ _MISSING_READ = {
     "tail": "tail: cannot open '{target}' for reading: No such file or directory",
     "sed": "sed: can't read {target}: No such file or directory",
 }
+# verified against GNU coreutils: sed exits 2 when it cannot open its input, the rest exit 1
+_MISSING_READ_RC = {"sed": 2}
 
 
 def _parse_read(tokens: list[str], plan: SearchPlan) -> ParseFailure | None:
     name, args = tokens[0], tokens[1:]
     plan.read_tool = name
+    if name == "awk":
+        script = [a for a in args if not a.startswith("-")]
+        if not script:
+            return ParseFailure("unparsed", "awk without a program")
+        window = _AWK_RANGE.match(script[0].strip())
+        if window is None:
+            return ParseFailure("unsupported_form", f"awk program {script[0][:24]}")
+        plan.read_mode = "sed"
+        plan.read_range = (int(window.group(1)), int(window.group(2)))
+        plan.targets.extend(script[1:])
+        return None
+    if name == "wc":
+        if [a for a in args if a.startswith("-")] != ["-l"]:
+            return ParseFailure("unsupported_form", "wc without -l")
+        plan.read_mode = "count"
+        plan.targets.extend(a for a in args if not a.startswith("-"))
+        if len(plan.targets) != 1:
+            return ParseFailure("unsupported_form", "wc -l needs exactly one file")
+        return None
     if name == "sed":
         if [a for a in args if a.startswith("-")] != ["-n"]:
             return ParseFailure("unsupported_form", "sed without -n")
@@ -569,8 +614,21 @@ def _parse_pipe_stage(tokens: list[str]) -> Stage | ParseFailure:
         return Stage("slice", [str(parsed[0]), str(parsed[1])])
     flags = ""
     pattern = None
-    for token in tokens[1:]:
-        if token.startswith("-"):
+    after = before = 0
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if context := _GREP_CONTEXT_FLAG.match(token):
+            letter, glued = context.group(1), context.group(2)
+            if not glued:
+                index += 1
+                if index >= len(tokens) or not tokens[index].isdigit():
+                    return ParseFailure("unsupported_pipe", f"grep -{letter} without a count")
+                glued = tokens[index]
+            count = int(glued)
+            after = count if letter in "AC" else after
+            before = count if letter in "BC" else before
+        elif token.startswith("-") and len(token) > 1:
             if set(token[1:]) <= {"v", "i", "E", "F", "n"}:
                 flags += token[1:]
             else:
@@ -579,9 +637,12 @@ def _parse_pipe_stage(tokens: list[str]) -> Stage | ParseFailure:
             pattern = token
         else:
             return ParseFailure("unsupported_pipe", " ".join(tokens))
+        index += 1
     if pattern is None:
         return ParseFailure("unsupported_pipe", "grep without pattern")
-    return Stage("filter", [pattern, flags])
+    if (after or before) and "v" in flags:
+        return ParseFailure("unsupported_pipe", "grep -v with context")
+    return Stage("filter", [pattern, flags, str(before), str(after)])
 
 
 def _parse_echo(tokens: list[str], plan: SearchPlan) -> ParseFailure | None:
@@ -653,6 +714,17 @@ def parse_search(cmd: str) -> SearchPlan | ParseFailure:
         if failure:
             return failure
         return plan
+    elif head[0] == "pwd":
+        # only the bare form: -P and -L differ once a symlinked path is involved, and the answer
+        # comes from the directory the transcript reports rather than from the tree. A `cd` prefix
+        # was already stripped above, and the directory it moved to is exactly what pwd would
+        # print, so a chain that opens with one cannot be answered from the session root
+        if len(head) > 1:
+            return ParseFailure("unsupported_form", f"pwd {head[1]}")
+        if re.match(r"^\s*cd\s", cmd or ""):
+            return ParseFailure("unsupported_form", "pwd after a cd")
+        plan.print_cwd = True
+        return plan
     elif head[0] == "find":
         if "-exec" in head:
             cut = head.index("-exec")
@@ -706,7 +778,16 @@ def parse_search(cmd: str) -> SearchPlan | ParseFailure:
     else:
         return ParseFailure("not_a_search", head[0])
 
-    if plan.read_mode and (len(plan.targets) != 1 or any(ch in plan.targets[0] for ch in "*?[")):
+    # `cat`/`cat -n` concatenate their operands into one stream, so several files are as
+    # derivable as one. The other read tools change shape with a second operand - head and tail
+    # print `==> name <==` banners, wc -l adds a total line - so they keep the single-file rule
+    # rather than have this guess a layout.
+    multi_ok = plan.read_mode in ("cat", "number")
+    if plan.read_mode and (
+        not plan.targets
+        or (len(plan.targets) > 1 and not multi_ok)
+        or any(ch in target for ch in "*?[" for target in plan.targets)
+    ):
         return ParseFailure("unsupported_form", "read needs one named file")
     plan.dot_target = any(t in (".", "./") or t.startswith("./") for t in plan.targets)
     if not plan.targets:
@@ -999,9 +1080,38 @@ def _apply_pipeline(lines: list[str], plan: SearchPlan) -> list[str]:
                 rx = re.compile(source, re.IGNORECASE if "i" in flags else 0)
             except re.error:
                 rx = re.compile(re.escape(needle), re.IGNORECASE if "i" in flags else 0)
-            kept = [(i, ln) for i, ln in enumerate(lines, 1) if bool(rx.search(ln)) != invert]
-            lines = [f"{i}:{ln}" for i, ln in kept] if "n" in flags else [ln for _, ln in kept]
+            before = int(stage.args[2]) if len(stage.args) > 2 else 0
+            after = int(stage.args[3]) if len(stage.args) > 3 else 0
+            hits = [i for i, ln in enumerate(lines) if bool(rx.search(ln)) != invert]
+            lines = _filtered_lines(lines, hits, before, after, numbered="n" in flags)
     return lines
+
+
+def _filtered_lines(
+    lines: list[str], hits: list[int], before: int, after: int, *, numbered: bool
+) -> list[str]:
+    """The lines a piped `grep` keeps, with context and `grep -n` prefixes if asked.
+
+    grep separates non-adjacent context groups with a lone `--`, marks a matching line with
+    `N:` and a context line with `N-`.
+    """
+    hit_set = set(hits)
+    if before or after:
+        wanted: set[int] = set()
+        for index in hits:
+            wanted.update(range(max(0, index - before), min(len(lines) - 1, index + after) + 1))
+        shown = sorted(wanted)
+    else:
+        shown = list(hits)
+    out: list[str] = []
+    previous: int | None = None
+    for index in shown:
+        if previous is not None and index > previous + 1:
+            out.append("--")
+        separator = ":" if index in hit_set else "-"
+        out.append(f"{index + 1}{separator}{lines[index]}" if numbered else lines[index])
+        previous = index
+    return out
 
 
 def _run_read(plan: SearchPlan, read_file, listing: list[str]) -> SearchResult | ParseFailure:
@@ -1014,17 +1124,21 @@ def _run_read(plan: SearchPlan, read_file, listing: list[str]) -> SearchResult |
         return SearchResult(
             output=template.format(target=unmatched[0], tool=plan.read_tool),
             missing=list(unmatched),
+            returncode=_returncode(plan, True, _MISSING_READ_RC.get(plan.read_tool, 1)),
         )
     if unmatched or not files:
         return ParseFailure("unsupported_form", "read target not in snapshot")
     if searched_dir:
         return ParseFailure("unsupported_form", "read target is a directory")
-    text = read_file(files[0])
-    if text is None:
+    texts = [read_file(path) for path in files]
+    if any(text is None for text in texts):
         return ParseFailure("unsupported_form", "read target unreadable")
-    lines = text.split("\n")
-    if lines and lines[-1] == "":
-        lines.pop()
+    lines: list[str] = []
+    for text in texts:
+        part = str(text).split("\n")
+        if part and part[-1] == "":
+            part.pop()
+        lines += part
     if plan.read_mode == "sed":
         start, end = plan.read_range
         out = lines[start - 1 : end]
@@ -1034,10 +1148,13 @@ def _run_read(plan: SearchPlan, read_file, listing: list[str]) -> SearchResult |
         out = lines[-plan.read_range[0] :] if plan.read_range[0] else []
     elif plan.read_mode == "number":
         out = _number_lines("\n".join(lines), False).split("\n") if lines else []
+    elif plan.read_mode == "count":
+        # `wc -l f` counts newlines and prints the count beside the operand it was given
+        out = [f"{len(lines)} {plan.targets[0]}"]
     else:
         out = lines
     out = _apply_pipeline(out, plan)
-    return SearchResult(output="\n".join(out), empty=not out)
+    return SearchResult(output="\n".join(out), empty=not out, returncode=_returncode(plan, not out))
 
 
 def run_search(
@@ -1048,8 +1165,20 @@ def run_search(
     root: str = "",
 ) -> SearchResult | ParseFailure:
     limits = Limits()
+    if plan.print_cwd:
+        # the working directory is a fact about the session, not about the tree: with no root
+        # reported anywhere in the transcript there is nothing to print and the simulator answers
+        return (
+            SearchResult(output=root, empty=False, returncode=0)
+            if root
+            else ParseFailure("unsupported_form", "working directory is unknown")
+        )
     if plan.literal is not None:
-        return SearchResult(output=plan.literal, empty=not plan.literal)
+        return SearchResult(
+            output=plan.literal,
+            empty=not plan.literal,
+            returncode=_returncode(plan, not plan.literal),
+        )
     if plan.read_mode:
         return _run_read(plan, read_file, listing)
     if plan.list_dir:
@@ -1063,8 +1192,8 @@ def run_search(
             if message is None:
                 return regex
             if plan.stderr_quiet:
-                return SearchResult(output="", empty=True)
-            return SearchResult(output=message)
+                return SearchResult(output="", empty=True, returncode=2)
+            return SearchResult(output=message, returncode=2)
 
     candidates = _candidate_files(plan, listing)
     if isinstance(candidates, ParseFailure):
@@ -1095,6 +1224,8 @@ def run_search(
             truncated=truncated,
             missing=unmatched,
             empty=not listed and not errors,
+            # find reports success when nothing matched, and 1 only for an unreadable path
+            returncode=_returncode(plan, not listed and not errors, 1 if errors else 0),
         )
 
     show_name = plan.with_filename
@@ -1166,10 +1297,14 @@ def run_search(
     out = _apply_pipeline(out, plan)
     tool = "find" if plan.name_globs or plan.path_globs else "grep"
     errors = [f"{tool}: {target}: No such file or directory" for target in unmatched]
+    # grep fails with 1 when nothing matched. `-c` prints a "0" line while still failing, and a
+    # missing path mixes find's status with grep's, so neither states an exit code here.
+    base = None if (plan.count_only or errors) else (1 if not out else 0)
     return SearchResult(
         output="\n".join(errors + out),
         truncated=truncated,
         incomplete=incomplete,
         missing=unmatched,
         empty=not out and not errors,
+        returncode=_returncode(plan, not out and not errors, base),
     )
