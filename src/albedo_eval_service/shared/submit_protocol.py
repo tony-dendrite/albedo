@@ -129,10 +129,10 @@ def command_for(marker: str, tail_name: str) -> str:
     return f"echo {marker}{TAILS[tail_name]}"
 
 
-def assign_submit(sample_id: str, salt: str) -> tuple[str, str]:
+def assign_submit(sample_id: str, salt: str, tail_name: str | None = None) -> tuple[str, str]:
     rng = random.Random(f"{salt}:{sample_id}")
     name = rng.choice(sorted(MARKERS))
-    tail_name = rng.choice(sorted(TAILS))
+    tail_name = tail_name or rng.choice(sorted(TAILS))
     marker = marker_for(name, sample_id, salt)
     return marker, command_for(marker, tail_name)
 
