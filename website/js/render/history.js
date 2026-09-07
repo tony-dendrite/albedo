@@ -1,6 +1,6 @@
 import { el, mount, link } from "../dom.js";
 import { pct, fmtRelative, fmtDateTime } from "../format.js";
-import { hubRepoUrl, modelRepo, modelName, modelCellText, taoMinerUrl, kingTitleName } from "../model.js";
+import { hubRepoUrl, modelRepo, modelName, modelCellText, taoMinerUrl, kingTitleName, dendriteRepo, dendriteRepoUrl } from "../model.js";
 import { verdictInfo, faultCategory, faultCodeLabel } from "../data.js";
 
 const stop = e => e.stopPropagation();
@@ -78,13 +78,14 @@ export function renderHistory(container, rows, netuid, currentKingEvalRunId) {
   const body = rows.map(r => {
     const v = verdictInfo(r);
     const isCurrentKing = currentKingEvalRunId != null && r.eval_run_id === currentKingEvalRunId;
-    const repo = modelRepo(r.model_uri);
-    const repoUrl = hubRepoUrl(r.model_uri);
+    const crowned = r.coronated ? dendriteRepo(r.king_version) : null;
+    const repo = crowned || modelRepo(r.model_uri);
+    const repoUrl = crowned ? dendriteRepoUrl(r.king_version) : hubRepoUrl(r.model_uri);
     const tao = taoMinerUrl(netuid, r.hotkey);
     const king = r.king || {};
     const kingName = kingTitleName(king.king_version);
-    const kingUrl = hubRepoUrl(king.model_uri);
-    const kingTitle = modelRepo(king.model_uri);
+    const kingUrl = dendriteRepoUrl(king.king_version) || hubRepoUrl(king.model_uri);
+    const kingTitle = dendriteRepo(king.king_version) || modelRepo(king.model_uri);
     return el("tr", { class: isCurrentKing ? "clickable crowned-now" : "clickable", onClick: () => { location.href = evalHref(r); } },
       el("td", { class: "when", title: fmtDateTime(r.finished_at) }, fmtRelative(r.finished_at)),
       el("td", { class: "uid" }, tao ? link(tao, String(r.uid ?? "—"), { onClick: stop }) : String(r.uid ?? "—")),

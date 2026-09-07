@@ -113,6 +113,18 @@ export function hubRepoUrl(uri) {
   return `https://hub.hippius.com/models/${parts[0]}/${parts.slice(1).join("/")}`;
 }
 
+const DENDRITE_HF_ORG = "dendriteholdings";
+
+export function dendriteRepo(kingVersion) {
+  const name = kingTitleName(kingVersion);
+  return name.startsWith("ALBEDO-") ? `${DENDRITE_HF_ORG}/albedo-qwen3.6-35b-king-${name.slice(7)}` : null;
+}
+
+export function dendriteRepoUrl(kingVersion) {
+  const repo = dendriteRepo(kingVersion);
+  return repo ? `https://huggingface.co/${repo}` : null;
+}
+
 export function taoMinerUrl(netuid, hotkey) {
   if (netuid == null || !hotkey) return null;
   return `https://taomarketcap.com/subnets/${netuid}/miners?query=${encodeURIComponent(hotkey)}`;

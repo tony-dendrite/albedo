@@ -1,6 +1,6 @@
 import { el, mount, link } from "../dom.js";
 import { pct, shortHotkey } from "../format.js";
-import { kingTitleName, hubRepoUrl, modelRepo, taoMinerUrl } from "../model.js";
+import { kingTitleName, hubRepoUrl, modelRepo, taoMinerUrl, dendriteRepo, dendriteRepoUrl } from "../model.js";
 
 export function renderReign(container, reign, netuid) {
   const members = reign?.members || [];
@@ -22,8 +22,8 @@ export function renderReign(container, reign, netuid) {
   }
 
   const rows = orderedMembers.map((m, i) => {
-    const repo = modelRepo(m.model_uri);
-    const repoUrl = hubRepoUrl(m.model_uri);
+    const repo = dendriteRepo(m.king_version) || modelRepo(m.model_uri);
+    const repoUrl = dendriteRepoUrl(m.king_version) || hubRepoUrl(m.model_uri);
     const tao = taoMinerUrl(netuid, m.hotkey);
     const weightPct = m.weight_bps != null ? (m.weight_bps / 100).toFixed(0) + "%" : "—";
 
