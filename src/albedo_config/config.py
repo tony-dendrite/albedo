@@ -437,10 +437,10 @@ class ModelValidationSettings(BaseSettings):
     DB_URL: str = Field(default_factory=_control_db_url)
     NETUID: int = Field(97, validation_alias=AliasChoices("CHAIN_NETUID"))
     MODEL_CACHE_DIR: str = _MV_DEFAULT_CACHE_DIR
-    OPENSEARCH_URL: str = "http://127.0.0.1:9270"
+    OPENSEARCH_URL: str = "http://127.0.0.1:9200"
     OPENSEARCH_USER: str = ""
     OPENSEARCH_PASSWORD: str = ""
-    OPENSEARCH_INDEX: str = "albedo_dedup_ws_test"
+    OPENSEARCH_INDEX: str = "albedo_dedup_ws"
     S3_BUCKET: str = ""
     S3_ENDPOINT: str = "https://s3.hippius.com"
     S3_ACCESS_KEY: str = ""
@@ -449,7 +449,7 @@ class ModelValidationSettings(BaseSettings):
         _MV_ARCH_SPEC_PATH, validation_alias=AliasChoices("ALBEDO_ARCH_SPEC")
     )
     DEDUP_SECRET: str = ""
-    DEDUP_SECRET_FILE: str = "/root/albedo-dedup-test/.albedo_dedup_secret"
+    DEDUP_SECRET_FILE: str = ""
     DEDUP_REF_DIR: str = ""
     DEDUP_GPU: int = 6
     DEDUP_ENFORCE: bool = False
