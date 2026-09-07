@@ -1,4 +1,5 @@
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 
 function loadEnv() {
@@ -20,7 +21,7 @@ module.exports = {
     {
       name: "albedo-set-reign-worker",
       cwd: path.resolve(__dirname, ".."),
-      script: "uv",
+      script: path.join(os.homedir(), ".local/bin/uv"),
       args: "run --no-sync python -m set_reign_worker",
       env: {
         ...loadEnv(),

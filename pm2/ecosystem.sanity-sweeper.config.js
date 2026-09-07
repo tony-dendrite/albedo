@@ -1,4 +1,5 @@
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 
 function loadEnv() {
@@ -21,7 +22,7 @@ module.exports = {
     {
       name: "albedo-sanity-sweeper",
       cwd: path.resolve(__dirname, ".."),
-      script: "/home/const/.local/bin/uv",
+      script: path.join(os.homedir(), ".local/bin/uv"),
       args: "run sanity-dispatcher --sweep-abandoned",
       cron_restart: "*/1 * * * *",
       autorestart: false,

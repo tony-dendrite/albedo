@@ -1,4 +1,5 @@
-import { fetchBenchmarkRun, fetchBenchmarks, fetchJson } from "../fetch.js";
+import { fetchBenchmarkRun, fetchBenchmarks, fetchPulledScores, fetchJson } from "../fetch.js";
+import { mergePulledScores, pulledRunFor } from "../render/benchmarks.js";
 import { el, mount } from "../dom.js";
 import { fmt, fmtDateTime, shortDigest } from "../format.js";
 import { modelRepo, kingTitleName } from "../model.js";
@@ -9,9 +10,11 @@ const BENCHMARK_LABELS = {
   tau2_telecom: "Tau2 Telecom",
   tau2_banking_knowledge: "Tau2 Banking",
   swe_rebench_2026_03: "SWE-rebench",
+  model_score: "SWE-bench Verified",
 };
 const TAU2_BENCH_VERSION = "τ²-bench 1.0.0";
 const SWE_REBENCH_VERSION = "SWE-rebench 2026-03";
+const SWE_VERIFIED_VERSION = "SWE-bench Verified";
 
 const $ = id => document.getElementById(id);
 const params = new URLSearchParams(location.search);
@@ -137,10 +140,20 @@ function benchVersion(run) {
   const ref = run?.environment?.benchmark_repo_ref || run?.harness_config?.repo_ref;
   if (ref) return `${TAU2_BENCH_VERSION} @ ${shortDigest(ref)}`;
   if (run?.suite === "swe_rebench_2026_03") return SWE_REBENCH_VERSION;
+  if (run?.suite === "model_score") return SWE_VERIFIED_VERSION;
   return String(run?.suite || "").startsWith("tau2_") ? TAU2_BENCH_VERSION : "—";
 }
 
 function methodologyNotes(model, run) {
+  const pulled = pulledRunFor(run);
+  if (pulled) {
+    return [
+      `Evaluated using ${modelName(model)} as ${run.pulled_run_id}.`,
+      `Agent harness: mini-swe-agent. Metric: Pass@1.`,
+      `Scores, predictions and trajectories are published by the benchmarking service;`,
+      `per-instance outcomes come from its ${pulled.key} grading report.`,
+    ].join(" ");
+  }
   if (run?.suite === "swe_rebench_2026_03") {
     const env = run?.environment || {};
     const metrics = run?.metrics || {};
@@ -172,8 +185,9 @@ function suiteDomain(suite) {
 }
 
 function renderMethodology(model, run) {
-  const actorKey = run?.suite === "swe_rebench_2026_03" ? "Agent Harness" : "User Simulator";
-  const actorValue = run?.suite === "swe_rebench_2026_03" ? (run?.metrics?.agent_harness || "mini-swe-agent") : cleanUserSimulator(run);
+  const agentHarness = pulledRunFor(run) || run?.suite === "swe_rebench_2026_03";
+  const actorKey = agentHarness ? "Agent Harness" : "User Simulator";
+  const actorValue = agentHarness ? (run?.metrics?.agent_harness || "mini-swe-agent") : cleanUserSimulator(run);
   return el("div", { class: "detail-section" },
     el("h2", {}, "methodology"),
     el("div", { class: "kv-grid" },
@@ -185,6 +199,71 @@ function renderMethodology(model, run) {
 
 function taskArtifactTasks(run) {
   return (run?.task_results || []).filter(task => /^https?:\/\//.test(String(task.artifact_uri || "")));
+}
+
+// The pulled suites publish no task rows: their per-instance outcome lives in the
+// SWE-bench grading report, and each trajectory sits beside the run's preds file.
+// Both are addressed relative to this page, so resolve them before the viewer's
+// http-only artifact filter sees them.
+function absolute(path) {
+  try {
+    return new URL(path, location.href).href;
+  } catch {
+    return path;
+  }
+}
+
+function reportUrl(pulled, run) {
+  const base = pulled.reportEndpoints?.[0];
+  const model = String(run?.pulled_model || "").replaceAll("/", "__");
+  if (!base || !model || !run?.pulled_run_id) return null;
+  return absolute(`${base}/${run.pulled_run_id}/${model}.${pulled.key}_${run.pulled_run_id}.json`);
+}
+
+function trajectoryUrl(pulled, run, instanceId) {
+  const base = pulled.predsEndpoints?.[0];
+  if (!base || !run?.pulled_run_id) return null;
+  return absolute(`${base}/${run.pulled_run_id}/${instanceId}/${instanceId}.traj.json`);
+}
+
+const REPORT_STATES = [
+  ["resolved_ids", "RESOLVED", 1],
+  ["unresolved_ids", "UNRESOLVED", 0],
+  ["empty_patch_ids", "EMPTY_PATCH", 0],
+  ["error_ids", "ERROR", null],   // graded, but the harness reached no verdict
+];
+
+function reportTaskResults(pulled, run, report) {
+  const states = new Map();
+  for (const [key, state, score] of REPORT_STATES) {
+    for (const id of report?.[key] || []) {
+      if (!states.has(id)) states.set(id, { state, score });
+    }
+  }
+  return [...states.keys()].sort().map(id => ({
+    task_name: id,
+    state: states.get(id).state,
+    score: states.get(id).score,
+    artifact_uri: trajectoryUrl(pulled, run, id),
+  }));
+}
+
+// A score row only exists once the service has graded the run, so the report is the
+// source for both the task rows and their outcome. Runs published before the service
+// started uploading reports simply show no task rows, as they did before.
+async function loadPulledRun(run) {
+  const pulled = pulledRunFor(run);
+  if (!pulled) return run;
+  const url = reportUrl(pulled, run);
+  const report = url ? await fetchJson(url) : null;
+  if (!report) return run;
+  return {
+    ...run,
+    report_uri: url,
+    task_results: reportTaskResults(pulled, run, report),
+    task_count: report.total_instances ?? run.task_count,
+    passed_count: report.resolved_instances ?? run.passed_count,
+  };
 }
 
 function renderTrajectoryViewer(run) {
@@ -229,7 +308,7 @@ function renderTrajectoryMeta(payload, task) {
     kv("task", payload?.task_id || task?.task_name || "—"),
     kv("score", payload?.score == null ? "—" : fmt(payload.score, 3)),
     kv("state", payload?.state || task?.state || "—"),
-    kv("termination", payload?.termination_reason || task?.metrics?.termination_reason || "—"),
+    kv("termination", payload?.termination_reason || payload?.info?.exit_status || task?.metrics?.termination_reason || "—"),
     kv("duration", payload?.duration == null ? "—" : `${fmt(payload.duration, 2)}s`),
     kv("agent cost", agentCost == null ? "—" : fmt(agentCost, 4)),
     kv("user cost", userCost == null ? "—" : fmt(userCost, 4)),
@@ -320,11 +399,12 @@ function render(model, selected, baseline) {
 }
 
 async function load() {
-  const data = await fetchBenchmarks();
-  if (!data) {
+  const [raw, scores] = await Promise.all([fetchBenchmarks(), fetchPulledScores()]);
+  if (!raw) {
     mount($("b-body"), el("div", { class: "empty" }, "could not load benchmark data."));
     return;
   }
+  const data = mergePulledScores(raw, scores);
   const models = data.models || [];
   const model = models.find(m => m.id === modelId)
     || models.find(m => completedRuns(m).some(r => r.id === runId));
@@ -336,6 +416,8 @@ async function load() {
   if (selected?.detail_path) {
     const detail = await fetchBenchmarkRun(selected);
     if (detail) selected = { ...selected, ...detail };
+  } else if (pulledRunFor(selected)) {
+    selected = await loadPulledRun(selected);
   }
   render(model, selected, genesisScores(models));
 }

@@ -1,8 +1,8 @@
-import { POLL_MS, PREDS_POLL_MS } from "../config.js";
-import { fetchDashboard, fetchState, fetchBenchmarks, fetchModelScores, fetchManifest, fetchLlmsText, fetchRegistrationHistory, fetchPredsProgress } from "../fetch.js";
+import { POLL_MS, PREDS_POLL_MS, PULLED_SUITES } from "../config.js";
+import { fetchDashboard, fetchState, fetchBenchmarks, fetchPulledScores, fetchManifest, fetchLlmsText, fetchRegistrationHistory, fetchPredsProgress } from "../fetch.js";
 import { normalize } from "../data.js";
 import { el, mount } from "../dom.js";
-import { fmtRelative } from "../format.js";
+import { fmtRelative, toRoman } from "../format.js";
 import { kingTitleName, hubRepoUrl, modelRepo } from "../model.js";
 import { renderReign } from "../render/reign.js";
 import { renderBenchmarks, liveScoreCandidates } from "../render/benchmarks.js";
@@ -77,7 +77,7 @@ async function tick() {
 
 let benchmarkData = null;
 let benchmarkScores = null;
-let predsProgress = null;
+let predsProgress = new Map();
 
 function paintBenchmarks() {
   if (!benchmarkData) return;
@@ -85,30 +85,39 @@ function paintBenchmarks() {
 }
 
 async function tickBenchmarks() {
-  const [data, modelScores] = await Promise.all([fetchBenchmarks(), fetchModelScores()]);
+  const [data, scores] = await Promise.all([fetchBenchmarks(), fetchPulledScores()]);
   if (!data) return;
-  const sig = JSON.stringify([data, modelScores]);
+  const sig = JSON.stringify([data, [...scores]]);
   if (sig === benchmarkSig) return;
   benchmarkSig = sig;
   benchmarkData = data;
-  benchmarkScores = modelScores;
+  benchmarkScores = scores;
   paintBenchmarks();
 }
 
+// The benchmarking service can be running a reign that benchmarks.json does not list
+// yet, so the reign on the throne is a progress candidate until its score lands.
+function reigningCandidate(pulled) {
+  const reign = state?.reign?.members?.[0]?.king_version;
+  if (!Number.isFinite(reign) || reign < pulled.fromKing) return [];
+  const runId = `king-${toRoman(reign)}`;
+  const scored = (benchmarkScores?.get(pulled.suite) || [])
+    .some(row => String(row?.run_id).toLowerCase() === runId.toLowerCase());
+  return scored ? [] : [runId];
+}
+
 async function tickPreds() {
-  const runIds = benchmarkData ? liveScoreCandidates(benchmarkData, benchmarkScores) : [];
-  if (!runIds.length) {
-    if (!predsProgress) return;
-    predsProgress = null;
-    paintBenchmarks();
-    return;
+  const candidates = benchmarkData ? liveScoreCandidates(benchmarkData, benchmarkScores) : new Map();
+  const next = new Map();
+  for (const pulled of PULLED_SUITES) {
+    const runIds = [...new Set([...(candidates.get(pulled.suite) || []), ...reigningCandidate(pulled)])];
+    const progress = runIds.length ? await fetchPredsProgress(pulled.predsEndpoints, runIds) : null;
+    if (progress) next.set(pulled.suite, progress);
   }
-  const next = await fetchPredsProgress(runIds);
-  const changed = next?.runId !== predsProgress?.runId
-    || next?.count !== predsProgress?.count
-    || next?.updatedAt !== predsProgress?.updatedAt;
+  const signature = map => [...map].map(([suite, p]) => `${suite}:${p.runId}:${p.count}:${p.updatedAt}`).sort().join("|");
+  if (signature(next) === signature(predsProgress)) return;
   predsProgress = next;
-  if (changed) paintBenchmarks();
+  paintBenchmarks();
 }
 
 async function loadDatasets() {

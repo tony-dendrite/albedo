@@ -1,7 +1,7 @@
 import { el, mount } from "../dom.js";
 import { pct, fmtRelative, fmtDuration } from "../format.js";
 import { modelRepo, kingTitleName } from "../model.js";
-import { PREDS_TOTAL_FALLBACK, PREDS_STALE_MS } from "../config.js";
+import { PULLED_SUITES, PREDS_STALE_MS } from "../config.js";
 
 const MODEL_SCORE_SUITE = "model_score";
 
@@ -142,68 +142,131 @@ function isGenesis(model) {
   return identity.includes("genesis") || identity.includes("qwen/qwen3.6-35b-a3b");
 }
 
-export function mergeModelScores(data, rows) {
-  if (!Array.isArray(rows)) return data;
-  const scores = new Map(rows.filter(row => row?.run_id).map(row => [String(row.run_id).toLowerCase(), row]));
-  return {
-    ...data,
-    models: (data?.models || []).map(model => {
-      const number = modelKingNumber(model);
-      const key = isGenesis(model) ? "king-genesis" : number == null ? null : `king-${modelLabel(model).split("-").pop()}`.toLowerCase();
-      const row = scores.get(key);
-      const score = Number(row?.score);
-      if (!Number.isFinite(score)) return model;
-      return {
-        ...model,
-        runs: [
-          ...(model.runs || []).filter(run => run.suite !== MODEL_SCORE_SUITE),
-          {
-            id: `model-score:${row.run_id}`,
-            suite: MODEL_SCORE_SUITE,
-            score: score / 100,
-            state: "SUCCEEDED",
-            task_count: row.total,
-            passed_count: row.resolved,
-            score_meta: `${row.resolved ?? "—"}/${row.total ?? "—"} resolved`,
-            no_detail: true,
-          },
-        ],
-      };
-    }),
-  };
+// Reign a model stands for, on the scale the pulled score files use: genesis is 0.
+function reignNumber(model) {
+  return isGenesis(model) ? 0 : modelKingNumber(model);
 }
 
-export function modelScoreRunId(model) {
+// A pulled run_id is the reign name: "king-genesis" or "king-<roman>".
+export function pulledRunId(model) {
   if (!model) return null;
   if (isGenesis(model)) return "king-genesis";
   const numeral = modelLabel(model).split("-").pop();
   return /^[IVXLCDM]+$/.test(numeral) ? `king-${numeral}` : null;
 }
 
-function panelModels(data) {
+function runIdReign(runId) {
+  if (/^king-genesis$/i.test(runId)) return 0;
+  const numeral = /^king-([IVXLCDM]+)$/i.exec(runId)?.[1];
+  return numeral ? romanToInt(numeral) : null;   // ignores rows for non-king models
+}
+
+// The research bucket also holds shadow runs from before the service took a suite
+// over, so a score row only counts from that suite's first published reign.
+function pulledApplies(pulled, number) {
+  return number != null && number >= pulled.fromKing;
+}
+
+export function pulledRunFor(run) {
+  return run?.pulled_key ? PULLED_SUITES.find(pulled => pulled.key === run.pulled_key) || null : null;
+}
+
+function pulledRun(pulled, row) {
+  const score = Number(row?.score);
+  if (!Number.isFinite(score)) return null;
+  const id = `pulled:${pulled.key}:${row.run_id}`;
+  return {
+    id,
+    run_id: id,
+    suite: pulled.suite,
+    score: score / 100,          // score files carry percent, runs carry a fraction
+    state: "SUCCEEDED",
+    task_count: row.total,
+    passed_count: row.resolved,
+    score_meta: `${row.resolved ?? "—"}/${row.total ?? "—"} resolved`,
+    pulled_key: pulled.key,
+    pulled_run_id: row.run_id,
+    pulled_model: row.model,
+  };
+}
+
+// Fold the pulled score files into the benchmarks.json runs, per suite, so the rest of
+// the panel never has to care which source a score came from.
+export function mergePulledScores(data, scoresBySuite) {
+  if (!scoresBySuite?.size) return data;
+  const byReign = new Map();
+  for (const pulled of PULLED_SUITES) {
+    for (const row of scoresBySuite.get(pulled.suite) || []) {
+      if (!row?.run_id) continue;
+      const number = runIdReign(String(row.run_id));
+      if (!pulledApplies(pulled, number)) continue;
+      const run = pulledRun(pulled, row);
+      if (!run) continue;
+      const bucket = byReign.get(number) || { runId: String(row.run_id), row, runs: [] };
+      bucket.runs.push(run);
+      byReign.set(number, bucket);
+    }
+  }
+  if (!byReign.size) return data;
+
+  const merged = new Set();
+  const models = (data?.models || []).map(model => {
+    const number = reignNumber(model);
+    const bucket = number == null ? null : byReign.get(number);
+    if (!bucket) return model;
+    merged.add(number);
+    const replaced = new Set(bucket.runs.map(run => run.suite));
+    return { ...model, runs: [...(model.runs || []).filter(run => !replaced.has(run.suite)), ...bucket.runs] };
+  });
+
+  // A reign the benchmarking service scored but never registered as a model would
+  // otherwise be missing from the site entirely, so stand one up from the score row.
+  for (const [number, bucket] of byReign) {
+    if (number === 0 || merged.has(number)) continue;
+    models.push({
+      id: `pulled:${bucket.runId}`,
+      label: `King ${bucket.runId.replace(/^king-/i, "").toUpperCase()}`,
+      model_repo: String(bucket.row.model || "").replace(/^hosted_vllm\//, ""),
+      runs: bucket.runs,
+    });
+  }
+  return { ...data, models };
+}
+
+function panelModels(data, liveRunIds = new Set()) {
   const activeProgress = activeProgressByModelSuite(data);
-  const models = (data?.models || []).filter(model => completedRuns(model).length || hasActiveProgress(model, activeProgress));
-  const sorted = sortModels(models).filter(model => hasPanelScores(model) || hasActiveProgress(model, activeProgress));
+  // A pulled suite queues no job here, so a reign whose only sign of life is its
+  // predictions file still has to reach the panel, or its progress never shows.
+  const active = model => hasActiveProgress(model, activeProgress) || liveRunIds.has(pulledRunId(model));
+  const models = (data?.models || []).filter(model => completedRuns(model).length || active(model));
+  const sorted = sortModels(models).filter(model => hasPanelScores(model) || active(model));
   return { models, sorted, selected: sorted.find(model => !isGenesis(model)) || sorted[0] || null };
 }
 
-export function liveScoreCandidates(data, modelScores) {
-  const merged = mergeModelScores(data, modelScores);
-  return sortModels(merged?.models || [])
-    .filter(model => !isGenesis(model) && suiteScores(model)[MODEL_SCORE_SUITE]?.score == null)
-    .map(modelScoreRunId)
-    .filter(Boolean)
-    .slice(0, 6);
+// Reigns whose pulled score has not landed yet: their preds file is what the tile
+// shows progress from, one candidate list per suite.
+export function liveScoreCandidates(data, scoresBySuite) {
+  const sorted = sortModels(mergePulledScores(data, scoresBySuite)?.models || []);
+  return new Map(PULLED_SUITES.map(pulled => [
+    pulled.suite,
+    sorted
+      .filter(model => !isGenesis(model)
+        && pulledApplies(pulled, reignNumber(model))
+        && suiteScores(model)[pulled.suite]?.score == null)
+      .map(pulledRunId)
+      .filter(Boolean)
+      .slice(0, 6),
+  ]));
 }
 
-function scoreTotal(modelScores) {
-  const totals = (modelScores || []).map(row => Number(row?.total)).filter(n => Number.isFinite(n) && n > 0);
-  return totals.length ? Math.max(...totals) : PREDS_TOTAL_FALLBACK;
+function scoreTotal(rows, fallback) {
+  const totals = (rows || []).map(row => Number(row?.total)).filter(n => Number.isFinite(n) && n > 0);
+  return totals.length ? Math.max(...totals) : fallback;
 }
 
-function livePreds(live, modelScores) {
+function livePreds(live, rows, pulled) {
   if (!live?.count) return null;
-  const total = scoreTotal(modelScores);
+  const total = scoreTotal(rows, pulled.totalFallback);
   const left = Math.max(0, total - live.count);
   const updated = live.updatedAt ? new Date(live.updatedAt).getTime() : NaN;
   const ratio = Math.min(1, live.count / total);
@@ -576,9 +639,10 @@ function renderKingHistory(sorted, selectedModel, rerender) {
       : el("div", { class: "bench-history-empty" }, "no benchmark history yet"));
 }
 
-export function renderBenchmarks(container, metaNode, data, modelScores = null, live = null) {
-  data = mergeModelScores(data, modelScores);
-  const { models, sorted, selected } = panelModels(data);
+export function renderBenchmarks(container, metaNode, data, scoresBySuite = null, liveBySuite = null) {
+  data = mergePulledScores(data, scoresBySuite);
+  const liveRunIds = new Set([...(liveBySuite?.values() || [])].map(live => live?.runId).filter(Boolean));
+  const { models, sorted, selected } = panelModels(data, liveRunIds);
   if (!models.length) {
     mount(container, el("div", { class: "empty" }, "no benchmark data yet."));
     if (metaNode) metaNode.textContent = "no data";
@@ -591,13 +655,17 @@ export function renderBenchmarks(container, metaNode, data, modelScores = null, 
   }
   const baselineScores = suiteScores((data?.models || []).find(isGenesis));
   const activity = suiteActivity(data);
-  const preds = livePreds(live, modelScores);
-  if (preds && live?.runId !== modelScoreRunId(selected)) {
-    const runningModel = models.find(model => modelScoreRunId(model) === live.runId)
-      || (data?.models || []).find(model => modelScoreRunId(model) === live.runId);
-    preds.kingLabel = runningModel ? modelLabel(runningModel) : String(live.runId || "").replace(/^king-/i, "King ");
-  }
-  const rerender = () => renderBenchmarks(container, metaNode, data, modelScores, live);
+  const predsBySuite = new Map(PULLED_SUITES.map(pulled => {
+    const live = liveBySuite?.get(pulled.suite) || null;
+    const preds = livePreds(live, scoresBySuite?.get(pulled.suite), pulled);
+    // A tile can be showing progress for a reign other than the one on screen.
+    if (preds && live?.runId !== pulledRunId(selected)) {
+      const runningModel = (data?.models || []).find(model => pulledRunId(model) === live.runId);
+      preds.kingLabel = runningModel ? modelLabel(runningModel) : String(live.runId || "").replace(/^king-/i, "King ");
+    }
+    return [pulled.suite, preds];
+  }));
+  const rerender = () => renderBenchmarks(container, metaNode, data, scoresBySuite, liveBySuite);
   const scores = suiteScores(selected);
   const done = BENCHMARK_ORDER.filter(suite => scores[suite]?.score != null).length;
 
@@ -615,7 +683,7 @@ export function renderBenchmarks(container, metaNode, data, modelScores = null, 
             `${done}/${BENCHMARK_ORDER.length} scores · ${modelLabel(selected)}`))),
       el("div", { class: "bench-tile-grid" }, BENCHMARK_ORDER.map(suite =>
         renderTile(selected, suite, sorted, baselineScores[suite], activity.get(suite),
-          suite === MODEL_SCORE_SUITE ? preds : null))),
+          predsBySuite.get(suite) || null))),
       benchMode === "all"
         ? renderKingHistory(sorted, selected, rerender)
         : renderLeaderboard(sorted, selected, baselineScores, rerender)));

@@ -1,4 +1,4 @@
-import { DATA_ENDPOINTS, STATE_ENDPOINTS, BENCHMARK_ENDPOINTS, MODEL_SCORE_ENDPOINTS, MANIFEST_ENDPOINTS, LLMS_URLS, REGISTRATION_ENDPOINTS, PREDS_ENDPOINTS } from "./config.js";
+import { DATA_ENDPOINTS, STATE_ENDPOINTS, BENCHMARK_ENDPOINTS, PULLED_SUITES, MANIFEST_ENDPOINTS, LLMS_URLS, REGISTRATION_ENDPOINTS } from "./config.js";
 
 let llmsTextCache = null;
 const registrationCacheKey = "albedo.registrationHistory.v2";
@@ -27,8 +27,14 @@ export async function fetchBenchmarks() {
   return fetchFirstJson(BENCHMARK_ENDPOINTS, { revalidate: true });
 }
 
-export async function fetchModelScores() {
-  return fetchFirstJson(MODEL_SCORE_ENDPOINTS, { revalidate: true });
+// One score file per pulled suite, keyed by suite so callers never have to know
+// which file a suite came from.
+export async function fetchPulledScores() {
+  const entries = await Promise.all(PULLED_SUITES.map(async pulled => {
+    const rows = await fetchFirstJson(pulled.scoreEndpoints, { revalidate: true });
+    return [pulled.suite, Array.isArray(rows) ? rows : []];
+  }));
+  return new Map(entries);
 }
 
 export async function fetchBenchmarkRun(run) {
@@ -97,11 +103,11 @@ async function readPredsTail(url, offset) {
   };
 }
 
-export async function fetchPredsProgress(runIds) {
+export async function fetchPredsProgress(bases, runIds) {
   const ids = (Array.isArray(runIds) ? runIds : [runIds]).filter(Boolean);
   const heads = [];
   for (const runId of ids) {
-    for (const base of PREDS_ENDPOINTS) {
+    for (const base of bases) {
       const url = `${base}/${runId}/preds.json`;
       try {
         const head = await fetch(url, { method: "HEAD", cache: "no-store" });

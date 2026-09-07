@@ -1,4 +1,5 @@
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 
 function loadEnv() {
@@ -20,7 +21,7 @@ module.exports = {
     {
       name: "albedo-weight-setter",
       cwd: path.resolve(__dirname, ".."),
-      script: "uv",
+      script: path.join(os.homedir(), ".local/bin/uv"),
       args: "run --no-sync python -m weight_setter",
       env: {
         ...loadEnv(),
