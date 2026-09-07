@@ -5,17 +5,18 @@
 > multimodal Qwen3VL architecture) and commit them on-chain; a backend pipeline ingests
 > commits, validates artifacts, runs a stability pre-eval, then duels each challenger
 > against the reigning king on coding trajectories from four datasets — mini-coder (400k),
-> mini-coder-rs, open-swe-traces and swe-hero — pooled one rollout per instance and stratified by
+> mini-coder-rs, open-swe-traces and swe-hero — pooled one source trajectory per instance and stratified by
 > phase x bug family. Between turns, each model's shell command is answered by the
 > **repo-context service**, which checks out the real repository at the sampled commit and *executes*
 > the command against it — so `git`, `grep`, `find`, `sed` and friends return real output, and the
 > model's own edits persist through a write overlay. Only what cannot be executed is simulated by an
 > LLM (`deepseek/deepseek-v4-flash-0731`, provider-rotating ladder with the evaluator model as the last
-> rung), always in whatever observation format that trajectory natively uses. An evaluator
-> (GLM 5.2) writes yes/no checklist questions
-> about a good next step for each task, anchored on a GLM 5.2 reference trajectory; a single LLM
-> judge (GLM 5.2) answers them 1/0 for the king and challenger responses independently, and the
-> mean yes-rate is each side's score. A trajectory that has collapsed into a command loop is scored
+> rung), always in whatever observation format that trajectory natively uses. For each task an
+> evaluator (GLM 5.2) rolls **three** GLM 5.2 reference trajectories, reduces them to the task's
+> **milestones** and writes a ladder of yes/no questions per milestone — generalized to the task, not
+> to one run's route. King and challenger each roll every task out **twice**; a judge (GLM 5.2) answers
+> every question 1/0 three times per trajectory (majority wins), and each side's score is its mean
+> yes-rate over all its trajectories. A trajectory that has collapsed into a command loop is scored
 > **0 outright, without being judged**.
 > A challenger must beat the king by a **2.5% margin** to win, and must win **two independent
 > evals** before it is crowned. Winners are crowned into a
@@ -37,7 +38,7 @@
 albedo/
 │
 ├── pyproject.toml              All console entrypoints (see "Services" below) + deps (bittensor, fastapi, asyncpg, opensearch, vllm-via-remote)
-├── chain.toml                  Subnet constants for the config_validation commit-validator (seed digest, arch-lock keys, file allowlist, dedup threshold). The `[files]` allowlist now matches the live one; the LIVE authority is albedo_config ModelValidationSettings + architecture_spec.json — see below.
+├── chain.toml                  Subnet constants for the config_validation commit-validator (seed digest, arch-lock keys, file allowlist). The `[files]` allowlist now matches the live one; the LIVE authority is albedo_config ModelValidationSettings + architecture_spec.json — see below.
 ├── schema.sql                  Canonical Postgres schema — the single source of truth for pipeline state
 ├── docker-compose.yml          Local Postgres (albedo-postgres) on a localhost-only port
 ├── .env.example                Full backend/GPU-host env reference
@@ -71,18 +72,15 @@ albedo/
 │   │   └── db.py                       upsert chain_commits / miners / model_submissions / events
 │   │
 │   ├── config_validation/          VALIDATION LIBRARY for the standalone commit-validator; also gives the miner CLI its Hippius download/list utils + ModelRef (the miner's actual checks come from model_validation, below)
-│   │   ├── pipeline.py                 ordered checks: revision → files → architecture → duplicate
+│   │   ├── pipeline.py                 ordered checks: revision → files → architecture
 │   │   ├── checks/revision.py          repo@digest resolves on Hippius (fast fail)
 │   │   ├── checks/files.py             strict allowlist from chain.toml [files]
 │   │   ├── checks/architecture.py      config.json matches seed on lock keys; no auto_map/quantization_config
-│   │   ├── checks/duplicate.py         fingerprint cosine ≥ similarity_threshold → reject
 │   │   ├── checks/genesis_metadata.py  the metadata-hash pin against the genesis repo
 │   │   ├── repo_pattern.py             challenger repo-name rule from chain.toml
 │   │   ├── storage/                    the download layer shared with the miner CLI: dispatch.py picks the backend from the
 │   │   │                               pin (_hf.py / _hippius.py), _fastdl.py is the parallel fetcher, _supervise.py the
 │   │   │                               killable-subprocess + stall watchdog, s3.py the artifact store
-│   │   ├── fingerprint/compute.py      per-tensor L2 norms + deterministic value samples (layer_norms_v2)
-│   │   ├── fingerprint/store.py        pluggable corpus: Null / Jsonl (CLI) — OpenSearch lives in model_validation
 │   │   └── models/reveal.py            parse/build v7 reveal
 │   │
 │   ├── chain_guard/                HOTKEY-REUSE GUARD (imported by chain_reader): a `used_hotkeys` ledger seeded from every hotkey committed before CHAIN_START_BLOCK (all reveal versions); a hotkey is burned into the ledger after its submission finishes eval, so a hotkey can't re-submit to game the duel
@@ -92,7 +90,7 @@ albedo/
 │   │   └── uploads.py                  publish the guard ledger for the dashboard
 │   │
 │   ├── model_validation/         VALIDATE WORKER: claim submissions → download → validate → dedup → persist (the live file/arch/index/dtype authority for miners + validators)
-│   │   ├── validate_worker.py          end-to-end per-model: files→hashes→dtype-preflight→download→index→arch→fingerprint→OpenSearch dedup
+│   │   ├── validate_worker.py          end-to-end per-model: files→hashes→dtype-preflight→download→index→arch→sketch fingerprint→dedup gate
 │   │   ├── validate/repo.py            the LIVE strict file allowlist — REQUIRED_FILES / ALLOWED_FILES / globs on
 │   │   │                               `albedo_config` ModelValidationSettings (there is no model_validation/config.py any more)
 │   │   ├── validate/genesis_files.py   sha256 of every metadata file pinned to the genesis repo revision (metadata_hash)
@@ -102,8 +100,11 @@ albedo/
 │   │   ├── validate/safetensors_index.py  shard/index consistency: model.safetensors.index.json weight_map vs on-disk shards + tensors
 │   │   ├── storage/preflight.py        header-only dtype preflight via HTTP Range (reject non-16-bit before the full download)
 │   │   ├── storage/download.py         backend-agnostic fetch (HF or Hippius, chosen by the pin's shape) with a stall watchdog
-│   │   ├── opensearch/fingerprints.py  per-dimension kNN index + exact rerank for near-dup detection
-│   │   ├── uploads/artifacts.py        publish fingerprint corpus + fault.json to S3 (best-effort)
+│   │   ├── dedup/                      the similarity gate (see Hippius validation): sketch.py (secret-seeded per-tensor sketch ψ·W·ω + weights at
+│   │   │                               secret sample positions), signals.py (distances / spectra / merge fits, all computed on sketches), verdict.py
+│   │   │                               (COPY, OWN-COPY exact; LINEAR-COMBO, NOISE-COPY, NOISED-COPY, SPARSE-EDIT, TRIVIAL-EDIT heuristic), gate.py
+│   │   │                               (run + enforcement), bank.py (OpenSearch kNN bank of accepted fingerprints), canon.py / layout.py / secret.py
+│   │   ├── uploads/artifacts.py        publish fault.json to S3 (best-effort)
 │   │   └── db.py                        state machine + lease/heartbeat (SUBMITTED→HIPPIUS_VALIDATED / TERMINAL_INVALID)
 │   │
 │   ├── sanity_service/             PRE-EVAL DISPATCHER: stability gate before spending GPU eval hours
@@ -140,8 +141,8 @@ albedo/
 │   │   │   └── notifications.py            verdict/event payload shapes
 │   │   ├── remote/                     GPU-HOST SIDE
 │   │   │   ├── api.py                      control plane :<port> (/eval-runs, /model-prefetch, /capacity, WS /score-bridge)
-│   │   │   ├── worker.py                   run eval: load samples → vLLM king+chal → score over bridge → verdict (win decided here)
-│   │   │   ├── generation.py               one vLLM subprocess per model, CUDA_VISIBLE_DEVICES per side
+│   │   │   ├── worker.py                   run eval: load samples → x ROLLOUTS_PER_SAMPLE → one thread per trajectory against vLLM king+chal → score over bridge → verdict (win decided here)
+│   │   │   ├── generation.py               one `vllm serve` per model (CUDA_VISIBLE_DEVICES per side); requests are independent, so no trajectory waits for another
 │   │   │   ├── dataset.py                  load manifest samples, render transcripts (incl. tool_calls) into prompt text
 │   │   │   ├── artifacts.py                upload generated-samples/scoring-results JSONL + verdict.json to S3/R2
 │   │   │   ├── prompt_remote.py            candidate-side system prompt
@@ -155,7 +156,7 @@ albedo/
 │   │   ├── simulator/prompt_simulator.py   simulator system prompt, per-format OUTPUT FORMAT block, transcribe prompt
 │   │   ├── modelstore/                 canonical_model_config.py (pin genesis configs over the challenger's — anti-tamper) + resolver.py (cache layout)
 │   │   └── shared/                     cross-role helpers
-│   │       ├── sampling.py                 deterministic sampling: unique instance_ids pooled across sources, one rollout each, phase x bug-family strata
+│   │       ├── sampling.py                 deterministic sampling: unique instance_ids pooled across sources, one source trajectory each, phase x bug-family strata
 │   │       ├── observation_format.py       format detect/validate/repair + command output contracts (must_print / may_be_silent / not_derivable)
 │   │       ├── loop_check.py               looped-trajectory detector — a looped side is scored 0 without calling the judge
 │   │       ├── dataset_manifest.py         load + sha256-verify the dataset shard manifest
@@ -180,9 +181,7 @@ albedo/
 ├── scripts/
 │   ├── create_genesis_king.py      seed genesis king_version + reign + reign_members (UID 0)
 │   ├── generate_arch_spec.py       regenerate architecture_spec.json from the genesis config (handles nested multimodal MoE via text_config)
-│   ├── seed_corpus.py              backfill OpenSearch dedup index from existing SN97 models
-│   ├── backfill_fingerprints.py    rebuild the S3 fingerprint corpus (fingerprint.json + tensors.json) from the OpenSearch index
-│   ├── reindex_opensearch.py       inverse of backfill: rebuild the OpenSearch dedup index from the S3 corpus files
+│   ├── dedup_seed_bank.py          seed the dedup bank from a manifest of accepted models (dedup_bank_manifest.example.json)
 │   ├── eval_cache_cleanup.py       king-aware model-cache GC (keep active kings + seed + in-flight, drop the rest) — PM2 loop
 │   ├── cleanup_models.sh           hourly disk reclaim: delete model snapshots older than 4h from ALBEDO_MODEL_CACHE_DIR — PM2 cron
 │   ├── full_flow_test.py           end-to-end: real chain commits → full validation pipeline
@@ -219,7 +218,7 @@ on-chain v7 commit
   ▼  chain_reader            poll chain → chain_commits + model_submissions(SUBMITTED)
 SUBMITTED
   │
-  ▼  model_validation      download → file manifest → arch lock → fingerprint → OpenSearch dedup
+  ▼  model_validation      download → file manifest → arch lock → sketch fingerprint → dedup gate
 HIPPIUS_RUNNING → HIPPIUS_VALIDATED          (fail → TERMINAL_INVALID / HIPPIUS_RETRYABLE)
   │
   ▼  requeuer                HIPPIUS_VALIDATED → PRE_EVAL_QUEUED
@@ -257,7 +256,7 @@ mid-stage are recovered by lease expiry, not by in-memory state.
 ## chain.toml — subnet constants
 
 Mirrors the subnet rules for the standalone `config_validation` commit-validator. Arch-lock keys, seed
-digest, dedup threshold and the `[files]` allowlist are all current, and the `[files]` block now agrees
+digest and the `[files]` allowlist are all current, and the `[files]` block now agrees
 with what miners and the backend actually enforce (the one difference: the live allowlist also tolerates
 `LICENSE`). The live file-manifest authority is `ModelValidationSettings` in `albedo_config/config.py`,
 read through `model_validation/validate/repo.py`; the arch authority is `validate/architecture_spec.json`
@@ -290,9 +289,6 @@ require_safetensors = true
 allowed             = ["model.safetensors.index.json", ".gitattributes", "README.md"]
 allowed_globs       = ["model-*-of-*.safetensors", "model.safetensors"]
 forbidden_globs     = ["*.py"]                        # no custom modeling code
-
-[preeval]
-similarity_threshold = 0.98                           # fingerprint cosine ≥ this → near-duplicate
 ```
 
 > **Live manifest (what's actually enforced)** — `ModelValidationSettings.REQUIRED_FILES` in
@@ -373,9 +369,11 @@ except where noted. Each maps to a `fault_code`.
    weight_map must match the shards + tensors actually on disk (`safetensors_index`)
 7. `config.json` doesn't match the genesis arch spec on the lock keys (incl. the MoE keys), or
    contains `auto_map` (remote code) / `quantization_config` (quantized) (`architecture`)
-8. **Near-duplicate** (fingerprint cosine ≥ 0.98 of an already-seen model, or an exact
-   weights-hash match) — *not* checked locally; needs OpenSearch, runs only in
-   `model_validation`. Make your model genuinely distinct (`duplicate`)
+8. **Duplicate** — weights identical to an accepted model, byte for byte or up to float noise, fault
+   as `duplicate` (another miner's model — permanently blocks the hotkey) or `duplicate_own`; a copy
+   whose only change from an accepted model is noise faults as `duplicate_heuristic` (`NOISE-COPY` /
+   `NOISED-COPY`). *Not* checked locally — the sketch bank lives in `model_validation`. Make your
+   model genuinely trained, not perturbed
 
 > **Note:** local `check-model --path` runs the file manifest + arch + safetensors index +
 > 16-bit dtype checks, but **not** the metadata-hash checks (#4) and **not** dedup (#8) — both run
@@ -441,10 +439,14 @@ albedo-eval-dispatcher (loop, every dispatch_poll_seconds)
 albedo-remote-eval-api  (GPU host)
   POST /eval-runs → spawn RemoteEvalWorker (background)
     state: accepted → generating → scoring → succeeded|failed
-    question-prep (early): POST /category-prep over the bridge → GLM 5.2 rolls a reference trajectory + writes per-sample yes/no next-step questions (async)
+    question-prep (early): POST /category-prep over the bridge → GLM 5.2 rolls ALBEDO_JUDGE_REFERENCE_RUNS (3) reference trajectories, extracts the task's milestones and writes the question ladder (async; see Question prep below)
     GPU split: king = ALBEDO_REMOTE_PREVIOUS_KING_GPU_IDS (0,1,2,3)
                challenger = ALBEDO_REMOTE_CHALLENGER_GPU_IDS (4,5,6,7)  (no overlap, 4 each)
-    one vLLM subprocess per side (tensor_parallel_size = #gpus), generate king+chal in parallel
+    one `vllm serve` per side (tensor_parallel_size = #gpus; ports ALBEDO_REMOTE_PREVIOUS_KING_VLLM_PORT / _CHALLENGER_VLLM_PORT)
+    every sample is rolled out ALBEDO_REMOTE_ROLLOUTS_PER_SAMPLE (2) times per side — ids `<sample>#r1`, `#r2`; the judge is sent the
+      dataset id, so all rollouts of a sample are judged against its one checklist
+    one thread per trajectory: generate a turn → fetch its observation → next turn, with no lock-step barrier; the engine batches
+      whatever is in flight and keeps decoding while other trajectories wait on their observations
     multiturn trajectories: the horizon is stratified per sample — HORIZON_STRATA (12, 16)
       assistant turns, assigned round-robin within each phase bucket (evaluator/shared/questions.py);
       ALBEDO_REMOTE_TRAJECTORY_ASSISTANT_TURNS (8) is only the fallback when no horizon is assigned.
@@ -480,38 +482,42 @@ judging, `ALBEDO_JUDGE_REFERENCE_RUNS` (3) reference trajectories (GLM 5.2) are 
 through the same observation loop the candidates face. They share one world — the observation memo
 keys on (sample_id, format, repo state, command) — so they diverge only where the model chose
 differently. Below two usable runs the sample is dropped; there is no task-only fallback checklist.
-The evaluator then builds the checklist in two regimes:
+The evaluator then builds the checklist in two stages, each read several times and merged, because
+one reading of the same runs comes back with a different subset of the facts:
 
-- **vector of change → question ladder** (`evaluator/reference/`) — ONE call reads all runs at once
-  and reduces them to an ordered list of task-level **milestones**, each of exactly one category
-  (`claims` / `explore` / `action` / `verification`), justified for necessity by counterfactual
-  (never by majority vote) and backed by a verbatim span per consenting run tagged with where that
-  span came from. `validate_vector` then enforces this in code: a milestone survives only if it is
-  necessary, not already given by the TASK block (`in_prefix` must be quoted, and the quote is
-  checked), and evidenced by a span that really occurs in the kind of block its `source` claims.
-  Outside `[MILESTONE_MIN, MILESTONE_MAX]` = 3..12 the extractor is asked again, up to
-  `MILESTONE_RETRIES` (2) more times, and the best attempt wins outright. A second call then turns
-  each surviving milestone into a SET of questions at a spread of depths — `RUNGS_MAX` (6) per
-  milestone, `QUESTIONS_MAX` (60) overall — with one retry for any milestone left under
-  `LADDER_MIN` (2). Where the runs reached a milestone through different code, or only one run
-  reached it, the question may name no file, function or expression at all.
-  trim phase, enabled whenever `num_questions >= 3 * BEHAVIOR_K`; these probe working habits rather
-  than the reference, and only `behavior:anchored_edit` carries weight today.
+- **vector of change** (`evaluator/reference/prompt_milestones.py`, `vector_merge.py`) —
+  `ALBEDO_JUDGE_MILESTONE_READINGS` (4) independent extractor calls each read all runs at once and
+  reduce them to an ordered list of task-level **milestones**, each of exactly one category
+  (`claims` / `explore` / `action` / `verification`), justified for necessity by counterfactual (never
+  by majority vote) and backed by a verbatim span per consenting run tagged with where that span came
+  from. `validate_vector` enforces this in code on every reading: a milestone survives only if it is
+  necessary, not already given by the TASK block, and evidenced by a span that really occurs in the
+  kind of block its `source` claims. The readings are then aligned by fact (exact duplicates first, one
+  aligner call for the rest) and **unioned**: a fact any reading found is kept once, under its
+  best-evidenced wording, with the evidence pooled.
+- **question ladder** (`prompt_ladder.py`) — `ALBEDO_JUDGE_QUESTION_READINGS` (3) writer calls each
+  turn the whole vector into a SET of questions per milestone at a spread of depths — `RUNGS_MAX` (6)
+  per milestone, `QUESTIONS_MAX` (60) overall. Questions are aligned by what they test and kept by
+  **majority** (asked by at least 2 of the 3 readings, earliest wording), thin milestones topped up from
+  the spares; nothing is re-asked. Where the runs reached a milestone through different code, or only
+  one run reached it, the question may name no file, function or expression at all. Every question
+  weighs the same (`TAG_WEIGHTS` is uniform); there is no separate behaviour regime any more.
 
 The result is then filtered: reference leaks dropped (`filter_reference_leaks`), inaction-earning
-"avoids X" checks dropped (`enforce_question_labels`), the behaviour batch additionally put through
-`parse_questions` hygiene (near-duplicates, template stamping, generic-hygiene and negative-form
-caps), and finally **pruned against every reference run** — each run is judged on the finished
-checklist and a question not one of them earns is dropped. A sample is rejected outright if fewer than `QUESTION_FLOOR` (6) milestone questions
-survive. `ALBEDO_JUDGE_NUM_QUESTIONS` (50) does not set the checklist size; it only gates the
-behaviour regime. Every discard is recorded in
-the scoring artifact. Questions are generated once per task and reused for both models.
+"avoids X" checks dropped (`enforce_question_labels`), and finally **pruned against every reference
+run** — each run is judged on the finished checklist and a question not one of them earns is dropped.
+A sample is rejected outright if fewer than `QUESTION_FLOOR` (6) questions survive. Every discard is
+recorded in the scoring artifact. Questions are generated once per task and reused for both models
+and all their rollouts.
 
-**Judge** (`albedo-judge-api`, OpenRouter): a single judge model (`z-ai/glm-5.2`) answers every
-question **1/0** (forced `json_schema`, fp8), seeing only the questions + one side's trajectory —
-never the other side's. King and challenger are scored **independently** against the same questions:
-the mean of the judge's 1/0 answers → an absolute score in `[0,1]` per side (`score_king` and
-`score_challenger` are independent — they do NOT sum to 1). The challenger takes the eval only if
+**Judge** (`albedo-judge-api`, OpenRouter): the judge model (`z-ai/glm-5.2`) answers every question
+**1/0** (forced `json_schema`, fp8) `ALBEDO_JUDGE_JUDGE_REPEATS` (3) times per trajectory, seeing only
+the questions + one side's trajectory — never the other side's; a question's answer is the majority of
+the repeats (the record carries `repeats`, `repeats_held`, `disputed`). Each side rolls every sample out
+`ALBEDO_REMOTE_ROLLOUTS_PER_SAMPLE` (2) times and every rollout is judged against the sample's one
+checklist. King and challenger are scored **independently**: the mean yes-rate over all of a side's
+trajectories → an absolute score in `[0,1]` per side (`score_king` and `score_challenger` are
+independent — they do NOT sum to 1). The challenger takes the eval only if
 `score_challenger − score_king ≥ CHALLENGER_WIN_MARGIN` (`0.025`, margin-only, decided on the GPU box
 in `remote/worker.py`); otherwise `COMPLETE_LOSS`. Winning once is not enough — see the win-both step
 in the pipeline above. Per-model concurrency is capped by a semaphore shared across concurrent
@@ -527,7 +533,7 @@ same rule already applies at pre-eval via `sanity_service/tail_check.py`. Trunca
 short-circuited the same way.
 
 **Deterministic sampling:** `shared/sampling.py` (`multi_source_manifest_sample_ids`) draws `sample_count`
-(100) **unique `instance_id`s** pooled across all four sources, one **random rollout** per instance,
+(100) **unique `instance_id`s** pooled across all four sources, one **random source trajectory** per instance,
 stratified by `STEP_TRIM` phase (`cold` 65 / `pre_edit` 15 / `at_edit` 20, anchored on the
 instance's `first_edit`) x `FAMILY_MIX` bug family (`pr` 50 / `lm` 15 / `combine` 10 /
 `mechanical` 25), with `REPO_CAP` 2 per repo, 30% non-`python`, and prefixes over
@@ -556,15 +562,17 @@ claim model_submissions oldest-first  (SUBMITTED | HIPPIUS_RETRYABLE)  → HIPPI
   3.5 download        full repo from the committed hub (HF or Hippius) → ALBEDO_MODEL_CACHE_DIR
   4. safetensors index  model.safetensors.index.json weight_map vs on-disk shards + tensors
   5. architecture     config.json vs validate/architecture_spec.json (architectures + expected + forbidden_keys)
-  6. fingerprint      per-tensor L2 norms + deterministic value samples (layer_norms_v2)
-                      (fingerprint dim > MAX_KNN_DIM 16000 → fingerprint_too_large)
-  7. OpenSearch dedup per-dimension kNN prefilter (HNSW cosine, top-20) → exact per-tensor rerank
-                      cosine ≥ similarity_threshold (0.98) AND different hotkey → DUPLICATE
-                      (plus an exact weights_hash gate ahead of the kNN for byte-identical re-uploads)
-  success → HIPPIUS_VALIDATED ; index fingerprint for future dedup ; publish fingerprint corpus to S3
+  6. fingerprint      per-tensor secret-seeded sketch ψ·W·ω (K=64) + the weights at secret sample positions,
+                      computed on GPU ALBEDO_DEDUP_GPU (model_validation/dedup/sketch.py)
+  7. dedup gate       nearest ALBEDO_DEDUP_NEAREST_K (10) bank entries by OpenSearch kNN → signals on the sketches
+                      (distances, spectra, merge fits) → verdict:
+                        COPY / OWN-COPY   identical bytes, or relative distance < ALBEDO_DEDUP_COPY_REL (1e-5) → always fault
+                        NOISE-COPY / NOISED-COPY / LINEAR-COMBO / SPARSE-EDIT / TRIVIAL-EDIT   heuristic — recorded; fault
+                                          only when listed in ALBEDO_DEDUP_ENFORCE_REASONS (gated by ALBEDO_DEDUP_ENFORCE)
+  success → HIPPIUS_VALIDATED ; fingerprint added to the bank
   miner fault → TERMINAL_INVALID + fault.json
                 (file_manifest | chat_template_hash | metadata_hash | weight_dtype | safetensors_index
-                 | architecture | duplicate | hotkey_already_validated)
+                 | architecture | duplicate | duplicate_own | duplicate_heuristic | hotkey_already_validated)
   infra fault → HIPPIUS_RETRYABLE (≤ 5 attempts) → TERMINAL_INFRA_FAILED
 ```
 
@@ -576,7 +584,7 @@ claim model_submissions oldest-first  (SUBMITTED | HIPPIUS_RETRYABLE)  → HIPPI
 - **Where the checks live:** the live file / arch / safetensors-index / dtype checks the miner CLI and
   this worker both run come from `model_validation.validate`. `config_validation` backs the separate
   commit-validator and supplies the miner's Hippius download/list utilities + `ModelRef`. The local
-  `check-model` skips only OpenSearch dedup.
+  `check-model` skips only the dedup gate.
 
 ---
 
@@ -719,6 +727,9 @@ Full reference in [.env.example](../.env.example) (backend + GPU host) and [.env
 |---|---|
 | `ALBEDO_REMOTE_HOST_ROLE` | `EVAL` or `PRE_EVAL` |
 | `ALBEDO_REMOTE_PREVIOUS_KING_GPU_IDS` / `_CHALLENGER_GPU_IDS` | `0,1,2,3` / `4,5,6,7` |
+| `ALBEDO_REMOTE_ROLLOUTS_PER_SAMPLE` | trajectories per sample per side (default 2); the score is the mean over all of them |
+| `ALBEDO_REMOTE_PREVIOUS_KING_VLLM_PORT` / `_CHALLENGER_VLLM_PORT` | loopback ports of the two `vllm serve` processes (9201 / 9202) |
+| `ALBEDO_REMOTE_VLLM_MAX_NUM_SEQS` | in-flight sequences per engine (default 256; 2 rollouts x 100 samples) |
 | `ALBEDO_REMOTE_GENERATION_BACKEND` | `vllm` |
 | `ALBEDO_REMOTE_SCORING_BACKEND` | `websocket` (score bridge) or `http` |
 | `ALBEDO_REMOTE_SCORING_BATCH_CONCURRENCY` | concurrent /score-batch requests per eval (default 128) |
@@ -741,7 +752,10 @@ Full reference in [.env.example](../.env.example) (backend + GPU host) and [.env
 | `ALBEDO_JUDGE_REFERENCE_PRUNE` | judge every reference run against the checklist and drop what none of them earns (default true); costs one judge call per run per sample at prep |
 | `ALBEDO_JUDGE_SIMULATION_MODEL` | observation-simulator model (default `deepseek/deepseek-v4-flash-0731`; empty → evaluator model) |
 | `ALBEDO_JUDGE_SIMULATION_PROVIDERS` | provider list for the simulator, tried as one rung each in rotation (default `deepseek,cloudflare`; empty → no pin) |
-| `ALBEDO_JUDGE_NUM_QUESTIONS` | gates the behaviour regime (`>= 3 * BEHAVIOR_K`); it is **not** the checklist size — that is the surviving milestones x `RUNGS_MAX` (6), capped at `QUESTIONS_MAX` (60), plus the behaviour questions, minus filtering and the reference prune (default 50) |
+| `ALBEDO_JUDGE_MILESTONE_READINGS` | independent extractor readings, merged by union into the milestone vector (default 4) |
+| `ALBEDO_JUDGE_QUESTION_READINGS` | independent ladder writers, merged by majority (default 3) |
+| `ALBEDO_JUDGE_JUDGE_REPEATS` | judgings per trajectory; a question's answer is the majority (default 3) |
+| `ALBEDO_JUDGE_NUM_QUESTIONS` | recorded in `question_source` for provenance only; the checklist size is the surviving milestones x `RUNGS_MAX` (6), capped at `QUESTIONS_MAX` (60) |
 | `ALBEDO_JUDGE_ENGY_MODELS` | model pool for grounded/engy calls (default `z-ai/glm-5.2,deepseek/deepseek-v4-flash-0731`) |
 
 ### Repo-context grounding
@@ -757,7 +771,8 @@ Full reference in [.env.example](../.env.example) (backend + GPU host) and [.env
 ### Hippius validation
 | Variable | Purpose |
 |---|---|
-| `ALBEDO_OPENSEARCH_URL` / `_USER` / `_PASSWORD` / `_INDEX` | dedup corpus |
+| `ALBEDO_OPENSEARCH_URL` / `_USER` / `_PASSWORD` / `_INDEX` | dedup bank (kNN index of accepted fingerprints) |
+| `ALBEDO_DEDUP_SECRET` / `_SECRET_FILE`, `_GPU`, `_NEAREST_K`, `_COPY_REL`, `_ENFORCE`, `_ENFORCE_REASONS` | sketch seed, GPU, neighbours checked, copy tolerance, enforcement switch and which verdicts fault (default `COPY,OWN-COPY`) |
 | `ALBEDO_MODEL_CACHE_DIR` | downloaded model cache |
 | `ALBEDO_S3_*`, `HIPPIUS_HUB_TOKEN` | artifact + model store auth |
 
@@ -811,8 +826,8 @@ python scripts/create_genesis_king.py     # genesis reign + king_version + reign
 plus artifact URIs.
 
 **Question prep (GPU → backend over WS /score-bridge, before scoring):** forwarded to judge API
-`/category-prep` → GLM 5.2 rolls a reference trajectory and writes the per-sample yes/no next-step
-questions anchored on it; the score batch then judges against them.
+`/category-prep` → GLM 5.2 rolls three reference trajectories, extracts the task's milestones and writes
+the question ladder; the score batch then judges every rollout of both sides against it.
 
 **Score request (GPU → backend over WS /score-bridge):** `{type:"score_request", request_id, payload}`
 → forwarded to judge API `/score-batch` → `{type:"score_response", request_id, body}`. Scoring records
@@ -848,7 +863,7 @@ uv run ruff check src/ && uv run ruff format src/                 # lint
 
 - **Dashboard:** static site in `website/`; reads `data/dashboard.json` + `data/state.json`, published to
   Hippius S3 by `website/monitor.py` (live, on-change) or `website/push_to_hippius.py` (one-shot)
-- **Datasets** (four sources, pooled one-rollout-per-instance and stratified by phase x bug family — see docs/DATASETS.md):
+- **Datasets** (four sources, pooled one-source-trajectory-per-instance and stratified by phase x bug family — see docs/DATASETS.md):
   - mini-coder (400k, python): https://huggingface.co/datasets/ricdomolm/mini-coder-trajs-400k
   - mini-coder-rs (rust, SWE-smith-rs): https://huggingface.co/datasets/AlienKevin/SWE-smith-rs-gpt-5-mini-trajectories
   - open-swe-traces (4 arms): https://huggingface.co/datasets/nvidia/Open-SWE-Traces

@@ -327,8 +327,9 @@ CHAIN_NETWORK=test albedo check-commit
   new pin you must re-commit.
 - **Copies are rejected regardless of hub.** Validators fingerprint the weights and hash the weight
   files themselves; re-uploading someone else's model to the other backend still counts as a duplicate.
-- **Dedup isn't local.** Passing `check-model` doesn't guarantee acceptance — a model too similar
-  (≥ 0.98) to an existing submission is rejected by the validator. Make your model genuinely distinct.
+- **Dedup isn't local.** Passing `check-model` doesn't guarantee acceptance — a model that copies an
+  existing submission (byte-identical, identical up to float noise, or merely noised) is rejected by
+  the validator. Make your model genuinely trained.
 - **No custom code, no quantization.** `*.py` files are forbidden and `config.json` must not contain
   `auto_map` or `quantization_config`.
 - **Registration is required to commit.** Both `commit` and `publish` verify your hotkey is in the

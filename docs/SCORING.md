@@ -81,13 +81,12 @@ span}` evidence entry per consenting run.
 A milestone whose `depends_on` names a dropped milestone has that id pruned, so nothing grounds
 itself on something that no longer exists.
 
-If the surviving count falls outside `[MILESTONE_MIN, MILESTONE_MAX]` = **3..12**, the extractor is
-asked again, up to `MILESTONE_RETRIES` (2) more times. Too **thin** only earns a retry when the loss
-was the extractor's to avoid (`RECOVERABLE_DROPS`: mis-copied spans, wrong source labels) —
-`optional` and `given_by_task` are the corpus's verdict and a second reading returns them the same
-way. Too **bloated** retries on the bare count. The best attempt wins outright rather than being
-merged: two passes name the same facts under different ids, and concatenating them would give one
-fact several sets of questions and so several times the weight.
+The extractor is run `milestone_readings` (4) times over the same runs, each reading validated as
+above. One reading of the same runs comes back with a different subset of the facts, so the readings
+are merged rather than the best one picked: exact duplicates are grouped, one aligner call matches the
+rest by fact (`vector_merge.py`), and the result is the **union** — a fact any reading found is kept
+once, under its best-evidenced wording, with the evidence pooled and `depends_on` remapped. Nothing
+is re-asked.
 
 ### The ladder
 
@@ -112,9 +111,9 @@ questions answered yes. `rung` is renumbered contiguously per milestone by `pars
 carried into the scoring record for analysis only.
 
 
-If any milestone comes back under `LADDER_MIN` (2) questions, one more call asks for those alone.
-The retry re-sends the **whole** vector: approach windows partition the milestone sequence, so
-projecting a subset would silently widen them.
+The ladder is written `question_readings` (3) times over the whole vector. Questions are aligned by
+what they test and kept by **majority** — asked by at least two readings, earliest wording — and a
+milestone left under `LADDER_MIN` (2) is topped up from the spare questions rather than re-asked.
 
 ### Enforcement at parse time
 
@@ -251,6 +250,9 @@ Judge-side settings are `JudgeSettings` in `src/albedo_config/config.py`, prefix
 | `sota_models` | `z-ai/glm-5.2` | pool the reference runs are drawn from |
 | `reference_runs` | 3 | how many reference trajectories are generated per sample |
 | `reference_prune` | `true` | judge every run against the checklist and drop what none of them earns |
+| `milestone_readings` | 4 | independent extractor readings, merged by union |
+| `question_readings` | 3 | independent ladder writers, merged by majority |
+| `judge_repeats` | 3 | judgings per trajectory; a question's answer is the majority |
 | `judge_count` | 1 | how many judges vote |
 | `sota_trajectory_turns` | 8 | reference trajectory length |
 | `min_valid_fraction` | 0.8 | below this the eval fails instead of scoring |
