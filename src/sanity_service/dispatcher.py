@@ -21,7 +21,6 @@ from albedo_eval_service.shared.edit_detection import REMOVAL_RE as _REMOVAL_RE
 from albedo_eval_service.shared.edit_detection import named_in_removal
 from albedo_eval_service.shared.observation_format import (
     MAX_CONSECUTIVE_BAD_TURNS,
-    RETURNCODE,
     absent_tool_output,
     canonical_empty,
     claims_tracked_change,
@@ -32,6 +31,7 @@ from albedo_eval_service.shared.observation_format import (
     detect_format,
     echoed_command,
     empty_output,
+    grounded_observation,
     has_content,
     impossible_success,
     leaked_turn,
@@ -1257,21 +1257,19 @@ async def _simulate_observation_uncached(
 
     # exact tier: computed against the real snapshot, so it is returned unsimulated and ungated.
     # Mirrors judge_api's ObservationSimulationService.simulate.
-    if (
-        resolved.exact_output is not None
-        and resolved.exact_returncode is not None
-        and fmt == RETURNCODE
-    ):
-        observation = correct_returncode(
-            wrap(resolved.exact_output, fmt, returncode=resolved.exact_returncode), fmt, command
+    if resolved.exact_output is not None:
+        observation = grounded_observation(
+            fmt, resolved.exact_output, resolved.exact_returncode, command, messages
         )
-        logger.info(
-            "[sanity-dispatch] observation_simulation_exact sample_id={} fmt={} chars={}",
-            sample_id,
-            fmt,
-            len(observation),
-        )
-        return observation
+        if observation is not None:
+            observation = correct_returncode(observation, fmt, command)
+            logger.info(
+                "[sanity-dispatch] observation_simulation_exact sample_id={} fmt={} chars={}",
+                sample_id,
+                fmt,
+                len(observation),
+            )
+            return observation
 
     # context tier: a computed block means the answer is already known, so the simulator is asked
     # to transcribe it against the bare command rather than improvise from the transcript
