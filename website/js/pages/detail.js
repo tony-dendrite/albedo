@@ -181,7 +181,10 @@ function shareTable(rows, keyHeader, showWeight) {
         el("td", { class: `r ${signedCls(tot.diff)}` }, el("b", {}, signed(tot.diff))))));
 }
 
-const tagMarginTable = records => shareTable(scoreShares(records, q => q.tag || "untagged"), "tag", true);
+const tagMarginTable = records => {
+  const rows = scoreShares(records, q => q.tag || "untagged");
+  return shareTable(rows, "tag", new Set(rows.map(r => r.weight)).size > 1);
+};
 
 function lazyDetails(props, summaryChildren, buildBody, bodyClass) {
   const body = el("div", { class: bodyClass });
@@ -245,18 +248,27 @@ async function renderSampleScores(r, section, recordsP) {
     return mount(section, el("h2", {}, "samples"), el("div", { class: "note" }, "No sample scores found."));
   }
 
+  // rollouts of one sample share its id: one card per sample, one body section per rollout
+  const bySample = new Map();
+  for (const record of records) (bySample.get(record.sample_id) || bySample.set(record.sample_id, []).get(record.sample_id)).push(record);
+  const groups = [...bySample.values()];
+  const rollouts = Math.max(...groups.map(g => g.length));
+  const scored = records.filter(x => x.scored).length;
+
   const source = records.find(x => x.category_source)?.category_source;
   const sourceLine = source
     ? `${source.provider || "category"} · ${source.model || "model"} · ${source.prompt_version || "prompt"}`
     : records.some(x => x.scoring_mode === "binary")
-      ? `${records.filter(x => x.scored).length}/${records.length} samples scored · binary questions`
+      ? rollouts > 1
+        ? `${bySample.size} samples × ${rollouts} rollouts · ${scored}/${records.length} trajectories scored · binary questions`
+        : `${scored}/${records.length} samples scored · binary questions`
       : `${records.length} scored samples`;
 
   mount(section,
     el("h2", {}, "samples"),
     el("div", { class: "sample-source" }, sourceLine),
-    el("div", { class: "sample-list" }, records.map((record, i) =>
-      record.scoring_mode === "binary" ? binarySampleCard(record, i) : legacySampleCard(record, i))));
+    el("div", { class: "sample-list" }, groups.map((group, i) =>
+      group[0].scoring_mode === "binary" ? binarySampleCard(group, i) : legacySampleCard(group[0], i))));
 }
 
 function legacySampleCard(record, i) {
@@ -283,16 +295,19 @@ function legacySampleCard(record, i) {
           el("td", { class: "metric-line" }, metricText(j.metric_scores, cats))))))));
 }
 
-function binarySampleCard(record, i) {
-  const p = pivotBinary(record);
-  const jr = record.judge_results || [];
+// `group` = every rollout of one sample; the row shows their mean, the body each rollout in turn
+function binarySampleCard(group, i) {
+  const record = group[0];
+  const jr = group.flatMap(r => r.judge_results || []);
   const okN = jr.filter(j => j.parse_ok).length;
-  const delta = record.challenger_score != null && record.king_score != null
-    ? record.challenger_score - record.king_score : null;
-  const flag = record.scored ? false
+  const chal = mean(group.map(r => r.challenger_score));
+  const king = mean(group.map(r => r.king_score));
+  const delta = chal != null && king != null ? chal - king : null;
+  const unscored = group.filter(r => !r.scored);
+  const flag = !unscored.length ? false
     : jr.length
-      ? el("span", { class: "sample-flag warn", title: record.error || "partial judge failure" }, "partial")
-      : el("span", { class: "sample-flag bad", title: record.error || "" }, "unscored");
+      ? el("span", { class: "sample-flag warn", title: unscored[0].error || "partial judge failure" }, "partial")
+      : el("span", { class: "sample-flag bad", title: unscored[0].error || "" }, "unscored");
   const zeroed = jr.filter(j => j.looped || j.corrupted).map(j =>
     el("span", {
       class: "sample-flag warn",
@@ -303,15 +318,20 @@ function binarySampleCard(record, i) {
     [
       el("span", { class: "sample-id" }, record.sample_id || `sample ${i + 1}`),
       el("span", { class: "sample-duel" },
-        el("span", { class: "chal" }, `chal ${pct(record.challenger_score)}`),
+        el("span", { class: "chal" }, `chal ${pct(chal)}`),
         el("span", { class: "sep" }, " · "),
-        `king ${pct(record.king_score)}`,
+        `king ${pct(king)}`,
         delta != null ? el("span", { class: "delta " + (delta > 0 ? "ok" : delta < 0 ? "bad" : "") },
           ` ${delta >= 0 ? "+" : ""}${(delta * 100).toFixed(2)}`) : false),
       el("span", { class: "sample-meta" },
         `${(record.questions || []).length} q · ${okN}/${jr.length} judges `, flag, ...zeroed),
     ],
-    () => binarySampleBody(record, p),
+    () => group.length === 1
+      ? binarySampleBody(record, pivotBinary(record))
+      : group.flatMap((r, k) => [
+          el("div", { class: "rollout-label" }, `rollout ${k + 1}/${group.length}`),
+          ...binarySampleBody(r, pivotBinary(r)),
+        ]),
     "sample-body");
 }
 
@@ -340,8 +360,16 @@ function binaryJudgeTable(p) {
         sideCell(chal),
         failed.length
           ? el("td", { class: "bad" }, failed[0].error || "parse error")
-          : el("td", {}, king && chal ? "ok" : "—"));
+          : el("td", {}, king && chal ? votesText(king, chal) : "—"));
     })));
+}
+
+// judged `repeats` times per side, majority per question; `disputed` = questions the repeats split on
+function votesText(king, chal) {
+  const r = king.repeats || chal.repeats;
+  if (!r || r < 2) return "ok";
+  const held = `${Math.min(king.repeats_held ?? r, chal.repeats_held ?? r)}/${r}`;
+  return `ok · ${held} votes · ${(king.disputed ?? 0) + (chal.disputed ?? 0)} disputed`;
 }
 
 function questionList(record, p) {
@@ -416,6 +444,13 @@ function passHeads(r, netuid, passes) {
   });
 }
 
+function trajectoriesText(r) {
+  if (r.total_turns == null) return "\u2014";
+  const base = `${r.valid_turns ?? r.total_turns}/${r.total_turns}`;
+  const n = r.sample_count;
+  return n && r.total_turns > n && r.total_turns % n === 0 ? `${base} · ${n} samples × ${r.total_turns / n} rollouts` : base;
+}
+
 function renderEval(r, netuid, passes = [r]) {
   const multi = passes.length >= 2;
   $("d-head").style.display = multi ? "none" : "";
@@ -436,7 +471,7 @@ function renderEval(r, netuid, passes = [r]) {
     r.required_win_margin != null
       ? kv("required margin", `≥ +${(Number(r.required_win_margin) * 100).toFixed(2)}%`)
       : false,
-    kv("turns", r.total_turns != null ? `${r.valid_turns ?? r.total_turns}/${r.total_turns}` : "—"),
+    kv("trajectories", trajectoriesText(r)),
     kv("vllm errors", `${r.chal_vllm_errors ?? 0}c / ${r.king_vllm_errors ?? 0}k`),
     kv("scoring", r.scoring_mode || "fixed_metrics"),
     kv("judge errors", r.judge_errors ?? "—"),

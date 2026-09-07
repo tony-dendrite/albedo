@@ -282,7 +282,8 @@ def _eval_runs(
         """
         SELECT er.id AS eval_run_id, er.submission_id,
                er.challenger_won, er.score_challenger, er.score_king, er.win_margin,
-               er.valid_turns, er.total_turns, er.chal_vllm_errors, er.king_vllm_errors,
+               er.valid_turns, er.total_turns, er.sample_count,
+               er.chal_vllm_errors, er.king_vllm_errors,
                er.finished_at,
                (SELECT json_agg(w.win_margin ORDER BY w.finished_at)
                 FROM eval_runs w
@@ -351,6 +352,7 @@ def _eval_runs(
                 "uid": row["uid"],
                 "total_turns": row["total_turns"],
                 "valid_turns": row["valid_turns"],
+                "sample_count": row["sample_count"],
                 "chal_vllm_errors": row["chal_vllm_errors"],
                 "king_vllm_errors": row["king_vllm_errors"],
                 "scored_sample_count": verdict.get("scored_sample_count"),
