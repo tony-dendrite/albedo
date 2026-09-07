@@ -3,7 +3,7 @@ import { fetchDashboard, fetchState, fetchBenchmarks, fetchPulledScores, fetchMa
 import { normalize } from "../data.js";
 import { el, mount } from "../dom.js";
 import { fmtRelative, toRoman } from "../format.js";
-import { kingTitleName, hubRepoUrl, modelRepo } from "../model.js";
+import { kingTitleName, hubRepoUrl, modelRepo, dendriteRepo, dendriteRepoUrl } from "../model.js";
 import { renderReign } from "../render/reign.js";
 import { renderBenchmarks, liveScoreCandidates } from "../render/benchmarks.js";
 import { renderPipeline } from "../render/pipeline.js";
@@ -27,13 +27,13 @@ function matches(x, q) {
 
 function renderHero(d) {
   const king = d.reign.members?.[0];
-  const repoUrl = king && hubRepoUrl(king.model_uri);
+  const repoUrl = king && (dendriteRepoUrl(king.king_version) || hubRepoUrl(king.model_uri));
   mount($("hero-king"),
     king
       ? (repoUrl ? el("a", { href: repoUrl, target: "_blank", rel: "noopener" }, kingTitleName(king.king_version))
                  : kingTitleName(king.king_version))
       : "ALBEDO");
-  mount($("hero-sub"), king ? modelRepo(king.model_uri) : "");
+  mount($("hero-sub"), king ? (dendriteRepo(king.king_version) || modelRepo(king.model_uri)) : "");
 }
 
 function renderStats(d) {
