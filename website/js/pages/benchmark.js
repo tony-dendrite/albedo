@@ -318,9 +318,24 @@ function renderTrajectoryMessages(payload) {
   });
 }
 
-function renderTrajectoryMeta(payload, task) {
+function renderPulledTrajectoryMeta(payload, task, links) {
+  const stats = payload?.info?.model_stats || {};
+  const patch = String(payload?.info?.submission || "");
+  return el("div", { class: "kv-grid trajectory-kv" },
+    kv("task", payload?.instance_id || task?.task_name || "—"),
+    kv("score", task?.score == null ? "— (no grading report)" : fmt(task.score, 3)),
+    kv("state", task?.state || "—"),
+    kv("termination", payload?.info?.exit_status || "—"),
+    kv("api calls", stats.api_calls == null ? "—" : String(stats.api_calls)),
+    kv("agent cost", stats.instance_cost == null ? "—" : fmt(Number(stats.instance_cost), 4)),
+    kv("patch", patch.trim() ? `${patch.length} chars, ${patch.split("\n").length} lines` : "empty"),
+    el("div", { class: "kv" }, el("span", { class: "k" }, "artifacts"), el("span", { class: "v" }, links.length ? links : "—")));
+}
+
+function renderTrajectoryMeta(payload, task, pulled) {
   const links = [];
   if (task?.artifact_uri) links.push(el("a", { href: task.artifact_uri, target: "_blank", rel: "noopener" }, "trajectory json"));
+  if (pulled) return renderPulledTrajectoryMeta(payload, task, links);
   const reward = payload?.reward_breakdown || payload?.reward_info?.reward_breakdown;
   const agentCost = payload?.agent_cost || messageCost(payload, "assistant");
   const userCost = payload?.user_cost || messageCost(payload, "user");
@@ -363,7 +378,7 @@ function wireTrajectory(run) {
       return;
     }
     mount(messages, renderTrajectoryMessages(payload));
-    mount(meta, renderTrajectoryMeta(payload, task));
+    mount(meta, renderTrajectoryMeta(payload, task, pulledRunFor(run)));
   }
 
   select.addEventListener("change", loadTask);
@@ -371,20 +386,22 @@ function wireTrajectory(run) {
 }
 
 function renderTaskTable(run) {
+  const pulled = Boolean(pulledRunFor(run));
   const rows = (run?.task_results || []).map(task => {
     const info = task.metrics?.exception_info;
     return el("tr", {},
       el("td", { class: "model" }, el("span", { class: "model-cell", title: task.task_name }, task.task_name || "—")),
       el("td", {}, el("span", { class: `bench-state ${String(task.state || "").toLowerCase()}` }, task.state || "—")),
       el("td", { class: "r" }, task.score == null ? "—" : fmt(task.score, 3)),
-      el("td", { class: "when" }, fmtDateTime(task.finished_at)),
-      el("td", { class: "fail-reason-cell" }, info ? `${info.exception_type || "error"}: ${info.exception_message || ""}` : ""));
+      pulled ? false : el("td", { class: "when" }, fmtDateTime(task.finished_at)),
+      pulled ? false : el("td", { class: "fail-reason-cell" }, info ? `${info.exception_type || "error"}: ${info.exception_message || ""}` : ""));
   });
   return el("div", { class: "data-table-wrap bench-task-wrap" },
     el("table", { class: "data-table" },
       el("thead", {}, el("tr", {},
-        el("th", {}, "task"), el("th", {}, "state"), el("th", { class: "r" }, "score"), el("th", {}, "finished"), el("th", {}, "error"))),
-      el("tbody", {}, rows.length ? rows : el("tr", {}, el("td", { colspan: "5" }, "no task rows.")))));
+        el("th", {}, "task"), el("th", {}, "state"), el("th", { class: "r" }, "score"),
+        pulled ? false : el("th", {}, "finished"), pulled ? false : el("th", {}, "error"))),
+      el("tbody", {}, rows.length ? rows : el("tr", {}, el("td", { colspan: pulled ? "3" : "5" }, "no task rows.")))));
 }
 
 function render(model, selected, baseline) {
