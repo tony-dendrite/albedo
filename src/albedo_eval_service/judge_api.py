@@ -92,6 +92,7 @@ from .shared.observation_format import (
     is_abandoned,
     is_file_read,
     is_truncated,
+    narrated_observation,
     no_output_notice,
     output_expectation,
     pipeline_returncode_override,
@@ -1462,6 +1463,7 @@ def _usable_simulation_output(
         and not _role_violation(raw)
         and not _looping_output(raw)
         and not degenerate_observation(raw)
+        and not narrated_observation(raw, fmt)
         and not impossible_success(raw, fmt, command)
         and not stuttered_lines(raw)
         and not (command and fabricated_sed_error(command, raw))
@@ -1487,6 +1489,8 @@ def _unusable_reason(
         return "looping"
     if degenerate_observation(raw):
         return "degenerate_lines"
+    if narrated_observation(raw, fmt):
+        return "narrated"
     if impossible_success(raw, fmt, command):
         return "shell_error_with_rc_0"
     if reason := stuttered_lines(raw):

@@ -10,6 +10,7 @@ from loguru import logger
 
 from albedo_config import SanitySettings
 from albedo_eval_service.judge_llm_client import JudgeRawResponse
+from albedo_eval_service.shared.observation_format import RETURNCODE
 from albedo_eval_service.shared.observation_memo import ObservationMemo
 from sanity_remote.models import SanityRunRequest
 from sanity_remote.state import SanityRunStore
@@ -668,7 +669,7 @@ def test_exact_grounding_returns_unsimulated(monkeypatch):
     no LLM call. If this stops holding, pre-eval is silently back to inventing observations."""
     state, assistant = _grounding_state()
     repo = _StubRepoContext(D.Grounding(None, "12:def clear(self):", 0, "state-1"))
-    monkeypatch.setattr(D, "detect_format", lambda *_a, **_k: D.RETURNCODE)
+    monkeypatch.setattr(D, "detect_format", lambda *_a, **_k: RETURNCODE)
 
     observation = asyncio.run(
         D._simulate_observation_uncached(
@@ -692,7 +693,7 @@ def test_resolved_context_reaches_the_simulator_prompt(monkeypatch):
         f"{D.COMPUTED_BLOCK_MARKER} this search was executed against the repository\n12:def clear"
     )
     repo = _StubRepoContext(D.Grounding(block, None, None, "state-1"))
-    monkeypatch.setattr(D, "detect_format", lambda *_a, **_k: D.RETURNCODE)
+    monkeypatch.setattr(D, "detect_format", lambda *_a, **_k: RETURNCODE)
     seen: dict[str, str] = {}
 
     async def _complete(**kwargs):
@@ -723,7 +724,7 @@ def test_memo_queries_repo_context_once_for_a_repeated_command(monkeypatch):
     state, assistant = _grounding_state()
     state.observation_memo = ObservationMemo()
     repo = _StubRepoContext(D.Grounding(None, "12:def clear(self):", 0, "state-1"))
-    monkeypatch.setattr(D, "detect_format", lambda *_a, **_k: D.RETURNCODE)
+    monkeypatch.setattr(D, "detect_format", lambda *_a, **_k: RETURNCODE)
 
     async def _twice():
         for _ in range(2):

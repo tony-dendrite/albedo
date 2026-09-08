@@ -35,6 +35,7 @@ from albedo_eval_service.shared.observation_format import (
     has_content,
     impossible_success,
     leaked_turn,
+    narrated_observation,
     pipeline_returncode_override,
     prints_nothing_on_success,
     renumbered_view,
@@ -1208,6 +1209,8 @@ def _unusable_observation_reason(raw: str, fmt: str, command: str) -> str:
         return "invalid_format"
     if degenerate_observation(raw):
         return "degenerate_lines"
+    if narrated_observation(raw, fmt):
+        return "narrated"
     if impossible_success(raw, fmt, command):
         return "shell_error_with_rc_0"
     if stuttered := stuttered_lines(raw):

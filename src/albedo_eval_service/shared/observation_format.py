@@ -276,6 +276,20 @@ def degenerate_observation(text: str) -> bool:
     return repeated / len(lines) >= _MAX_LINE_SHARE
 
 
+_NARRATION_RE = re.compile(
+    r"^(?:I'll |I will |I need to |I should |I can see |Let me |Let's |"
+    r"The user (?:wants|asked|is asking|has asked)|Now (?:I'll |I will |let me ))",
+    re.IGNORECASE,
+)
+
+
+def narrated_observation(raw: str, fmt: str) -> bool:
+    first = next(
+        (line.strip() for line in observation_body(raw, fmt).splitlines() if line.strip()), ""
+    )
+    return bool(_NARRATION_RE.match(first))
+
+
 def retry_feedback(reason: str) -> str:
     """What to tell the model so its next attempt is usable."""
     if "token limit" in reason:

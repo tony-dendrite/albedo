@@ -19,6 +19,7 @@ from albedo_eval_service.shared.observation_format import (
     grounded_observation,
     is_scaffold_truncated,
     is_truncated,
+    narrated_observation,
     no_output_notice,
     observation_body,
     prints_nothing_on_success,
@@ -438,3 +439,22 @@ def test_a_heredoc_alone_is_not_a_silent_write():
     # tee copies its input to stdout as well as to the file
     assert not prints_nothing_on_success("tee f.py <<'EOF'\nx\nEOF")
     assert prints_nothing_on_success("cat <<'EOF' > f.py\nx\nEOF")
+
+
+def test_narrated_observation_rejects_the_simulator_speaking_as_the_agent():
+    narration = (
+        "The user wants me to look at the `_Unstacker.get_new_values` method around line 262. "
+        "Let me view that section."
+    )
+    assert narrated_observation(narration, OPENHANDS)
+    assert narrated_observation("I'll run the test to verify the fix works.", OPENHANDS)
+    assert narrated_observation(
+        "<returncode>0</returncode>\n<output>\nLet me verify the changes.\n</output>", RETURNCODE
+    )
+    assert narrated_observation("OBSERVATION:\nI need to be careful here.", SWE_AGENT)
+    assert not narrated_observation(
+        "   255\t    def get_new_values(self, values, fill_value=None):", OPENHANDS
+    )
+    assert not narrated_observation("README.md\nI_will_not_match.txt\nsetup.py", OPENHANDS)
+    assert not narrated_observation("Looking at the logs, nothing failed.", OPENHANDS)
+    assert not narrated_observation("", OPENHANDS)
