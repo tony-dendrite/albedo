@@ -805,6 +805,7 @@ def test_prepare_anchors_on_reference_and_filters_leaks():
     }
     # the near-miss has to survive under the name the judge reads it by
     assert all(q["example_bad"] for q in result.questions)
+    assert all(q["milestone_statement"].startswith("Run the check") for q in result.questions)
     assert all("unearned" not in q for q in result.questions)
     # every question weighs the same: a milestone chooses what is asked, not what an answer is
     # worth, so nothing normalises per milestone and no question carries its own weight

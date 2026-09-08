@@ -596,8 +596,9 @@ class QuestionService:
         )
 
         tags = {str(m.get("id")): milestone_tag(str(m.get("category") or "")) for m in milestones}
+        statements = {str(m.get("id")): str(m.get("statement") or "") for m in milestones}
         merged = [
-            {**question, "rung": index, "tag": tags[mid]}
+            {**question, "rung": index, "tag": tags[mid], "milestone_statement": statements[mid]}
             for mid in order
             for index, question in enumerate(by_id.get(mid, []), start=1)
         ]

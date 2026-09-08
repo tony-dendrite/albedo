@@ -372,12 +372,23 @@ function votesText(king, chal) {
   return `ok · ${held} votes · ${(king.disputed ?? 0) + (chal.disputed ?? 0)} disputed`;
 }
 
+// ladder questions come grouped by milestone: a header row opens each group
 function questionList(record, p) {
+  const qs = record.questions || [];
+  const rows = [];
+  qs.forEach((q, i) => {
+    if (q.milestone && (i === 0 || qs[i - 1].milestone !== q.milestone)) rows.push(milestoneRow(q));
+    rows.push(questionRow(q, p));
+  });
   return el("div", { class: "q-list" },
     el("div", { class: "q-head" },
       el("span", {}, "#"), el("span", {}, "question"),
       el("span", { class: "c" }, "king"), el("span", { class: "c" }, "chal")),
-    (record.questions || []).map(q => questionRow(q, p)));
+    rows);
+}
+
+function milestoneRow(q) {
+  return el("div", { class: "q-ms" }, el("b", {}, q.milestone), q.milestone_statement || "");
 }
 
 function answerGlyphs(sideMap, judges, qid) {
