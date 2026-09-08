@@ -151,7 +151,9 @@ function methodologyNotes(model, run) {
       `Evaluated using ${modelName(model)} as ${run.pulled_run_id}.`,
       `Agent harness: mini-swe-agent. Metric: Pass@1.`,
       `Scores, predictions and trajectories are published by the benchmarking service;`,
-      `per-instance outcomes come from its ${pulled.key} grading report.`,
+      run.report_uri
+        ? `per-instance outcomes come from its ${pulled.key} grading report.`
+        : `no ${pulled.key} grading report was published for this run, so instances are listed from its predictions without per-instance outcomes.`,
     ].join(" ");
   }
   if (run?.suite === "swe_rebench_2026_03") {
@@ -248,15 +250,33 @@ function reportTaskResults(pulled, run, report) {
   }));
 }
 
+function predsUrl(pulled, run) {
+  const base = pulled.predsEndpoints?.[0];
+  if (!base || !run?.pulled_run_id) return null;
+  return absolute(`${base}/${run.pulled_run_id}/preds.json`);
+}
+
+function predsTaskResults(pulled, run, preds) {
+  const ids = Array.isArray(preds) ? preds.map(p => p?.instance_id) : Object.keys(preds || {});
+  return ids.filter(Boolean).sort().map(id => ({
+    task_name: id,
+    state: "SUBMITTED",
+    score: null,
+    artifact_uri: trajectoryUrl(pulled, run, id),
+  }));
+}
+
 // A score row only exists once the service has graded the run, so the report is the
-// source for both the task rows and their outcome. Runs published before the service
-// started uploading reports simply show no task rows, as they did before.
+// source for both the task rows and their outcome; the preds file is the fallback.
 async function loadPulledRun(run) {
   const pulled = pulledRunFor(run);
   if (!pulled) return run;
   const url = reportUrl(pulled, run);
   const report = url ? await fetchJson(url) : null;
-  if (!report) return run;
+  if (!report) {
+    const preds = await fetchJson(predsUrl(pulled, run));
+    return preds ? { ...run, task_results: predsTaskResults(pulled, run, preds) } : run;
+  }
   return {
     ...run,
     report_uri: url,
