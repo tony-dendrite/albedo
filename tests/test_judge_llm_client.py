@@ -14,14 +14,7 @@ def test_openrouter_payload_respects_provider_structured_output_support():
 
     plain_payload = payloads[0]
     assert plain_payload["model"] == "z-ai/glm-5.2"
-    assert plain_payload["provider"]["order"] == [
-        "baidu",
-        "streamlake",
-        "novita",
-        "reka",
-        "phala",
-        "alibaba",
-    ]
+    assert plain_payload["provider"]["order"] == ["streamlake", "baidu", "alibaba", "phala"]
     assert plain_payload["provider"]["quantizations"] == ["fp8"]
     assert plain_payload["provider"]["allow_fallbacks"] is False
     assert plain_payload["provider"]["require_parameters"] is True
@@ -29,14 +22,7 @@ def test_openrouter_payload_respects_provider_structured_output_support():
 
     schema_payload = payloads[1]
     assert schema_payload["model"] == "z-ai/glm-5.2"
-    assert schema_payload["provider"]["order"] == [
-        "baidu",
-        "streamlake",
-        "novita",
-        "reka",
-        "phala",
-        "alibaba",
-    ]
+    assert schema_payload["provider"]["order"] == ["streamlake", "baidu", "alibaba", "phala"]
     assert schema_payload["provider"]["quantizations"] == ["fp8"]
     assert schema_payload["provider"]["allow_fallbacks"] is False
     assert schema_payload["provider"]["require_parameters"] is True

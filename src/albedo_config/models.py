@@ -6,13 +6,13 @@ JUDGE_PROVIDER_PINS: dict[str, dict[str, object]] = {
     model: {
         "allow_fallbacks": False,
         "quantizations": ["fp8"],
-        "order": ["baidu", "streamlake", "novita", "reka", "phala", "alibaba"],
+        "order": ["streamlake", "baidu", "alibaba", "phala"],
     }
     for model in JUDGE_MODELS
 }
 
 EVALUATOR_MODEL = "z-ai/glm-5.2"
-EVALUATOR_PROVIDERS = "baidu,streamlake"
+EVALUATOR_PROVIDERS = "streamlake,baidu"
 SOTA_MODELS = "z-ai/glm-5.2"
 SIMULATION_MODEL = "deepseek/deepseek-v4-flash-0731"
 SIMULATION_PROVIDERS = "baidu,streamlake,deepinfra"
