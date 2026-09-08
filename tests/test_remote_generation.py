@@ -132,6 +132,23 @@ def test_context_exhausted_prompt_is_sidelined_without_a_request():
     assert len(gen._client.bodies) == 1  # the over-budget prompt never reached the server
 
 
+def test_a_dropped_connection_is_retried_once():
+    answers = iter([httpx.ReadError("[Errno 9] Bad file descriptor"), _completion("a", "stop", 3)])
+
+    def handler(body):
+        outcome = next(answers)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    gen = _ready(_make_gen(max_model_len=None), handler)
+
+    (result,) = gen.generate([EvalSample("s1", "p")])
+
+    assert result.text == "a" and result.error is None
+    assert len(gen._client.bodies) == 2
+
+
 def test_request_failure_becomes_an_error_result():
     gen = _ready(_make_gen(max_model_len=None), lambda body: (503, {}))
 

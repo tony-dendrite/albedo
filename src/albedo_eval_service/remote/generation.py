@@ -148,7 +148,13 @@ class VllmServerGenerator:
         if self.top_k is not None:
             body["top_k"] = self.top_k
         try:
-            response = self._client.post("/v1/completions", json=body)
+            for attempt in range(2):
+                try:
+                    response = self._client.post("/v1/completions", json=body)
+                    break
+                except httpx.TransportError:
+                    if attempt:
+                        raise
             response.raise_for_status()
             payload = response.json()
         except Exception as exc:
