@@ -487,6 +487,38 @@ def _pairs_worker(scorer):
     )
 
 
+def test_score_pairs_retries_when_our_side_lost_the_pairs():
+    class NeverCalled:
+        def score(self, **_kwargs):
+            raise AssertionError("scorer must not run when too few pairs are valid")
+
+        def simulate_observation(self, **_kwargs):
+            return ""
+
+    samples = [_trajectory_sample(f"s{index}") for index in range(10)]
+    healthy = [GenerationResult(sample.sample_id, "out") for sample in samples]
+    # the king box failed: the miner's model produced every trajectory
+    king_down = [
+        GenerationResult(s.sample_id, "", "vllm timed out") for s in samples[:9]
+    ] + healthy[9:]
+    # the bridge dropped: the challenger's errors are ours, not the miner's
+    bridge_down = [
+        GenerationResult(s.sample_id, "", "ScoreBridgeUnavailable: score bridge disconnected")
+        for s in samples[:9]
+    ] + healthy[9:]
+    for king_results, challenger_results in ((king_down, healthy), (healthy, bridge_down)):
+        summary = _pairs_worker(NeverCalled())._score_pairs(
+            request=_request(),
+            samples=samples,
+            king_results=king_results,
+            challenger_results=challenger_results,
+        )["summary"]
+        assert summary["fault_class"] == "REMOTE_EVAL_FAULT"
+        assert summary["fault_code"] == "insufficient_valid_samples"
+        assert summary["retryable"] is True
+        assert summary["valid_turns"] == 1
+
+
 def test_score_pairs_is_terminal_when_too_few_valid_pairs():
     class NeverCalled:
         def score(self, **_kwargs):

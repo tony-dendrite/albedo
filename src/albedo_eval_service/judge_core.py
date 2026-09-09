@@ -189,9 +189,9 @@ def challenger_beats_king(score_challenger: float, score_king: float) -> bool:
 
 
 def aggregate_scores(
-    records: list[dict[str, Any]], *, min_valid_fraction: float = 0.8
+    records: list[dict[str, Any]], *, min_valid_fraction: float = 0.8, total: int | None = None
 ) -> dict[str, Any]:
-    total = len(records)
+    total = total or len(records)
     valid = [r for r in records if r.get("scored")]
     valid_count = len(valid)
     judge_errors = sum(

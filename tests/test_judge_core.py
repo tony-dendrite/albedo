@@ -144,6 +144,14 @@ def test_aggregate_scores_crowns_on_margin():
     assert below["challenger_won"] is False
 
 
+def test_aggregate_scores_measures_the_floor_against_the_draw():
+    records = [_record(0.30, 0.36) for _ in range(7)]
+    assert aggregate_scores(records)["state"] == "succeeded"
+    # 7 scored pairs out of 10 drawn is under the floor even though every surviving pair scored
+    assert aggregate_scores(records, total=10)["fault_code"] == "scoring_invalid"
+    assert aggregate_scores(records, total=8)["state"] == "succeeded"
+
+
 def test_aggregate_scores_averages_corrupted_zeros_into_the_score():
     records = [_record(0.50, 0.55) for _ in range(80)] + [_record(0.50, 0.0) for _ in range(20)]
     summary = aggregate_scores(records, min_valid_fraction=0.8)

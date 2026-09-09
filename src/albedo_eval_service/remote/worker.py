@@ -592,6 +592,11 @@ class RemoteEvalWorker:
         total_sample_count = len(samples)
         min_valid_fraction = self.settings.scoring_min_valid_fraction
         if total_sample_count == 0 or valid_pair_count / total_sample_count < min_valid_fraction:
+            miner_failures = _miner_failed_pair_count(samples, king_results, challenger_results)
+            ours = (
+                total_sample_count == 0
+                or miner_failures / total_sample_count <= 1 - min_valid_fraction
+            )
             return {
                 "records": [],
                 "summary": {
@@ -603,13 +608,14 @@ class RemoteEvalWorker:
                     "total_turns": total_sample_count,
                     "judge_errors": 0,
                     "scored_sample_count": 0,
-                    "fault_class": "MINER_FAULT",
+                    "fault_class": "REMOTE_EVAL_FAULT" if ours else "MINER_FAULT",
                     "fault_code": "insufficient_valid_samples",
                     "fault_message": (
                         f"Only {valid_pair_count}/{total_sample_count} sample pairs had both "
-                        f"king and challenger output (< {min_valid_fraction:.0%})"
+                        f"king and challenger output (< {min_valid_fraction:.0%}); "
+                        f"{miner_failures} failed on the challenger alone"
                     ),
-                    "retryable": False,
+                    "retryable": ours,
                 },
             }
         try:
@@ -805,6 +811,31 @@ def _rollout_horizons(samples: list[EvalSample]) -> dict[str, int]:
     rows = {dataset_sample_id(sample.sample_id): sample for sample in samples}
     horizons = assign_horizons([replace(sample, sample_id=row) for row, sample in rows.items()])
     return {sample.sample_id: horizons[dataset_sample_id(sample.sample_id)] for sample in samples}
+
+
+_INFRA_ERROR_MARKERS = (
+    "ScoreBridgeUnavailable",
+    "ObservationSimulationUnavailable",
+    "missing_observation",
+)
+
+
+def _miner_failed_pair_count(
+    samples: list[EvalSample],
+    king_results: list[GenerationResult],
+    challenger_results: list[GenerationResult],
+) -> int:
+    king_by_id = {result.sample_id: result for result in king_results}
+    challenger_by_id = {result.sample_id: result for result in challenger_results}
+    return sum(
+        1
+        for sample in samples
+        if (challenger := challenger_by_id.get(sample.sample_id)) is not None
+        and challenger.error
+        and not any(marker in challenger.error for marker in _INFRA_ERROR_MARKERS)
+        and (king := king_by_id.get(sample.sample_id)) is not None
+        and not king.error
+    )
 
 
 def _valid_generated_pair_count(

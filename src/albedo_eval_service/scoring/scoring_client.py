@@ -129,7 +129,10 @@ class HttpScoringClient:
         return ScoringResult(
             records=all_records,
             summary=_merge_summaries(
-                all_records, summaries, min_valid_fraction=self.settings.scoring_min_valid_fraction
+                all_records,
+                summaries,
+                min_valid_fraction=self.settings.scoring_min_valid_fraction,
+                total=len(samples),
             ),
         )
 
@@ -184,7 +187,10 @@ class WebSocketScoringClient:
         return ScoringResult(
             records=all_records,
             summary=_merge_summaries(
-                all_records, summaries, min_valid_fraction=self.settings.scoring_min_valid_fraction
+                all_records,
+                summaries,
+                min_valid_fraction=self.settings.scoring_min_valid_fraction,
+                total=len(samples),
             ),
         )
 
@@ -255,7 +261,9 @@ class MockScoringClient:
         return ScoringResult(
             records=records,
             summary=aggregate_scores(
-                records, min_valid_fraction=self.settings.scoring_min_valid_fraction
+                records,
+                min_valid_fraction=self.settings.scoring_min_valid_fraction,
+                total=len(samples),
             ),
         )
 
@@ -420,8 +428,9 @@ def _merge_summaries(
     summaries: list[dict[str, Any]],
     *,
     min_valid_fraction: float,
+    total: int | None = None,
 ) -> dict[str, Any]:
-    summary = aggregate_scores(records, min_valid_fraction=min_valid_fraction)
+    summary = aggregate_scores(records, min_valid_fraction=min_valid_fraction, total=total)
     if summaries:
         summary["batch_summaries"] = summaries
     return summary
