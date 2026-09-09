@@ -13,13 +13,13 @@ from model_validation.dedup.signals import (
 )
 
 # Reject reasons, split by how they can fail.  Exact reasons fire on identical bytes
-# (tensors_hash) or on rel_dist under DEDUP_COPY_REL — identical up to float noise, two orders
-# below a bf16 round-trip; heuristic reasons rest on calibrated thresholds and can false-positive.
+# (tensors_hash) or on rel_dist under DEDUP_COPY_REL.
 EXACT_REASONS = frozenset({"COPY", "OWN-COPY"})
 HEURISTIC_REASONS = frozenset(
     {"LINEAR-COMBO", "NOISE-COPY", "NOISED-COPY", "SPARSE-EDIT", "TRIVIAL-EDIT"}
 )
 ALL_REASONS = EXACT_REASONS | HEURISTIC_REASONS
+BLOCK_REASONS = EXACT_REASONS | {"NOISE-COPY", "NOISED-COPY"}
 
 
 @dataclass(frozen=True)

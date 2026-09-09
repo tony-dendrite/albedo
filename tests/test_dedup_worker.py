@@ -72,18 +72,32 @@ def test_heuristic_reject_is_shadowed_under_the_default_allowlist(monkeypatch, t
 def test_heuristic_reject_is_a_strike_not_a_permanent_block_when_allowlisted(monkeypatch, tmp_path):
     """Opting a heuristic in must not reuse `duplicate`, the code that blocks a hotkey forever."""
     v = Verdict(
-        "REJECT", "NOISE-COPY", "ns/king@b", "bulk", [], {"F": 0.05, "ancestor_hotkey": "hk2"}
+        "REJECT", "LINEAR-COMBO", "ns/king@b", "combo", [], {"F": 0.05, "ancestor_hotkey": "hk2"}
     )
     out, _ = _run(
         monkeypatch,
         tmp_path,
         GateResult(verdict=v),
         enforce=True,
-        reasons="COPY,OWN-COPY,NOISE-COPY",
+        reasons="COPY,OWN-COPY,LINEAR-COMBO",
     )
     assert out.state == "failed" and out.fault_code == "duplicate_heuristic"
     assert out.fault_code != "duplicate", "must not trigger hotkey_duplicate_blocked"
     assert out.result_summary["metrics"]["F"] == 0.05
+
+
+@pytest.mark.parametrize("reason", ["NOISE-COPY", "NOISED-COPY"])
+def test_noise_reject_allowlisted_blocks_the_hotkey_permanently(monkeypatch, tmp_path, reason):
+    """Both noise reasons are banned outright: `duplicate`, so hotkey_duplicate_blocked follows."""
+    v = Verdict("REJECT", reason, "ns/king@b", "bulk", [], {"F": 0.05, "ancestor_hotkey": "hk2"})
+    out, _ = _run(
+        monkeypatch,
+        tmp_path,
+        GateResult(verdict=v),
+        enforce=True,
+        reasons=f"COPY,OWN-COPY,{reason}",
+    )
+    assert out.state == "failed" and out.fault_code == "duplicate" and not out.retryable
 
 
 def test_star_enforces_every_reason(monkeypatch, tmp_path):

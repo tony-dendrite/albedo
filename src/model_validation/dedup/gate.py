@@ -12,7 +12,7 @@ from model_validation.dedup.signals import mats, rel_dist
 from model_validation.dedup.sketch import fingerprint
 from model_validation.dedup.verdict import (
     ALL_REASONS,
-    HEURISTIC_REASONS,
+    BLOCK_REASONS,
     Thresholds,
     Verdict,
     decide,
@@ -60,14 +60,12 @@ def enforces(reason: str | None) -> bool:
 
 
 def fault_code(reason: str | None) -> str:
-    """Only `COPY` maps to `duplicate`, the one code that permanently blocks a hotkey
-    (db.hotkey_duplicate_block_reason filters on it); a heuristic costs a strike instead."""
+    """Only BLOCK_REASONS map to `duplicate`, the one code that permanently blocks a hotkey
+    (db.hotkey_duplicate_block_reason filters on it); anything else costs a strike instead."""
     r = (reason or "").upper()
-    if r == "OWN-COPY":
+    if r == "OWN-COPY":  # in BLOCK_REASONS, but carries its own code
         return "duplicate_own"
-    if r in HEURISTIC_REASONS:
-        return "duplicate_heuristic"
-    return "duplicate"
+    return "duplicate" if r in BLOCK_REASONS else "duplicate_heuristic"
 
 
 def device() -> torch.device:

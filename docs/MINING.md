@@ -119,12 +119,13 @@ accepted on the subnet. Four verdicts can fault a submission:
 |---|---|---|
 | `COPY` | weights (or their fingerprint) identical to another miner's accepted model | `duplicate` — **permanently blocks the hotkey** |
 | `OWN-COPY` | identical to a model you already had accepted | `duplicate_own` |
-| `NOISE-COPY` | the change from the nearest accepted model is spectral noise, not training | `duplicate_heuristic` |
-| `NOISED-COPY` | dense noise, not training | `duplicate_heuristic` |
+| `NOISE-COPY` | the change from the nearest accepted model is spectral noise, not training | `duplicate` — **permanently blocks the hotkey** |
+| `NOISED-COPY` | dense noise, not training | `duplicate` — **permanently blocks the hotkey** |
 
 Copying a model and perturbing the weights does not work: both noise verdicts exist to catch
-exactly that. Other near-duplicate signals (`LINEAR-COMBO`,
-`SPARSE-EDIT`, `TRIVIAL-EDIT`) are recorded but do **not** fault a submission yet.
+exactly that, and both cost the hotkey permanently rather than a single strike. Other
+near-duplicate signals (`LINEAR-COMBO`, `SPARSE-EDIT`, `TRIVIAL-EDIT`) are recorded but do
+**not** fault a submission yet.
 
 ---
 
