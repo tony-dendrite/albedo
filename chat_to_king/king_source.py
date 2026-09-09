@@ -38,7 +38,8 @@ ORDER BY kv.version ASC
 
 _QWEN_PATTERNS = ("qwen3.6", "qwen3-6", "qwen3_6")
 _SIZE_PATTERNS = ("35b", "35-b")
-_GENESIS_MARKERS = ("qwen3.6-35b-a3b-genesis", "35b-a3b-genesis")
+_GENESIS_MARKERS = ("qwen3.6-35b-a3b-genesis", "35b-a3b-genesis", "king-genesis")
+_PRIVATE_STORE_PREFIX = "s3://"
 _ROMAN_NUMERALS = (
     (1000, "M"),
     (900, "CM"),
@@ -87,13 +88,20 @@ def _lineage_roman(conn, king_version: int) -> str:
             str(row[key] or "")
             for key in ("model_uri", "artifact_uri", "architecture", "parameter_count")
         ).lower()
-        if not (any(p in text for p in _QWEN_PATTERNS) and any(p in text for p in _SIZE_PATTERNS)):
-            continue
         repo = (row["model_uri"] or row["artifact_uri"] or "").lower()
-        if row["reason"].upper() == "GENESIS" or any(m in repo for m in _GENESIS_MARKERS):
+        private_store = repo.startswith(_PRIVATE_STORE_PREFIX)
+        if not private_store and not (
+            any(p in text for p in _QWEN_PATTERNS) and any(p in text for p in _SIZE_PATTERNS)
+        ):
+            continue
+        if row["reason"].upper() == "GENESIS" or _is_genesis(repo):
             continue
         number += 1
     return _to_roman(number) if number else ""
+
+
+def _is_genesis(model_uri: str) -> bool:
+    return any(m in model_uri.lower() for m in _GENESIS_MARKERS)
 
 
 def _resolve_dsn(settings: KingChatSettings) -> str:
@@ -128,7 +136,11 @@ def current_king(settings: KingChatSettings) -> King | None:
             if not row or not row.get("model_uri"):
                 logger.warning("[king-chat] no active king found (empty reign?)")
                 return None
-            roman = _lineage_roman(conn, int(row["king_version"]))
+            roman = (
+                "GENESIS"
+                if _is_genesis(row["model_uri"])
+                else _lineage_roman(conn, int(row["king_version"]))
+            )
     except Exception as exc:
         logger.warning("[king-chat] king query failed: {}", exc)
         return None

@@ -10,7 +10,8 @@ from config import KingChatSettings
 _HF_API = "https://huggingface.co/api/models"
 _HF_RAW = "https://huggingface.co"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-_ORIGINAL_RE = re.compile(r"Original HuggingFace repository:\*\*\s*\[`([^`]+)`\]")
+_ORIGINAL_RE = re.compile(r"Original [^:*]*repository:\*\*\s*\[`([^`]+)`\]")
+_HOTKEY_RE = re.compile(r"Submitted by miner hotkey:\*\*\s*`([^`]+)`")
 _INDEX = "model.safetensors.index.json"
 
 
@@ -27,7 +28,7 @@ def mirror_repo_id(roman: str, settings: KingChatSettings) -> str:
     return f"{namespace}/{settings.hf_repo_prefix}-{roman}".lower()
 
 
-def mirror_revision(repo_id: str, original_repo: str) -> str:
+def mirror_revision(repo_id: str, original_repo: str, hotkey: str | None) -> str:
     token = _token()
     try:
         info = _get(f"{_HF_API}/{repo_id}", token, as_json=True)
@@ -42,10 +43,15 @@ def mirror_revision(repo_id: str, original_repo: str) -> str:
     if missing:
         raise MirrorNotReady(f"{repo_id} incomplete: {', '.join(missing[:8])}")
 
-    mirrored = _original_repo(repo_id, sha, token)
-    if mirrored and original_repo and mirrored.lower() != original_repo.lower():
+    mirrored, mirrored_hotkey = _origin(repo_id, sha, token)
+    original_repo = original_repo.lower().removeprefix("s3://")
+    if mirrored and original_repo and mirrored.lower() != original_repo:
         raise MirrorNotReady(
             f"{repo_id} mirrors {mirrored}, not the current king's {original_repo}"
+        )
+    if mirrored_hotkey and hotkey and mirrored_hotkey != hotkey:
+        raise MirrorNotReady(
+            f"{repo_id} was submitted by {mirrored_hotkey}, not the current king's {hotkey}"
         )
     return sha
 
@@ -65,12 +71,14 @@ def _missing_files(repo_id: str, sha: str, present: set[str], token: str | None)
     return missing + sorted({s for s in weight_map.values() if s not in present})
 
 
-def _original_repo(repo_id: str, sha: str, token: str | None) -> str:
+def _origin(repo_id: str, sha: str, token: str | None) -> tuple[str, str]:
     try:
-        match = _ORIGINAL_RE.search(_get(f"{_HF_RAW}/{repo_id}/raw/{sha}/albedo.md", token))
+        text = _get(f"{_HF_RAW}/{repo_id}/raw/{sha}/albedo.md", token)
     except Exception:
-        return ""
-    return match.group(1) if match else ""
+        return "", ""
+    repo = _ORIGINAL_RE.search(text)
+    hotkey = _HOTKEY_RE.search(text)
+    return (repo.group(1) if repo else ""), (hotkey.group(1) if hotkey else "")
 
 
 def _get(url: str, token: str | None, *, as_json: bool = False):

@@ -23,6 +23,8 @@ from sanity_remote.worker import (
     _strip_model_config,
 )
 
+_MIRROR_RETRY_MINUTES = (5, 5, 15, 30, 60)
+
 
 def _model_complete(model_dir: str) -> bool:
     return _model_present(model_dir) and (Path(model_dir) / "config.json").exists()
@@ -35,6 +37,9 @@ class KingVllmEngine:
         self._loaded_digest = ""
         self._loaded_dir = ""
         self._prev_dir = ""
+        self._pending_digest = ""
+        self._pending_attempts = 0
+        self._next_attempt_at = 0.0
         self._lock = asyncio.Lock()
         self.reloading = False
         self.serving_king: King | None = None
@@ -52,6 +57,8 @@ class KingVllmEngine:
         async with self._lock:
             if king.digest == self._loaded_digest and await self._healthy():
                 return
+            if king.digest == self._pending_digest and time.time() < self._next_attempt_at:
+                return
             logger.info(
                 "[king-chat] coronation: digest={:.16} uid={} v={} uri={}",
                 king.digest,
@@ -67,13 +74,21 @@ class KingVllmEngine:
                 )
             except MirrorNotReady as exc:
                 self.incoming_king = None
-                logger.info("[king-chat] waiting for HF mirror (keeping current king): {}", exc)
+                self._schedule_retry(king.digest)
+                logger.info(
+                    "[king-chat] waiting for HF mirror (keeping current king), "
+                    "next check in {} min: {}",
+                    int((self._next_attempt_at - time.time()) / 60),
+                    exc,
+                )
                 return
             except Exception as exc:
                 self.incoming_king = None
                 logger.error("[king-chat] download failed (keeping current king): {}", exc)
                 return
 
+            self._pending_digest = ""
+            self._pending_attempts = 0
             self.reloading = True
             try:
                 await self._kill_vllm()
@@ -93,6 +108,14 @@ class KingVllmEngine:
             finally:
                 self.reloading = False
                 self.incoming_king = None
+
+    def _schedule_retry(self, digest: str) -> None:
+        if digest != self._pending_digest:
+            self._pending_digest = digest
+            self._pending_attempts = 0
+        delay = _MIRROR_RETRY_MINUTES[min(self._pending_attempts, len(_MIRROR_RETRY_MINUTES) - 1)]
+        self._pending_attempts += 1
+        self._next_attempt_at = time.time() + delay * 60
 
     async def restart_loaded(self) -> None:
         async with self._lock:
@@ -117,7 +140,7 @@ class KingVllmEngine:
             repo, ref_digest = original_repo, original_digest
         else:
             repo = mirror_repo_id(king.roman, self._s)
-            ref_digest = await asyncio.to_thread(mirror_revision, repo, original_repo)
+            ref_digest = await asyncio.to_thread(mirror_revision, repo, original_repo, king.hotkey)
         ref = make_ref(repo, ref_digest)
         dest = str(cache_dir(ref))
         if _model_complete(dest):
