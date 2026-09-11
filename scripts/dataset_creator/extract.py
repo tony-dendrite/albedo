@@ -37,28 +37,39 @@ def sanitize(model: str) -> str:
     return re.sub(r"\W+", "_", model.split("/", 1)[-1]).strip("_").lower()
 
 
+def _references(qs: dict) -> list[tuple[str, str]]:
+    """(model, trajectory) pairs; the 2026-09-07 format carries three references as lists."""
+    models = qs.get("reference_models") or [qs.get("reference_model")]
+    trajs = qs.get("reference_trajectories") or [qs.get("reference_trajectory")]
+    return [(m, t) for m, t in zip(models, trajs) if m and t]
+
+
 def extract_rows(run_dir: Path) -> dict[str, list[dict]]:
     run_id = run_dir.name
     prompts = {}
     with open(run_dir / "generated-samples.jsonl") as f:
         for line in f:
             rec = json.loads(line)
-            prompts[rec["sample_id"]] = rec["prompt"]
+            prompts[rec["sample_id"].split("#")[0]] = rec["prompt"]
     by_model: dict[str, list[dict]] = {}
+    seen: set[tuple[str, str]] = set()  # every rollout record repeats the sample's references
     with open(run_dir / "scoring-results.jsonl") as f:
         for line in f:
             rec = json.loads(line)
-            qs = rec.get("question_source") or {}
-            ref_model, ref_traj = qs.get("reference_model"), qs.get("reference_trajectory")
-            if not ref_model or not ref_traj or rec["sample_id"] not in prompts:
+            sample_id = rec["sample_id"].split("#")[0]
+            if sample_id not in prompts:
                 continue
-            system, user = parse_system_user(prompts[rec["sample_id"]])
-            messages = [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-                *parse_trajectory(ref_traj),
-            ]
-            by_model.setdefault(sanitize(ref_model), []).append(
-                {"sample_id": rec["sample_id"], "messages": messages, "_run_id": run_id}
-            )
+            for ref_model, ref_traj in _references(rec.get("question_source") or {}):
+                if (sample_id, ref_traj) in seen:
+                    continue
+                seen.add((sample_id, ref_traj))
+                system, user = parse_system_user(prompts[sample_id])
+                messages = [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                    *parse_trajectory(ref_traj),
+                ]
+                by_model.setdefault(sanitize(ref_model), []).append(
+                    {"sample_id": sample_id, "messages": messages, "_run_id": run_id}
+                )
     return by_model
