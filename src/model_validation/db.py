@@ -111,6 +111,7 @@ async def claim_next(
                 JOIN chain_commits cc ON cc.id = ms.chain_commit_id
                 LEFT JOIN miners m ON m.hotkey = ms.hotkey
                 WHERE ms.state IN ('SUBMITTED', 'HIPPIUS_RETRYABLE')
+                    AND (m.coldkey IS NOT NULL OR ms.created_at < now() - interval '5 minutes')
                 ORDER BY cc.block_number ASC, ms.priority ASC, ms.created_at ASC
                 FOR UPDATE OF ms SKIP LOCKED
                 LIMIT 1
