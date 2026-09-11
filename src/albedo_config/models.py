@@ -14,11 +14,11 @@ JUDGE_PROVIDER_PINS: dict[str, dict[str, object]] = {
 EVALUATOR_MODEL = "z-ai/glm-5.2"
 EVALUATOR_PROVIDERS = "streamlake,baidu"
 SOTA_MODELS = "z-ai/glm-5.2"
-SIMULATION_MODEL = "deepseek/deepseek-v4-flash-0731"
-SIMULATION_PROVIDERS = "baidu,streamlake,deepinfra"
+SIMULATION_MODEL = "deepseek/deepseek-v4.1-flash"
+SIMULATION_PROVIDERS = "deepseek,siliconflow,novita,gmicloud"
 
 JUDGE_PROVIDER_PINS[SIMULATION_MODEL] = {
     "allow_fallbacks": False,
-    "order": ["baidu", "streamlake", "deepinfra"],
+    "order": ["deepseek", "siliconflow", "novita", "gmicloud"],
 }
 ENGY_MODELS = "z-ai/glm-5.2,deepseek/deepseek-v4-flash-0731"
