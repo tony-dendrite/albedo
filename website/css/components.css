@@ -854,27 +854,8 @@ a.bench-tile-score:hover { color: var(--color-accent); }
   color: var(--color-fg-2);
   margin: 2px 0 7px;
 }
-.bench-tile-chart svg { display: block; width: 100%; height: 104px; }
-.bench-tile-chart svg.bench-spark { height: 64px; margin: 20px 0; }
-.bench-tile-legend {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px 10px;
-  margin-top: 4px;
-  font-family: var(--font-mono);
-  font-size: 8px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--color-fg-3);
-}
-.bench-legend-item { display: inline-flex; align-items: center; gap: 4px; }
-.bench-legend-swatch { display: inline-block; width: 8px; height: 8px; border-radius: 1px; }
-.bench-legend-swatch.gain { background: var(--color-gold); }
-.bench-legend-swatch.base { background: #b5842a; }
-.bench-legend-swatch.ref { background: var(--color-accent); }
-.bench-legend-swatch.below { background: #6a6a6a; }
-.bench-legend-swatch.gap { height: 0; border-top: 1px dashed var(--color-bad); opacity: 0.85; }
+.bench-tile-chart svg { display: block; width: 100%; height: 64px; }
+.bench-tile-chart .spark-dot-last { fill: var(--color-gold); }
 .bench-tile-status {
   display: flex;
   justify-content: space-between;

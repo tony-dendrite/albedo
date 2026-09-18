@@ -358,151 +358,14 @@ function svgEl(tag, attrs = {}, ...children) {
   return node;
 }
 
-function shortLabel(model) {
-  return modelLabel(model).replace(/^ALBEDO-/i, "");
-}
-
-function barPath(x, top, w, h, r = 4) {
-  if (h <= 0) return "";
-  const rr = Math.min(r, w / 2, h);
-  const bottom = top + h;
-  return `M ${x.toFixed(1)},${bottom.toFixed(1)} V ${(top + rr).toFixed(1)} `
-    + `Q ${x.toFixed(1)},${top.toFixed(1)} ${(x + rr).toFixed(1)},${top.toFixed(1)} `
-    + `H ${(x + w - rr).toFixed(1)} Q ${(x + w).toFixed(1)},${top.toFixed(1)} ${(x + w).toFixed(1)},${(top + rr).toFixed(1)} `
-    + `V ${bottom.toFixed(1)} Z`;
-}
-
-const BAR_INK = "#1c1c1c";
-const GOLD_BASE = "#b5842a";   // darker gold for the genesis base, solid so it stays gold on the dark surface
-const BELOW_GREY = "#6a6a6a";  // kings that never reach genesis
-const KINGS_SHOWN = 5;
-const REFERENCE_MODELS = [
-  { label: "GLM 5.2", pattern: /glm-5\.2/i },
-];
-
-// Non-king rows in the pulled score files (frontier references) never become models,
-// so the chart reads them straight off the rows, per suite.
-export function referenceScores(scoresBySuite) {
-  const refs = new Map();
-  for (const pulled of PULLED_SUITES) {
-    const rows = scoresBySuite?.get(pulled.suite) || [];
-    const found = [];
-    for (const ref of REFERENCE_MODELS) {
-      const row = rows.find(r => ref.pattern.test(String(r?.model || r?.run_id || "")));
-      const score = Number(row?.score);
-      if (Number.isFinite(score)) found.push({ label: ref.label, score: score / 100 });
-    }
-    refs.set(pulled.suite, found);
-  }
-  return refs;
-}
-
-function renderBars(sorted, suite, selected, baselineScore = null, refs = [], width = 360) {
-  const H = 104, TOP = 16, FLOOR = 88, GAP = 2;
-  const svg = svgEl("svg", { viewBox: `0 0 ${width} ${H}`, preserveAspectRatio: "none", role: "img" });
-  const kings = sorted
-    .filter(model => !isGenesis(model) && suiteScores(model)[suite]?.score != null)
-    .slice(0, KINGS_SHOWN)
-    .map(model => ({ model, label: shortLabel(model), score: suiteScores(model)[suite].score, current: model === selected }));
-  const references = [
-    baselineScore != null ? { label: "GENESIS", score: baselineScore, genesis: true } : null,
-    ...refs,
-  ].filter(Boolean);
-
-  svg.append(svgEl("line", { x1: 6, y1: FLOOR, x2: width - 6, y2: FLOOR, stroke: "currentColor", "stroke-width": 1, opacity: 0.15 }));
-  if (!kings.length && !references.length) {
-    svg.append(svgEl("text", { x: width / 2, y: 50, "text-anchor": "middle", "font-size": 8, fill: "currentColor", opacity: 0.45 }, "no score"));
-    return { svg, deficit: false };
-  }
-
-  const vals = [...kings, ...references].map(b => b.score);
-  let min = Math.min(...vals), max = Math.max(...vals);
-  if (min === max) { min -= 0.01; max += 0.01; }
-  const span = max - min;
-  // bars share a display range so pp-sized gaps stay visible
-  const lo = Math.max(0, min - span * 0.35);
-  const hi = Math.min(1, max + span * 0.05);
-  const yOf = v => FLOOR - ((Math.max(v, lo) - lo) / (hi - lo)) * (FLOOR - TOP);
-
-  const slots = kings.length + references.length + (kings.length && references.length ? 0.5 : 0);
-  const slotW = (width - 16) / slots;
-  const barW = Math.min(24, slotW * 0.62);
-  let x = 8 + (slotW - barW) / 2;
-  const next = (n = 1) => { x += slotW * n; };
-
-  const capLabel = (cx, y, text, title) => svgEl("text", {
-    x: cx.toFixed(1), y: (y - 4).toFixed(1), "text-anchor": "middle", "font-size": 8,
-    "font-family": "var(--font-mono)", fill: "currentColor",
-  }, title ? svgEl("title", {}, title) : null, text);
-  const nameLabel = (cx, text, strong = false) => svgEl("text", {
-    x: cx.toFixed(1), y: H - 4, "text-anchor": "middle", "font-size": 7, "letter-spacing": "0.04em",
-    "font-family": "var(--font-mono)", "font-weight": strong ? 700 : 400,
-    fill: strong ? "var(--color-gold)" : "currentColor", opacity: strong ? 1 : 0.55,
-  }, text);
-
-  let deficit = false;
-  // every king stacks on the genesis base (muted gold) with its gain on top (solid gold);
-  // a king below genesis is drawn in grey under a dashed genesis-level marker
-  kings.forEach((king, i) => {
-    const cx = x + barW / 2, bx = cx - barW / 2;
-    const kingTop = yOf(king.score);
-    let labelTop = kingTop;
-    const title = `${modelLabel(king.model)} · ${panelScore(king.score)}`;
-    if (baselineScore != null && king.score >= baselineScore) {
-      const baseTop = yOf(baselineScore);
-      const gainH = baseTop - kingTop - GAP;
-      const baseFrom = gainH >= 3 ? baseTop : kingTop;   // a sub-3px gain merges into the base
-      svg.append(svgEl("path", { d: barPath(bx, baseFrom, barW, FLOOR - baseFrom, gainH >= 3 ? 0 : 4), fill: GOLD_BASE },
-        svgEl("title", {}, `genesis base · ${panelScore(baselineScore)}`)));
-      if (gainH >= 3) svg.append(svgEl("path", { d: barPath(bx, kingTop, barW, gainH), fill: "var(--color-gold)" }, svgEl("title", {}, title)));
-      if (i === 0 && FLOOR - baseTop >= 14) {
-        svg.append(svgEl("text", { x: cx.toFixed(1), y: (baseTop + 10).toFixed(1), "text-anchor": "middle", "font-size": 7, "font-family": "var(--font-mono)", fill: BAR_INK },
-          panelScore(baselineScore)));
-      }
-    } else {
-      svg.append(svgEl("path", { d: barPath(bx, kingTop, barW, FLOOR - kingTop), fill: BELOW_GREY }, svgEl("title", {}, title)));
-      if (baselineScore != null) {
-        deficit = true;
-        const baseTop = yOf(baselineScore);
-        svg.append(svgEl("line", {
-          x1: (bx - 3).toFixed(1), y1: baseTop.toFixed(1), x2: (bx + barW + 3).toFixed(1), y2: baseTop.toFixed(1),
-          stroke: "var(--color-bad)", "stroke-width": 1, "stroke-dasharray": "2 2", opacity: 0.85,
-        }, svgEl("title", {}, `genesis level · ${((king.score - baselineScore) * 100).toFixed(1)} pp`)));
-        labelTop = Math.min(kingTop, baseTop);
-      }
-    }
-    svg.append(capLabel(cx, labelTop, panelScore(king.score), title));
-    svg.append(nameLabel(cx, king.label, king.current));
-    next();
-  });
-
-  if (kings.length && references.length) {
-    const dx = x - (slotW - barW) / 2 + slotW * 0.25;
-    svg.append(svgEl("line", { x1: dx.toFixed(1), y1: TOP - 6, x2: dx.toFixed(1), y2: FLOOR, stroke: "currentColor", "stroke-width": 1, "stroke-dasharray": "3 3", opacity: 0.25 }));
-    next(0.5);
-  }
-  for (const ref of references) {
-    const cx = x + barW / 2;
-    const top = yOf(ref.score);
-    svg.append(svgEl("path", {
-      d: barPath(cx - barW / 2, top, barW, FLOOR - top),
-      fill: ref.genesis ? GOLD_BASE : "var(--color-accent)",
-    }, svgEl("title", {}, `${ref.label} · ${panelScore(ref.score)}`)));
-    svg.append(capLabel(cx, top, panelScore(ref.score)));
-    svg.append(nameLabel(cx, ref.label.toUpperCase()));
-    next();
-  }
-  return { svg, deficit };
-}
-
-// full-history trend, shown while the panel is in "show all kings" mode
 function renderSpark(sorted, suite, baselineScore = null, width = 360) {
   const points = [...sorted].reverse()
     .map(model => ({ label: modelLabel(model), score: suiteScores(model)[suite]?.score }))
     .filter(point => point.score != null);
   const FLOOR = 54, TOP = 8;
-  const svg = svgEl("svg", { viewBox: `0 0 ${width} 64`, preserveAspectRatio: "xMidYMid", role: "img", class: "bench-spark" });
+  const svg = svgEl("svg", { viewBox: `0 0 ${width} 64`, preserveAspectRatio: "xMidYMid", role: "img" });
 
+  // line below graph
   svg.append(svgEl("line", { x1: 6, y1: FLOOR, x2: width - 6, y2: FLOOR, stroke: "currentColor", "stroke-width": 1, opacity: 0.15 }));
 
   if (!points.length) {
@@ -514,17 +377,19 @@ function renderSpark(sorted, suite, baselineScore = null, width = 360) {
   let min = Math.min(...scaleVals);
   let max = Math.max(...scaleVals);
   if (min === max) { min -= 0.005; max += 0.005; }
-  const pad = (max - min) * 0.12; min -= pad; max += pad;
+  const pad = (max - min) * 0.12; min -= pad; max += pad;   // breathing room so points/baseline don't hug edges
   const yOf = v => FLOOR - ((v - min) / (max - min)) * (FLOOR - TOP);
   const xOf = i => points.length === 1 ? width / 2 : 6 + (i / (points.length - 1)) * (width - 12);
   const coords = points.map((point, i) => ({ x: xOf(i), y: yOf(point.score), point }));
 
+  // soft area fill under the trend
   if (coords.length > 1) {
     const d = `M ${coords[0].x.toFixed(1)},${FLOOR} `
       + coords.map(c => `L ${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(" ")
       + ` L ${coords[coords.length - 1].x.toFixed(1)},${FLOOR} Z`;
     svg.append(svgEl("path", { d, fill: "currentColor", opacity: 0.08 }));
   }
+  // genesis baseline reference (dashed gold) — points above it beat genesis
   if (baselineScore != null) {
     const by = yOf(baselineScore);
     svg.append(svgEl("line", {
@@ -539,7 +404,7 @@ function renderSpark(sorted, suite, baselineScore = null, width = 360) {
       "stroke-linejoin": "round", "stroke-linecap": "round",
     }));
   }
-  const bestIdx = vals.indexOf(Math.max(...vals));
+  const bestIdx = vals.indexOf(Math.max(...vals));   // best model overall — highlighted gold
   coords.forEach((c, i) => {
     const last = i === coords.length - 1;
     const best = i === bestIdx;
@@ -550,19 +415,6 @@ function renderSpark(sorted, suite, baselineScore = null, width = 360) {
     }, svgEl("title", {}, `${c.point.label} · ${panelScore(c.point.score)}${best ? " · best" : ""}`)));
   });
   return svg;
-}
-
-function renderChart(sorted, suite, selected, baselineScore, refs, width) {
-  if (benchMode === "all") return [renderSpark(sorted, suite, baselineScore, width)];
-  const { svg, deficit } = renderBars(sorted, suite, selected, baselineScore, refs, width);
-  const key = (cls, text) => el("span", { class: "bench-legend-item" }, el("i", { class: `bench-legend-swatch ${cls}` }), text);
-  const legend = el("div", { class: "bench-tile-legend" },
-    key("gain", "gain over genesis"),
-    key("base", "genesis"),
-    deficit ? key("below", "below genesis") : null,
-    deficit ? key("gap", "genesis level") : null,
-    refs.length ? key("ref", refs.map(ref => ref.label).join(" · ")) : null);
-  return [svg, legend];
 }
 
 function progressLabel(preds) {
@@ -583,7 +435,7 @@ function renderProgress(preds, label) {
     el("div", { class: "bench-tile-progress-note" }, [label, ...state].filter(Boolean).join(" · ")));
 }
 
-function renderTile(model, suite, sorted, baseline, activity, preds, refs = []) {
+function renderTile(model, suite, sorted, baseline, activity, preds) {
   const entry = suiteScores(model)[suite];
   const scored = entry?.score != null;
   const progress = scored ? null : preds;
@@ -597,13 +449,13 @@ function renderTile(model, suite, sorted, baseline, activity, preds, refs = []) 
     : queued.length ? `${queued.length} pending` : "";
   const live = Boolean(running) || Boolean(progress?.fresh);
 
-  const chartSvgElement = el("div", { class: "bench-tile-chart" }, renderChart(sorted, suite, model, baseline?.score, refs));
+  const chartSvgElement = el("div", { class: "bench-tile-chart" }, renderSpark(sorted, suite, baseline?.score));
   let chartWidth = 0;
   const chartObserver = new ResizeObserver(entries => {
     const w = Math.round(entries[0].contentRect.width);
     if (!w || w === chartWidth) return;
     chartWidth = w;
-    chartSvgElement.replaceChildren(...renderChart(sorted, suite, model, baseline?.score, refs, w));
+    chartSvgElement.replaceChildren(renderSpark(sorted, suite, baseline?.score, w));
   });
   chartObserver.observe(chartSvgElement);
 
@@ -813,7 +665,6 @@ export function renderBenchmarks(container, metaNode, data, scoresBySuite = null
     }
     return [pulled.suite, preds];
   }));
-  const refs = referenceScores(scoresBySuite);
   const rerender = () => renderBenchmarks(container, metaNode, data, scoresBySuite, liveBySuite);
   const scores = suiteScores(selected);
   const done = BENCHMARK_ORDER.filter(suite => scores[suite]?.score != null).length;
@@ -832,7 +683,7 @@ export function renderBenchmarks(container, metaNode, data, scoresBySuite = null
             `${done}/${BENCHMARK_ORDER.length} scores · ${modelLabel(selected)}`))),
       el("div", { class: "bench-tile-grid" }, BENCHMARK_ORDER.map(suite =>
         renderTile(selected, suite, sorted, baselineScores[suite], activity.get(suite),
-          predsBySuite.get(suite) || null, refs.get(suite) || []))),
+          predsBySuite.get(suite) || null))),
       benchMode === "all"
         ? renderKingHistory(sorted, selected, rerender)
         : renderLeaderboard(sorted, selected, baselineScores, rerender)));
