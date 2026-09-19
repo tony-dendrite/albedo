@@ -24,6 +24,7 @@ class Commit:
     commit_payload: dict[str, Any]
     model_uri: str
     payload_hash: str
+    coldkey: str | None = None
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,7 @@ class PrivateSignal:
     hotkey: str
     payload: str
     block_hash: str | None = None
+    coldkey: str | None = None
 
 
 def connect(network: str) -> Any:
@@ -92,7 +94,9 @@ def _uid_map(subtensor: Any, netuid: int) -> dict[str, int]:
         return {}
 
 
-def metagraph_snapshot(subtensor: Any, netuid: int, block: int) -> list[tuple[int, str, int]]:
+def metagraph_snapshot(
+    subtensor: Any, netuid: int, block: int
+) -> tuple[list[tuple[int, str, int]], dict[str, str]]:
     meta = subtensor.metagraph(netuid, block=block)
     reg_blocks: dict[int, int] = {}
     qm = subtensor.query_map(
@@ -100,7 +104,9 @@ def metagraph_snapshot(subtensor: Any, netuid: int, block: int) -> list[tuple[in
     )
     for k, v in qm:
         reg_blocks[int(getattr(k, "value", k))] = int(getattr(v, "value", v))
-    return [(int(n.uid), str(n.hotkey), reg_blocks.get(int(n.uid), 0)) for n in meta.neurons]
+    rows = [(int(n.uid), str(n.hotkey), reg_blocks.get(int(n.uid), 0)) for n in meta.neurons]
+    owners = {str(n.hotkey): str(n.coldkey) for n in meta.neurons if n.coldkey}
+    return rows, owners
 
 
 _ZERO_ACCOUNT = ss58_encode(b"\x00" * 32, ss58_format=42)
@@ -176,9 +182,12 @@ def scan_commitments(
     start_block: int = 0,
     uids: dict[str, int] | None = None,
     at_block: int | None = None,
+    owners: dict[str, str] | None = None,
 ) -> tuple[list[Commit], list[PrivateSignal]]:
     if uids is None:
         uids = _uid_map(subtensor, netuid)
+    if owners is None:
+        owners = {}
 
     commits: list[Commit] = []
     signals: list[PrivateSignal] = []
@@ -193,7 +202,11 @@ def scan_commitments(
             # 'ready' becomes a synthetic chain commit downstream; capture the real
             # block hash so private submissions seed dataset sampling exactly like public.
             bh = _block_hash(subtensor, block) if kind == "ready" else None
-            signals.append(PrivateSignal(kind, netuid, block, uids.get(hotkey), hotkey, data, bh))
+            signals.append(
+                PrivateSignal(
+                    kind, netuid, block, uids.get(hotkey), hotkey, data, bh, owners.get(hotkey)
+                )
+            )
             continue
         payload = _parse_v7(data, hotkey)
         if payload is None:
@@ -217,6 +230,7 @@ def scan_commitments(
                 commit_payload=payload,
                 model_uri=f"{payload['repo']}@{payload['digest']}",
                 payload_hash=_payload_hash(payload),
+                coldkey=owners.get(hotkey),
             )
         )
 

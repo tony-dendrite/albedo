@@ -26,15 +26,17 @@ async def insert_new_commits(pool: asyncpg.Pool, commits: list[Commit]) -> int:
             for c in commits:
                 miner_id = await conn.fetchval(
                     """
-                    INSERT INTO miners (hotkey, uid, netuid, updated_at)
-                    VALUES ($1, $2, $3, now())
+                    INSERT INTO miners (hotkey, coldkey, uid, netuid, updated_at)
+                    VALUES ($1, $2, $3, $4, now())
                     ON CONFLICT (hotkey) DO UPDATE SET
+                        coldkey = COALESCE(EXCLUDED.coldkey, miners.coldkey),
                         uid = EXCLUDED.uid,
                         netuid = EXCLUDED.netuid,
                         updated_at = now()
                     RETURNING id
                     """,
                     c.hotkey,
+                    c.coldkey,
                     c.uid,
                     c.netuid,
                 )

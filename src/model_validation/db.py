@@ -383,6 +383,11 @@ async def sweep_expired(pool: asyncpg.Pool) -> int:
     return len(rows)
 
 
+async def coldkey_for(pool: asyncpg.Pool, hotkey: str) -> str:
+    async with pool.acquire() as conn:
+        return await conn.fetchval("SELECT coldkey FROM miners WHERE hotkey = $1", hotkey) or ""
+
+
 async def hotkey_validated(pool: asyncpg.Pool, hotkey: str) -> bool:
     async with pool.acquire() as conn:
         return bool(

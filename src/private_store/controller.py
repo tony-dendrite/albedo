@@ -289,6 +289,7 @@ async def _verify(
             f"s3://{settings.private_models_bucket_name}/{prefix.rstrip('/')}@sha256:{digest}"
         ),
         payload_hash=_payload_hash(payload),
+        coldkey=row["coldkey"],
     )
     await chain_db.insert_new_commits(pool, [commit])
     submission_id = await conn.fetchval(

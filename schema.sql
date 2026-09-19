@@ -436,6 +436,7 @@ CREATE TABLE IF NOT EXISTS private_registrations (
     netuid INTEGER NOT NULL,
     uid INTEGER,
     hotkey TEXT NOT NULL,
+    coldkey TEXT,
     registration_id TEXT NOT NULL UNIQUE,
     state TEXT NOT NULL DEFAULT 'ACTIVATED',
     activation_block BIGINT NOT NULL,
@@ -459,6 +460,7 @@ CREATE TABLE IF NOT EXISTS private_registrations (
 );
 
 ALTER TABLE private_registrations ADD COLUMN IF NOT EXISTS extra_attempts INT NOT NULL DEFAULT 0;
+ALTER TABLE private_registrations ADD COLUMN IF NOT EXISTS coldkey TEXT;
 
 CREATE INDEX IF NOT EXISTS private_registrations_state_updated_idx
     ON private_registrations (state, updated_at);

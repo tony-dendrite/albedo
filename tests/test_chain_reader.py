@@ -123,3 +123,49 @@ def test_resolve_missing_coldkeys_only_for_registered_hotkeys(monkeypatch):
     n = asyncio.run(reader.resolve_missing_coldkeys(None, object(), {"hk-reg", "hk-no-owner"}, 123))
     assert n == 1
     assert stored == {"hk-reg": "ck-1"}
+
+
+def test_scan_commitments_stamps_the_coldkey_from_the_owner_map():
+    commits, _ = scan_commitments(FakeSubtensor(), 1, owners={"hk-good": "ck-alice"})
+
+    by_hotkey = {c.hotkey: c for c in commits}
+    assert by_hotkey["hk-good"].coldkey == "ck-alice"
+    assert by_hotkey["hk-hf"].coldkey is None
+
+
+def test_scan_commitments_without_an_owner_map_leaves_the_coldkey_unset():
+    commits, _ = scan_commitments(FakeSubtensor(), 1)
+
+    assert all(c.coldkey is None for c in commits)
+
+
+class _OwnedNeuron:
+    def __init__(self, hotkey, uid, coldkey):
+        self.hotkey = hotkey
+        self.uid = uid
+        self.coldkey = coldkey
+
+
+class _SnapshotSubtensor:
+    def metagraph(self, netuid, block=None):
+        class _Meta:
+            neurons = [
+                _OwnedNeuron("hk-a", 1, "ck-1"),
+                _OwnedNeuron("hk-b", 2, "ck-1"),
+                _OwnedNeuron("hk-c", 3, ""),
+            ]
+
+        return _Meta()
+
+    def query_map(self, module, name, params, **kwargs):
+        assert (module, name) == ("SubtensorModule", "BlockAtRegistration")
+        return [(1, 500), (2, 600)]
+
+
+def test_metagraph_snapshot_returns_rows_and_an_owner_map():
+    from chain_reader.chain import metagraph_snapshot
+
+    rows, owners = metagraph_snapshot(_SnapshotSubtensor(), 1, 999)
+
+    assert rows == [(1, "hk-a", 500), (2, "hk-b", 600), (3, "hk-c", 0)]
+    assert owners == {"hk-a": "ck-1", "hk-b": "ck-1"}

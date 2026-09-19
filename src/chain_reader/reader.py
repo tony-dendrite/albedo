@@ -72,7 +72,7 @@ async def run() -> None:
                 cur = await asyncio.to_thread(subtensor.get_current_block)
                 if cur != last_block:
                     at_block = max(cur - config.SCAN_LAG_BLOCKS, 0)
-                    snapshot = await asyncio.to_thread(
+                    snapshot, owners = await asyncio.to_thread(
                         chain.metagraph_snapshot, subtensor, config.NETUID, at_block
                     )
 
@@ -96,6 +96,7 @@ async def run() -> None:
                         config.START_BLOCK,
                         uid_map,
                         at_block,
+                        owners,
                     )
                     n_new = await db.insert_new_commits(pool, commits)
                     n_signals = await intake.handle_signals(pool, signals)

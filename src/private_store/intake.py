@@ -56,14 +56,16 @@ async def _apply_activate(pool: asyncpg.Pool, signal: PrivateSignal) -> int:
         inserted = await conn.fetchval(
             """
             INSERT INTO private_registrations
-                (netuid, uid, hotkey, registration_id, activation_block, submission_pubkey)
-            VALUES ($1, $2, $3, $4, $5, $6)
+                (netuid, uid, hotkey, coldkey, registration_id, activation_block,
+                 submission_pubkey)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             ON CONFLICT (registration_id) DO NOTHING
             RETURNING id
             """,
             signal.netuid,
             signal.uid,
             signal.hotkey,
+            signal.coldkey,
             rid,
             signal.block_number,
             submission_pubkey.hex(),
@@ -76,7 +78,7 @@ async def _apply_activate(pool: asyncpg.Pool, signal: PrivateSignal) -> int:
             UPDATE private_registrations
             SET submission_pubkey = $2, attempt_count = attempt_count + 1, state = 'ACTIVATED',
                 activation_block = $3, credential_expires_at = NULL, model_prefix = NULL,
-                updated_at = now()
+                coldkey = COALESCE($5, coldkey), updated_at = now()
             WHERE registration_id = $1
               AND ( (state IN ('ACTIVATED', 'CREDENTIALED') AND submission_pubkey <> $2)
                     OR (state = 'SUBMITTED' AND submission_id IS NULL)
@@ -89,6 +91,7 @@ async def _apply_activate(pool: asyncpg.Pool, signal: PrivateSignal) -> int:
             submission_pubkey.hex(),
             signal.block_number,
             settings.max_attempts,
+            signal.coldkey,
         )
     if attempt is None:
         return 0

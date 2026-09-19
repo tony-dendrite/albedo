@@ -47,6 +47,8 @@ SETTINGS = PrivateStoreSettings(
 
 MINER_KEY = SigningKey(b"m" * 32)
 HOTKEY = encode_ss58_public_key(bytes(MINER_KEY.verify_key))
+OWNER_KEY = SigningKey(b"c" * 32)
+COLDKEY = encode_ss58_public_key(bytes(OWNER_KEY.verify_key))
 RID = registration_id(netuid=97, hotkey=HOTKEY, chain_generation=SETTINGS.chain_generation)
 PREFIX = model_prefix(RID)
 SUBMISSION_KEY = SigningKey(b"s" * 32)
@@ -88,9 +90,10 @@ class FakeConn:
                 "netuid": args[0],
                 "uid": args[1],
                 "hotkey": args[2],
-                "registration_id": args[3],
-                "activation_block": args[4],
-                "submission_pubkey": args[5],
+                "coldkey": args[3],
+                "registration_id": args[4],
+                "activation_block": args[5],
+                "submission_pubkey": args[6],
                 "state": "ACTIVATED",
                 "attempt_count": 1,  # schema default
                 "extra_attempts": 0,
@@ -132,6 +135,7 @@ class FakeConn:
                 activation_block=args[2],
                 credential_expires_at=None,
                 model_prefix=None,
+                coldkey=args[4] or row.get("coldkey"),
             )
             return row["attempt_count"]
         if "used_hotkeys" in sql:
@@ -262,11 +266,14 @@ def _pin_settings(monkeypatch):
 
 
 def _activate_signal(
-    payload: str | None = None, uid: int | None = 5, block: int = 100
+    payload: str | None = None,
+    uid: int | None = 5,
+    block: int = 100,
+    coldkey: str | None = COLDKEY,
 ) -> PrivateSignal:
     if payload is None:
         payload = activation_signal_payload(SUBMISSION_PUBKEY)
-    return PrivateSignal("activate", 97, block, uid, HOTKEY, payload)
+    return PrivateSignal("activate", 97, block, uid, HOTKEY, payload, None, coldkey)
 
 
 # --- intake ------------------------------------------------------------------
@@ -282,6 +289,7 @@ def test_intake_activates_a_signed_registration():
     assert _apply(conn, [_activate_signal()]) == 1
     assert conn.registration["registration_id"] == RID
     assert conn.registration["state"] == "ACTIVATED"
+    assert conn.registration["coldkey"] == COLDKEY
     # re-scan of the same signal is a no-op
     assert _apply(conn, [_activate_signal()]) == 0
 
@@ -430,6 +438,7 @@ def _seeded_row() -> dict:
         "netuid": 97,
         "uid": 5,
         "hotkey": HOTKEY,
+        "coldkey": COLDKEY,
         "registration_id": RID,
         "activation_block": 100,
         "submission_pubkey": SUBMISSION_PUBKEY.hex(),
@@ -503,6 +512,7 @@ def test_controller_runs_the_full_lifecycle(monkeypatch):
     assert commit.commit_payload["attempt"] == 1
     assert commit.uid == 5 and commit.hotkey == HOTKEY and commit.block_number == 200
     assert commit.block_hash == "0xabc200"  # same seed logic as public commits
+    assert commit.coldkey == COLDKEY  # dedup cannot exclude the miner's own models without it
 
     # nothing left to do
     assert not asyncio.run(controller.tick(pool, deps))

@@ -51,9 +51,16 @@ def enforced_reasons() -> frozenset[str]:
     return frozenset(wanted & ALL_REASONS)
 
 
-def enforces(reason: str | None) -> bool:
-    """True when this reject should fault the miner rather than only be logged."""
-    if not config.DEDUP_ENFORCE or not reason:
+def enforces(reason: str | None, coldkey: str = "") -> bool:
+    """True when this reject should fault the miner rather than only be logged.
+
+    Without a coldkey, bank.nearest() cannot exclude the miner's own accepted models and
+    _own_copy() is skipped entirely, so the miner's own work can be picked as the ancestor and
+    reported as someone else's. That verdict is not safe to enforce: the fault permanently blocks
+    the hotkey. The reject is still logged and indexed as audit, so the fingerprint is kept and
+    the model never enters the bank.
+    """
+    if not config.DEDUP_ENFORCE or not reason or not coldkey:
         return False
     return reason.upper() in enforced_reasons()
 

@@ -185,15 +185,17 @@ def process_model(
     summary = dedup.public_summary(res)
     if res.rejected:
         reason = res.verdict.reason if res.verdict else None
-        if dedup.enforces(reason):
+        if dedup.enforces(reason, coldkey):
             code = dedup.fault_code(reason)
             return _miner(code, dedup.public_message(res), summary, fault_detail=summary)
         log.warning(
-            "[shadow] dedup REJECT {} — {} — not enforced (reason={} enforce={} allowed={})",
+            "[shadow] dedup REJECT {} — {} — not enforced "
+            "(reason={} enforce={} coldkey_known={} allowed={})",
             model_uri,
             dedup.public_message(res),
             reason,
             config.DEDUP_ENFORCE,
+            bool(coldkey),
             sorted(dedup.enforced_reasons()),
         )
         summary = {"dedup": "pass"}
@@ -384,6 +386,14 @@ async def run() -> None:
                 )
                 continue
 
+            coldkey = attempt["coldkey"] or await db.coldkey_for(pool, attempt["hotkey"])
+            if not coldkey:
+                log.warning(
+                    "no coldkey for hotkey {} — the miner's own models cannot be excluded from "
+                    "dedup; copy verdicts will be logged, not enforced",
+                    attempt["hotkey"][:10],
+                )
+
             hb = asyncio.create_task(_heartbeat_loop(pool, attempt["id"]))
             try:
                 protected = frozenset(await db.protected_pre_eval_repos(pool))
@@ -391,7 +401,7 @@ async def run() -> None:
                     process_model,
                     attempt["model_uri"],
                     attempt["hotkey"],
-                    coldkey=attempt["coldkey"] or "",
+                    coldkey=coldkey,
                     protected_repos=protected,
                 )
             except Exception as exc:

@@ -210,15 +210,22 @@ def test_enforced_reasons_parses_the_list(monkeypatch):
 
 def test_enforces_requires_both_the_switch_and_the_list(monkeypatch):
     _enforce(monkeypatch, True, "COPY,OWN-COPY")
-    assert gate.enforces("COPY") is True
-    assert gate.enforces("OWN-COPY") is True
-    assert gate.enforces("NOISE-COPY") is False  # heuristic, not allowlisted
-    assert gate.enforces("TRIVIAL-EDIT") is False
-    assert gate.enforces(None) is False
-    assert gate.enforces("") is False
+    assert gate.enforces("COPY", "ck-1") is True
+    assert gate.enforces("OWN-COPY", "ck-1") is True
+    assert gate.enforces("NOISE-COPY", "ck-1") is False  # heuristic, not allowlisted
+    assert gate.enforces("TRIVIAL-EDIT", "ck-1") is False
+    assert gate.enforces(None, "ck-1") is False
+    assert gate.enforces("", "ck-1") is False
 
     _enforce(monkeypatch, False, "*")  # master switch wins
-    assert gate.enforces("COPY") is False
+    assert gate.enforces("COPY", "ck-1") is False
+
+
+def test_enforces_needs_a_coldkey_to_know_the_ancestor_is_not_the_miners_own(monkeypatch):
+    _enforce(monkeypatch, True, "*")
+    assert gate.enforces("COPY", "ck-1") is True
+    assert gate.enforces("COPY", "") is False
+    assert gate.enforces("TRIVIAL-EDIT", "") is False
 
 
 def test_device_refuses_to_fingerprint_on_cpu(monkeypatch):
