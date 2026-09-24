@@ -1,7 +1,7 @@
 import { el, mount } from "../dom.js";
 import { pct, fmtRelative } from "../format.js";
 import { modelRepo, kingTitleName } from "../model.js";
-import { PULLED_SUITES, PREDS_STALE_MS } from "../config.js";
+import { PULLED_SUITES, PREDS_STALE_MS, REFERENCE_MODEL_URLS } from "../config.js";
 import { benchmarkRegistry, mergeDistributedResults, distributedRunFor, distributedProgress } from "../results.js";
 
 const MODEL_SCORE_SUITE = "model_score";
@@ -26,7 +26,8 @@ function applyBenchmarkRegistry(manifest) {
 
 const ACTIVE_STATES = new Set(["QUEUED", "CLAIMED", "LOADING_MODEL", "RUNNING", "SCORING"]);
 const LEADERBOARD_ROWS = 5;
-const PAGE_SIZES = [5, 10, 25, 50];
+const PAGE_SIZES = [10, 25, 50];
+const DEFAULT_PAGE_SIZE = PAGE_SIZES[0];
 // genesis is re-uploaded under the king-genesis repo, like every other king
 const GENESIS_REPO = "dendriteholdings/albedo-qwen3.6-35b-king-genesis";
 
@@ -36,9 +37,13 @@ if (!["top", "all"].includes(benchMode)) benchMode = "top";
 // which benchmark the top-5 is sorted by (descending only)
 let benchSort = localStorage.getItem("benchLeaderboardSort") || BENCHMARK_ORDER[0];
 if (!BENCHMARK_ORDER.includes(benchSort)) benchSort = BENCHMARK_ORDER[0];
-let historyPage = Math.max(1, Number(localStorage.getItem("benchPanelHistoryPage")) || 1);
-let historyPageSize = Number(localStorage.getItem("benchPanelHistoryPageSize")) || 10;
-if (!PAGE_SIZES.includes(historyPageSize)) historyPageSize = 10;
+// the all-kings page, page size and sort are not remembered: every load, and every switch to that
+// view, starts on page 1 with 10 rows sorted by # (only the top 5 / all-kings choice is remembered)
+let historyPage = 1;
+let historyPageSize = DEFAULT_PAGE_SIZE;
+// all-kings sort: "#" (reign, newest first; the default), "king" (the same order) or a suite
+// (score descending, ties by #)
+let historySort = "#";
 
 function benchmarkLabel(suite) {
   return BENCHMARK_LABELS[suite] || suite || "—";
@@ -241,6 +246,9 @@ export function mergePulledScores(data, scoresBySuite) {
   return { ...data, models };
 }
 
+// Every king other than the latest being benchmarked again (a backfill), per suite, newest reign
+// first. Found by the run's status and progress, so a run with no score yet counts too. Genesis
+// is the reference and never a backfill; a run counts only while tasks are pending or running.
 function backfillRuns(data, latest) {
   const backfills = new Map();
   for (const model of data?.models || []) {
@@ -248,17 +256,20 @@ function backfillRuns(data, latest) {
     for (const run of model.runs || []) {
       const progress = run?.distributed_progress || {};
       const working = (progress.pending || 0) + (progress.running || 0) > 0;
-      if (run?.source === "distributed" && run.partial_score && working && !backfills.has(run.suite)) {
-        backfills.set(run.suite, { model, run });
+      const unfinished = !["complete", "failed"].includes(run?.distributed_status);
+      if (run?.source === "distributed" && unfinished && working) {
+        backfills.set(run.suite, [...(backfills.get(run.suite) || []), { model, run }]);
       }
     }
   }
+  for (const runs of backfills.values()) runs.sort((a, b) => (reignNumber(b.model) ?? 0) - (reignNumber(a.model) ?? 0));
   return backfills;
 }
 
+// the backfilled kings without their unfinished runs, so the charts and tables only show finished scores
 function withoutBackfills(data, backfills) {
   if (!backfills.size) return data;
-  const partial = new Set([...backfills.values()].map(b => b.run));
+  const partial = new Set([...backfills.values()].flat().map(b => b.run));
   const models = (data?.models || []).map(model => model.runs?.some(run => partial.has(run))
     ? { ...model, runs: model.runs.filter(run => !partial.has(run)) }
     : model);
@@ -395,7 +406,8 @@ function svgEl(tag, attrs = {}, ...children) {
 
 const SPARK_KINGS = 20;
 
-function renderSpark(sorted, suite, baselineScore = null, width = 360) {
+// `comparisons`: the non-king models (genesis, GLM 5.2, ...) listed under the king in the hover tip
+function renderSpark(sorted, suite, baselineScore = null, width = 360, comparisons = []) {
   // a fixed window of the last SPARK_KINGS kings: a new king adds a slot even before it has a
   // score, so the line shifts left as reigns change instead of stretching over all history
   const slots = sorted.filter(model => !isGenesis(model)).slice(0, SPARK_KINGS).reverse();
@@ -455,10 +467,10 @@ function renderSpark(sorted, suite, baselineScore = null, width = 360) {
       opacity: best || last ? 1 : 0.4,
     }));
   });
-  return withSparkHover(svg, coords, width, bestIdx, { top: TOP, floor: FLOOR });
+  return withSparkHover(svg, coords, width, bestIdx, { top: TOP, floor: FLOOR }, comparisons);
 }
 
-function withSparkHover(svg, coords, width, bestIdx, { top, floor }) {
+function withSparkHover(svg, coords, width, bestIdx, { top, floor }, comparisons = []) {
   const guide = svgEl("line", {
     y1: top - 4, y2: floor, stroke: "currentColor", "stroke-width": 1, opacity: 0.35,
     visibility: "hidden", "pointer-events": "none",
@@ -489,7 +501,11 @@ function withSparkHover(svg, coords, width, bestIdx, { top, floor }) {
     guide.setAttribute("visibility", "visible");
     tip.replaceChildren(
       el("b", { class: index === bestIdx ? "best" : "" }, panelScore(c.point.score)),
-      el("span", {}, c.point.label));
+      el("span", {}, c.point.label),
+      comparisons.length
+        ? el("div", { class: "spark-tip-refs" }, comparisons.map(({ label, score }) =>
+            el("span", {}, `${label} ${score == null ? "—" : panelScore(score)}`)))
+        : null);
     tip.hidden = false;
     const left = (c.x / width) * rect.width;
     tip.style.left = `${left}px`;
@@ -521,7 +537,7 @@ function renderProgress(preds, label, neutral = false) {
     el("div", { class: "bench-tile-progress-note" }, [label, ...state].filter(Boolean).join(" · ")));
 }
 
-function renderTile(model, suite, sorted, baseline, activity, preds, backfill = null) {
+function renderTile(model, suite, sorted, baseline, activity, preds, backfills = [], references = []) {
   const entry = suiteScores(model)[suite];
   const distributed = distributedRunFor(model, suite);
   const scored = entry?.score != null;
@@ -539,17 +555,29 @@ function renderTile(model, suite, sorted, baseline, activity, preds, backfill = 
     ? [runningLabel(running, activity.labelByRepo), progressNote(running)].filter(Boolean).join(" · ")
     : queued.length ? `${queued.length} pending` : "";
   const live = Boolean(running) || Boolean(progress?.fresh);
-  // the benchmark is busy with an older king: say so, with a neutral bar, instead of "idle"
-  const backfilling = !live && !progress && backfill ? backfill : null;
-  const backfillProgress = backfilling ? distributedProgress(backfilling.run) : null;
+  // the benchmark is busy with older kings: say so instead of "idle", with a neutral bar for the
+  // newest of them only (backfills are sorted newest reign first)
+  const backfilling = !live && !progress ? backfills : [];
+  const backfillBars = backfilling.slice(0, 1)
+    .map(({ model: king, run }) => [king, distributedProgress(run)])
+    .filter(([, bar]) => bar)
+    .map(([king, bar]) => renderProgress(bar, modelLabel(king), true));
 
-  const chartSvgElement = el("div", { class: "bench-tile-chart" }, renderSpark(sorted, suite, baseline?.score));
+  const referenceScores = references
+    .map(ref => ({ ref, label: modelLabel(ref), entry: suiteScores(ref)[suite] }))
+    .map(r => ({ ...r, entry: r.entry?.score != null ? r.entry : null }));
+  const comparisons = [
+    { label: "genesis", score: baseline?.score ?? null },
+    ...referenceScores.map(r => ({ label: r.label, score: r.entry?.score ?? null })),
+  ];
+  const chartSvgElement = el("div", { class: "bench-tile-chart" },
+    renderSpark(sorted, suite, baseline?.score, 360, comparisons));
   let chartWidth = 0;
   const chartObserver = new ResizeObserver(entries => {
     const w = Math.round(entries[0].contentRect.width);
     if (!w || w === chartWidth) return;
     chartWidth = w;
-    chartSvgElement.replaceChildren(renderSpark(sorted, suite, baseline?.score, w));
+    chartSvgElement.replaceChildren(renderSpark(sorted, suite, baseline?.score, w, comparisons));
   });
   chartObserver.observe(chartSvgElement);
 
@@ -561,7 +589,7 @@ function renderTile(model, suite, sorted, baseline, activity, preds, backfill = 
     el("div", { class: "bench-tile-head" },
       el("div", { class: "bench-tile-name" }, benchmarkLabel(suite)),
       el("span", { class: live ? "bench-tile-activity live" : "bench-tile-activity" },
-        live ? "running" : backfilling ? "backfilling" : "idle")),
+        live ? "running" : backfilling.length ? "backfilling" : "idle")),
     el("div", { class: "bench-tile-main" },
       el("div", { class: "bench-tile-score-wrap" },
         el(href ? "a" : "span", { class: "bench-tile-score", href },
@@ -579,8 +607,14 @@ function renderTile(model, suite, sorted, baseline, activity, preds, backfill = 
     el("div", { class: "bench-tile-status" },
       el("span", { class: "bench-genesis-value" }, `genesis ${genesis.value}`),
       el("span", { class: `bench-delta ${genesis.cls}`, title: "delta vs genesis" }, genesis.delta)),
+    referenceScores.map(({ label, entry: refEntry }) => {
+      const vs = baselineComparison(entry, refEntry);
+      return el("div", { class: "bench-tile-status" },
+        el("span", { class: "bench-genesis-value" }, `${label} ${vs.value}`),
+        el("span", { class: `bench-delta ${vs.cls}`, title: `delta vs ${label}` }, vs.delta));
+    }),
     progress ? renderProgress(progress, progress.kingLabel || modelLabel(model))
-      : backfillProgress ? renderProgress(backfillProgress, modelLabel(backfilling.model), true)
+      : backfillBars.length ? backfillBars
       : runNote ? el("div", { class: "bench-tile-run-note" }, runNote) : null);
 }
 
@@ -626,6 +660,12 @@ function benchScoreOf(model, suite) {
 
 // leaderboard cells: the king opens its Hugging Face model, a score opens that king's run
 function kingLink(model) {
+  if (model.reference) {
+    const url = REFERENCE_MODEL_URLS[model.model_repo];
+    return url
+      ? el("a", { href: url, target: "_blank", rel: "noopener", title: url.replace("https://huggingface.co/", "") }, modelLabel(model))
+      : el("span", { title: `${model.model_repo} · reference model` }, modelLabel(model));
+  }
   const repoUrl = hfRepoUrl(model);
   return repoUrl
     ? el("a", { href: repoUrl, target: "_blank", rel: "noopener", title: modelName(model) }, modelLabel(model))
@@ -647,11 +687,21 @@ function bestKingScores(sorted) {
 }
 
 function scoreCell(model, suite, entry, best) {
-  const top = !isGenesis(model) && entry.score === best[suite];
+  const top = !isGenesis(model) && !model.reference && entry.score === best[suite];
   return runCell(model, suite, entry, top ? " bench-best" : "", top ? "best king score" : "");
 }
 
-function renderLeaderboard(sorted, selectedModel, baselineScores, rerender) {
+// every sortable header carries its ↓ (all sorts are descending) before the title, shown only on
+// the active one, so columns never shift
+function sortArrow() {
+  return el("span", { class: "bench-sort-arrow", "aria-hidden": "true" }, "↓");
+}
+
+function rankGapRow() {
+  return el("tr", { class: "bench-rank-gap" }, el("td", { colspan: 2 + BENCHMARK_ORDER.length }, "⋯"));
+}
+
+function renderLeaderboard(sorted, selectedModel, baselineScores, rerender, references = []) {
   const best = bestKingScores(sorted);
   const setSort = suite => {
     benchSort = suite;
@@ -666,18 +716,19 @@ function renderLeaderboard(sorted, selectedModel, baselineScores, rerender) {
   const genesisRank = order.findIndex(isGenesis);
   const shown = ranked.map((model, i) => [model, i + 1]);
   if (genesisRank >= LEADERBOARD_ROWS) shown.push([order[genesisRank], genesisRank + 1]);
+  // reference models (GLM 5.2, ...) are not ranked: always listed below the kings, without a rank
+  shown.push(...references.map(model => [model, null]));
 
   const headCell = suite => el("th", {
     class: `r bench-sort-th${suite === benchSort ? " active" : ""}`,
+    "aria-sort": suite === benchSort ? "descending" : null,
     onClick: () => setSort(suite),
     title: `sort by ${benchmarkLabel(suite)} (descending)`,
-  }, benchmarkLabel(suite));
+  }, sortArrow(), benchmarkLabel(suite));
 
   const rows = shown.flatMap(([model, rank], i) => [
     // ranks skipped between the top rows and genesis read as a gap, not as consecutive places
-    i > 0 && rank - shown[i - 1][1] > 1
-      ? el("tr", { class: "bench-rank-gap" }, el("td", { colspan: 2 + BENCHMARK_ORDER.length }, "⋯"))
-      : null,
+    i > 0 && (rank == null ? shown[i - 1][1] != null : rank - shown[i - 1][1] > 1) ? rankGapRow() : null,
     leaderboardRow(model, rank),
   ]).filter(Boolean);
 
@@ -685,7 +736,7 @@ function renderLeaderboard(sorted, selectedModel, baselineScores, rerender) {
     const scores = suiteScores(model);
     const genesis = isGenesis(model);
     return el("tr", { class: genesis ? "bench-genesis-row" : "" },
-      el("td", { class: "bench-rank" }, String(rank)),
+      el("td", { class: "bench-rank" }, rank == null ? "—" : String(rank)),
       el("td", { class: "bench-king-col" },
         kingLink(model),
         genesis ? el("span", { class: "bench-baseline-tag" }, "baseline") : null),
@@ -712,26 +763,49 @@ function renderLeaderboard(sorted, selectedModel, baselineScores, rerender) {
 }
 
 // "all" mode: the full king benchmark history, in reign order, paginated (the classic view).
-function renderKingHistory(sorted, selectedModel, rerender) {
+function renderKingHistory(sorted, selectedModel, rerender, references = []) {
   const best = bestKingScores(sorted);
-  const pages = Math.max(1, Math.ceil(sorted.length / historyPageSize));
+  // the list is kings only; genesis and the reference models sit below it on every page, unranked
+  if (!["#", "king", ...BENCHMARK_ORDER].includes(historySort)) historySort = "#";
+  const newestFirst = (a, b) => (reignNumber(b) ?? -1) - (reignNumber(a) ?? -1);
+  // compared as displayed, so two kings that both show e.g. 5.9% count as a tie and fall back to #;
+  // a king with no score on the suite sorts after every scored one
+  const shownScore = model => {
+    const score = benchScoreOf(model, historySort);
+    return score == null ? -1 : parseFloat(panelScore(score));
+  };
+  const kings = sorted.filter(model => !isGenesis(model)).sort((a, b) => historySort === "#" || historySort === "king"
+    ? newestFirst(a, b)
+    : shownScore(b) - shownScore(a) || newestFirst(a, b));
+  const setSort = key => {
+    historySort = key;
+    historyPage = 1;
+    rerender();
+  };
+  const sortTitles = { "#": "sort by reign (newest first)", king: "sort by king (newest first)" };
+  const sortHead = (key, label, cls) => el("th", {
+    class: `${cls} bench-sort-th${historySort === key ? " active" : ""}`,
+    "aria-sort": historySort === key ? "descending" : null,
+    onClick: () => setSort(key),
+    title: sortTitles[key] || `sort by ${benchmarkLabel(key)} (descending)`,
+  }, sortArrow(), label);
+  const others = [...sorted.filter(isGenesis), ...references];
+  const pages = Math.max(1, Math.ceil(kings.length / historyPageSize));
   historyPage = Math.min(Math.max(1, historyPage), pages);
-  const shown = sorted.slice((historyPage - 1) * historyPageSize, historyPage * historyPageSize);
+  const shown = kings.slice((historyPage - 1) * historyPageSize, historyPage * historyPageSize);
   const setPage = page => {
     historyPage = page;
-    localStorage.setItem("benchPanelHistoryPage", String(historyPage));
     rerender();
   };
   const pager = el("div", { class: "bench-history-pager" },
     el("div", { class: "bench-history-pager-left" },
       el("button", { type: "button", disabled: historyPage <= 1, onClick: () => setPage(historyPage - 1) }, "prev"),
-      el("span", {}, `page ${historyPage} / ${pages} · ${sorted.length} kings`),
+      el("span", {}, `page ${historyPage} / ${pages} · ${kings.length} kings`),
       el("button", { type: "button", disabled: historyPage >= pages, onClick: () => setPage(historyPage + 1) }, "next")),
     el("span", { class: "bench-leaderboard-hint" }, "yellow is the best king score"),
     el("label", { class: "bench-history-pager-right" }, "rows",
       el("select", { onChange: e => {
         historyPageSize = Number(e.target.value);
-        localStorage.setItem("benchPanelHistoryPageSize", String(historyPageSize));
         setPage(1);
       } }, PAGE_SIZES.map(size => el("option", { value: size, selected: size === historyPageSize }, String(size))))));
 
@@ -747,23 +821,41 @@ function renderKingHistory(sorted, selectedModel, rerender) {
         return scoreCell(model, suite, entry, best);
       }));
   });
+  const otherRows = others.map(model => {
+    const scores = suiteScores(model);
+    return el("tr", { class: isGenesis(model) ? "bench-genesis-row" : "" },
+      el("td", { class: "bench-rank" }, "—"),
+      el("td", { class: "bench-king-col" },
+        kingLink(model),
+        isGenesis(model) ? el("span", { class: "bench-baseline-tag" }, "baseline") : null),
+      BENCHMARK_ORDER.map(suite => {
+        const entry = scores[suite];
+        if (entry?.score == null) return el("td", { class: "r" }, el("span", { class: "muted-dash" }, "—"));
+        return scoreCell(model, suite, entry, best);
+      }));
+  });
 
+  // no scroll box here: the table grows with its rows, and the non-king rows end it
   return el("div", { class: "bench-history" },
     pager,
     sorted.length
-      ? el("div", { class: "data-table-wrap" },
+      ? el("div", { class: "data-table-wrap bench-all-kings-wrap" },
           el("table", { class: "data-table bench-leaderboard" },
             el("thead", {}, el("tr", {},
-              el("th", { class: "bench-rank", title: "reign number (genesis is 0)" }, "#"),
-              el("th", {}, "king"),
-              BENCHMARK_ORDER.map(suite => el("th", { class: "r" }, benchmarkLabel(suite))))),
-            el("tbody", {}, rows)))
+              sortHead("#", "#", "bench-rank"),
+              sortHead("king", "king", ""),
+              BENCHMARK_ORDER.map(suite => sortHead(suite, benchmarkLabel(suite), "r")))),
+            el("tbody", {}, rows, otherRows.length ? [rankGapRow(), ...otherRows] : null)))
       : el("div", { class: "bench-history-empty" }, "no benchmark history yet"));
 }
 
 export function renderBenchmarks(container, metaNode, data, scoresBySuite = null, liveBySuite = null, resultsManifest = null) {
   applyBenchmarkRegistry(resultsManifest);
   data = mergeDistributedResults(mergePulledScores(data, scoresBySuite), resultsManifest);
+  // reference models (GLM 5.2, ...) show beside genesis, never as kings, and only with finished scores
+  const references = (data?.models || []).filter(model => model.reference)
+    .map(model => ({ ...model, runs: (model.runs || []).filter(run => run.distributed_status === "complete") }));
+  data = { ...data, models: (data?.models || []).filter(model => !model.reference) };
   const liveRunIds = new Set([...(liveBySuite?.values() || [])].map(live => live?.runId).filter(Boolean));
   const backfills = backfillRuns(data, panelModels(data, liveRunIds).selected);
   data = withoutBackfills(data, backfills);
@@ -802,15 +894,20 @@ export function renderBenchmarks(container, metaNode, data, scoresBySuite = null
           el("button", { class: "bench-history-toggle", type: "button", onClick: () => {
             benchMode = benchMode === "top" ? "all" : "top";
             localStorage.setItem("benchLeaderMode", benchMode);
+            if (benchMode === "all") {
+              historyPage = 1;
+              historyPageSize = DEFAULT_PAGE_SIZE;
+              historySort = "#";
+            }
             rerender();
           } }, benchMode === "top" ? "show all kings" : "top 5"),
           el("span", { class: "bench-panel-meta" },
             `${done}/${BENCHMARK_ORDER.length} scores · ${modelLabel(selected)}`))),
       el("div", { class: "bench-tile-grid" }, BENCHMARK_ORDER.map(suite =>
         renderTile(selected, suite, sorted, baselineScores[suite], activity.get(suite),
-          predsBySuite.get(suite) || null, backfills.get(suite)))),
+          predsBySuite.get(suite) || null, backfills.get(suite) || [], references))),
       benchMode === "all"
-        ? renderKingHistory(sorted, selected, rerender)
-        : renderLeaderboard(sorted, selected, baselineScores, rerender)));
+        ? renderKingHistory(sorted, selected, rerender, references)
+        : renderLeaderboard(sorted, selected, baselineScores, rerender, references)));
   if (metaNode) metaNode.textContent = `${models.length} models · ${data.counts?.runs ?? 0} benchmark runs`;
 }

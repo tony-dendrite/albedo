@@ -47,6 +47,12 @@ export const RESULTS_MANIFEST_ENDPOINTS = [
 ];
 export const RESULTS_BASE = "./results/v1";
 
+// Where a reference model's name links in the benchmark tables, keyed by the repo the benchmark
+// service publishes it under (its OpenRouter id, which is not a Hugging Face repo).
+export const REFERENCE_MODEL_URLS = {
+  "z-ai/glm-5.2": "https://huggingface.co/zai-org/GLM-5.2",
+};
+
 export const LLMS_URLS = [
   "./llms.txt",
 ];

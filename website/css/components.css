@@ -311,6 +311,8 @@ td.judge .judge-ver { color: var(--color-fg-4); font-size: 10px; }
   .sample-meta { grid-column: 1 / -1; text-align: left; }
   .q-expl { padding-left: 10px; }
   table.data-table th, table.data-table td { padding: 7px 6px; }
+  /* room for the hanging sort arrow of the first column */
+  table.bench-leaderboard th.bench-sort-th:first-child { padding-left: 12px; }
   /* wide score tables scroll inside their own box instead of widening the page */
   .sample-judge-table { display: block; overflow-x: auto; }
   .q-head, .q-row summary { grid-template-columns: 34px minmax(0, 1fr) 44px 44px; gap: 6px; }
@@ -720,17 +722,25 @@ td.judge .judge-ver { color: var(--color-fg-4); font-size: 10px; }
 table.bench-leaderboard th.bench-sort-th { cursor: pointer; user-select: none; }
 table.bench-leaderboard th.bench-sort-th:hover { color: var(--color-fg); }
 table.bench-leaderboard th.bench-sort-th.active { color: var(--color-gold); }
+table.bench-leaderboard th.bench-sort-th .bench-sort-arrow {
+  display: inline-block; width: 0.8em; margin-right: 3px; text-align: center; visibility: hidden;
+}
+table.bench-leaderboard th.bench-sort-th.active .bench-sort-arrow { visibility: visible; }
+/* left-aligned headers (#, king): the arrow hangs in the cell padding, so the title stays over its column */
+table.bench-leaderboard th.bench-sort-th:not(.r) .bench-sort-arrow { margin-left: calc(-0.8em - 3px); }
 /* scores read at full brightness (the shared data-table dims cells to fg-2) */
 .bench-history table.data-table td { color: var(--color-fg); }
 table.bench-leaderboard td.bench-best { color: var(--color-gold); }
 table.bench-leaderboard td.bench-run-cell a { color: inherit; }
 table.bench-leaderboard td.bench-run-cell a:hover { color: var(--color-accent); }
 table.bench-leaderboard td.bench-king-col a:hover { color: var(--color-accent); }
-table.bench-leaderboard tr.bench-genesis-row td:first-child { box-shadow: inset 3px 0 0 var(--color-gold); }
+table.bench-leaderboard tr.bench-genesis-row td:first-child { box-shadow: inset 3px 0 0 var(--color-fg-3); }
+/* all-kings view: no scroll box, the table grows with its rows (it still scrolls sideways on phones) */
+.bench-all-kings-wrap { max-height: none; }
 table.bench-leaderboard tr.bench-rank-gap td { text-align: center; color: var(--color-fg-3); padding: 0; line-height: 1.2; }
 .bench-baseline-tag {
   margin-left: 6px; font-family: var(--font-mono); font-size: 9px; text-transform: uppercase;
-  letter-spacing: 0.06em; color: var(--color-gold); opacity: 0.85;
+  letter-spacing: 0.06em; color: var(--color-fg-3);
 }
 table.bench-leaderboard th.bench-rank, table.bench-leaderboard td.bench-rank {
   width: 22px; text-align: right; color: var(--color-fg-3); font-family: var(--font-mono);
@@ -823,7 +833,7 @@ a.bench-tile-score:hover { color: var(--color-accent); }
 .bench-tile[data-status="progress"][data-activity="running"] .bench-tile-score { color: var(--color-activity); }
 .bench-tile-progress {
   min-height: 15px;
-  margin-top: 5px;
+  margin-top: 10px;  /* clear of the genesis row and of the bar above */
 }
 .bench-tile-progress-bar {
   height: 3px;
@@ -866,6 +876,11 @@ a.bench-tile-score:hover { color: var(--color-accent); }
 .spark-tip[data-side="left"] { transform: translateX(calc(-100% - 8px)); }
 .spark-tip b { font-size: 11px; font-weight: 400; color: var(--color-fg); letter-spacing: 0; }
 .spark-tip b.best { color: var(--color-gold); }
+.spark-tip-refs {
+  display: flex; flex-direction: column; gap: 1px;
+  margin-top: 3px; padding-top: 3px; border-top: 1px solid var(--color-border-hover);
+  color: var(--color-fg-3);
+}
 .bench-tile-chart .spark-dot-last { fill: var(--color-gold); }
 .bench-tile-status {
   display: flex;
@@ -877,6 +892,7 @@ a.bench-tile-score:hover { color: var(--color-accent); }
   letter-spacing: 0.08em;
   color: var(--color-fg-3);
 }
+.bench-tile-status + .bench-tile-status { margin-top: 4px; }
 .bench-tile-run-note {
   min-height: 15px;
   margin-top: 5px;
