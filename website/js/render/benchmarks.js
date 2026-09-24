@@ -485,7 +485,7 @@ function progressLabel(preds) {
 function renderProgress(preds, label) {
   const percent = (preds.ratio * 100).toFixed(1);
   const state = preds.distributed
-    ? [`${percent}%`, preds.status, `${preds.completed} completed`, preds.errored ? `${preds.errored} errored` : null, `updated ${fmtRelative(preds.updatedAt)}`]
+    ? [`${percent}%`, preds.status, `${preds.completed} completed`, preds.errored ? `${preds.errored} errored` : null]
     : preds.fresh
       ? [`${percent}%`, "generating"]
     : preds.scoring
