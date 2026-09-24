@@ -234,7 +234,8 @@ class PreEvalRepository:
                 (Jsonb({"passed": True, "reason": reason}), attempt_id),
             )
             conn.execute(
-                "UPDATE model_submissions SET state = 'PRE_EVAL_PASSED', updated_at = now() WHERE id = %s",
+                "UPDATE model_submissions SET state = 'PRE_EVAL_PASSED', retry_count = 0, updated_at = now()"
+                " WHERE id = %s",
                 (submission_id,),
             )
             self.record_event_inside_tx(

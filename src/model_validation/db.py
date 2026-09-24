@@ -214,6 +214,7 @@ async def mark_done(pool: asyncpg.Pool, attempt_id, result_summary: dict) -> Non
                 UPDATE model_submissions
                 SET state = 'HIPPIUS_VALIDATED',
                     model_hash = COALESCE(model_hash, $2),
+                    retry_count = 0,
                     updated_at = now(),
                     fault_class = NULL,
                     fault_code = NULL,
