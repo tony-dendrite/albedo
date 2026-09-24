@@ -295,6 +295,10 @@ function detailHref(model, runId = null) {
   return `./benchmark.html?${qs.toString()}`;
 }
 
+function runHref(model, entry) {
+  return entry?.run_id && !entry.no_detail ? detailHref(model, entry.run_id) : detailHref(model);
+}
+
 function runTime(run) {
   return new Date(run?.finished_at || run?.started_at || "").getTime() || 0;
 }
@@ -372,7 +376,10 @@ function renderSpark(sorted, suite, baselineScore = null, width = 360) {
   // score, so the line shifts left as reigns change instead of stretching over all history
   const slots = sorted.filter(model => !isGenesis(model)).slice(0, SPARK_KINGS).reverse();
   const points = slots
-    .map((model, slot) => ({ slot, label: modelLabel(model), score: suiteScores(model)[suite]?.score }))
+    .map((model, slot) => {
+      const entry = suiteScores(model)[suite];
+      return { slot, label: modelLabel(model), score: entry?.score, href: runHref(model, entry) };
+    })
     .filter(point => point.score != null);
   const FLOOR = 54, TOP = 8;
   const svg = svgEl("svg", { viewBox: `0 0 ${width} 64`, preserveAspectRatio: "xMidYMid", role: "img" });
@@ -386,10 +393,8 @@ function renderSpark(sorted, suite, baselineScore = null, width = 360) {
   }
   const vals = points.map(p => p.score);
   const scaleVals = baselineScore != null ? [...vals, baselineScore] : vals;
-  let min = Math.min(...scaleVals);
-  let max = Math.max(...scaleVals);
-  if (min === max) { min -= 0.005; max += 0.005; }
-  const pad = (max - min) * 0.12; min -= pad; max += pad;   // breathing room so points/baseline don't hug edges
+  const min = 0;
+  const max = (Math.max(...scaleVals) || 0.01) * 1.12;
   const yOf = v => FLOOR - ((v - min) / (max - min)) * (FLOOR - TOP);
   const xOf = slot => 6 + (slot / (SPARK_KINGS - 1)) * (width - 12);
   const coords = points.map(point => ({ x: xOf(point.slot), y: yOf(point.score), point }));
@@ -424,9 +429,51 @@ function renderSpark(sorted, suite, baselineScore = null, width = 360) {
       cx: c.x.toFixed(1), cy: c.y.toFixed(1), r: best ? 3.4 : last ? 3 : 2.2,
       fill: best ? "var(--color-gold)" : "currentColor",
       opacity: best || last ? 1 : 0.4,
-    }, svgEl("title", {}, `${c.point.label} · ${panelScore(c.point.score)}${best ? " · best" : ""}`)));
+    }));
   });
-  return svg;
+  return withSparkHover(svg, coords, width, bestIdx, { top: TOP, floor: FLOOR });
+}
+
+function withSparkHover(svg, coords, width, bestIdx, { top, floor }) {
+  const guide = svgEl("line", {
+    y1: top - 4, y2: floor, stroke: "currentColor", "stroke-width": 1, opacity: 0.35,
+    visibility: "hidden", "pointer-events": "none",
+  });
+  svg.append(guide);
+  const tip = el("div", { class: "spark-tip", hidden: true });
+  const wrap = el("div", { class: "spark" }, svg, tip);
+  const hide = () => { guide.setAttribute("visibility", "hidden"); tip.hidden = true; };
+  const nearest = event => {
+    const rect = svg.getBoundingClientRect();
+    if (!rect.width) return null;
+    const x = (event.clientX - rect.left) * (width / rect.width);
+    let index = 0;
+    coords.forEach((c, i) => { if (Math.abs(c.x - x) < Math.abs(coords[index].x - x)) index = i; });
+    return { index, rect };
+  };
+  svg.addEventListener("click", event => {
+    const hit = nearest(event);
+    if (hit) location.href = coords[hit.index].point.href;
+  });
+  svg.addEventListener("pointermove", event => {
+    const hit = nearest(event);
+    if (!hit) return;
+    const { index, rect } = hit;
+    const c = coords[index];
+    guide.setAttribute("x1", c.x.toFixed(1));
+    guide.setAttribute("x2", c.x.toFixed(1));
+    guide.setAttribute("visibility", "visible");
+    tip.replaceChildren(
+      el("b", { class: index === bestIdx ? "best" : "" }, panelScore(c.point.score)),
+      el("span", {}, c.point.label));
+    tip.hidden = false;
+    const left = (c.x / width) * rect.width;
+    tip.style.left = `${left}px`;
+    tip.dataset.side = left > rect.width / 2 ? "left" : "right";
+  });
+  svg.addEventListener("pointerleave", hide);
+  svg.addEventListener("pointercancel", hide);
+  return wrap;
 }
 
 function progressLabel(preds) {
@@ -547,9 +594,35 @@ function benchScoreOf(model, suite) {
   return Number.isFinite(s) ? s : null;
 }
 
-function renderLeaderboard(sorted, selectedModel, baselineScores, rerender) {
-  const best = Object.fromEntries(BENCHMARK_ORDER.map(suite => [suite, Math.max(
+// leaderboard cells: the king opens its Hugging Face model, a score opens that king's run
+function kingLink(model) {
+  const repoUrl = hfRepoUrl(model);
+  return repoUrl
+    ? el("a", { href: repoUrl, target: "_blank", rel: "noopener", title: modelName(model) }, modelLabel(model))
+    : el("span", { title: modelName(model) }, modelLabel(model));
+}
+
+function runCell(model, suite, entry, extraClass = "", note = "") {
+  const passes = entry.score_meta || `${entry.pass_count || 1} pass average`;
+  const title = [`${modelLabel(model)} on ${benchmarkLabel(suite)}`, note, passes, "open run and trajectories"]
+    .filter(Boolean).join(" · ");
+  return el("td", { class: `r bench-run-cell${extraClass}` },
+    el("a", { href: runHref(model, entry), title }, panelScore(entry.score)));
+}
+
+// each benchmark's best score among the kings (genesis is the reference, not a king)
+function bestKingScores(sorted) {
+  return Object.fromEntries(BENCHMARK_ORDER.map(suite => [suite, Math.max(
     ...sorted.filter(model => !isGenesis(model)).map(model => benchScoreOf(model, suite) ?? -Infinity))]));
+}
+
+function scoreCell(model, suite, entry, best) {
+  const top = !isGenesis(model) && entry.score === best[suite];
+  return runCell(model, suite, entry, top ? " bench-best" : "", top ? "best king score" : "");
+}
+
+function renderLeaderboard(sorted, selectedModel, baselineScores, rerender) {
+  const best = bestKingScores(sorted);
   const setSort = suite => {
     benchSort = suite;
     localStorage.setItem("benchLeaderboardSort", suite);
@@ -573,47 +646,36 @@ function renderLeaderboard(sorted, selectedModel, baselineScores, rerender) {
   const rows = shown.flatMap(([model, rank], i) => [
     // ranks skipped between the top rows and genesis read as a gap, not as consecutive places
     i > 0 && rank - shown[i - 1][1] > 1
-      ? el("tr", { class: "bench-rank-gap" }, el("td", { colspan: 3 + BENCHMARK_ORDER.length }, "⋯"))
+      ? el("tr", { class: "bench-rank-gap" }, el("td", { colspan: 2 + BENCHMARK_ORDER.length }, "⋯"))
       : null,
     leaderboardRow(model, rank),
   ]).filter(Boolean);
 
   function leaderboardRow(model, rank) {
     const scores = suiteScores(model);
-    const repoUrl = hfRepoUrl(model);
     const genesis = isGenesis(model);
-    return el("tr", {
-      class: ["clickable", genesis ? "bench-genesis-row" : ""].filter(Boolean).join(" "),
-      onClick: e => { if (!e.target.closest("a")) location.href = detailHref(model); },
-    },
+    return el("tr", { class: genesis ? "bench-genesis-row" : "" },
       el("td", { class: "bench-rank" }, String(rank)),
       el("td", { class: "bench-king-col" },
-        el("a", { href: detailHref(model) }, modelLabel(model)),
+        kingLink(model),
         genesis ? el("span", { class: "bench-baseline-tag" }, "baseline") : null),
-      el("td", { class: "model" }, repoUrl
-        ? el("a", { href: repoUrl, target: "_blank", rel: "noopener" }, modelName(model))
-        : el("span", { class: "model-cell" }, modelName(model))),
       BENCHMARK_ORDER.map(suite => {
         const entry = scores[suite];
         if (entry?.score == null) return el("td", { class: "r" }, el("span", { class: "muted-dash" }, "—"));
-        const top = !genesis && entry.score === best[suite];
-        return el("td", {
-          class: `r${top ? " bench-best" : ""}`,
-          title: top ? `best on ${benchmarkLabel(suite)}` : (entry.score_meta || `${entry.pass_count || 1} pass average`),
-        }, panelScore(entry.score));
+        return scoreCell(model, suite, entry, best);
       }));
   }
 
   return el("div", { class: "bench-history" },
     el("div", { class: "bench-leaderboard-cap" },
       el("span", {}, `top ${ranked.length} · by ${benchmarkLabel(benchSort)}`),
-      el("span", { class: "bench-leaderboard-hint" }, "click a benchmark to sort · yellow is the best score")),
+      el("span", { class: "bench-leaderboard-hint" }, "click a benchmark to sort · yellow is the best king score")),
     sorted.length
       ? el("div", { class: "data-table-wrap" },
           el("table", { class: "data-table bench-leaderboard" },
             el("thead", {}, el("tr", {},
               el("th", { class: "bench-rank" }, "#"),
-              el("th", {}, "king"), el("th", {}, "model"),
+              el("th", {}, "king"),
               BENCHMARK_ORDER.map(headCell))),
             el("tbody", {}, rows)))
       : el("div", { class: "bench-history-empty" }, "no benchmark history yet"));
@@ -621,6 +683,7 @@ function renderLeaderboard(sorted, selectedModel, baselineScores, rerender) {
 
 // "all" mode: the full king benchmark history, in reign order, paginated (the classic view).
 function renderKingHistory(sorted, selectedModel, rerender) {
+  const best = bestKingScores(sorted);
   const pages = Math.max(1, Math.ceil(sorted.length / historyPageSize));
   historyPage = Math.min(Math.max(1, historyPage), pages);
   const shown = sorted.slice((historyPage - 1) * historyPageSize, historyPage * historyPageSize);
@@ -634,6 +697,7 @@ function renderKingHistory(sorted, selectedModel, rerender) {
       el("button", { type: "button", disabled: historyPage <= 1, onClick: () => setPage(historyPage - 1) }, "prev"),
       el("span", {}, `page ${historyPage} / ${pages} · ${sorted.length} kings`),
       el("button", { type: "button", disabled: historyPage >= pages, onClick: () => setPage(historyPage + 1) }, "next")),
+    el("span", { class: "bench-leaderboard-hint" }, "yellow is the best king score"),
     el("label", { class: "bench-history-pager-right" }, "rows",
       el("select", { onChange: e => {
         historyPageSize = Number(e.target.value);
@@ -643,20 +707,14 @@ function renderKingHistory(sorted, selectedModel, rerender) {
 
   const rows = shown.map(model => {
     const scores = suiteScores(model);
-    const repoUrl = hfRepoUrl(model);
-    return el("tr", {
-      class: "clickable",
-      onClick: e => { if (!e.target.closest("a")) location.href = detailHref(model); },
-    },
-      el("td", { class: "bench-king-col" },
-        el("a", { href: detailHref(model) }, modelLabel(model))),
-      el("td", { class: "model" }, repoUrl
-        ? el("a", { href: repoUrl, target: "_blank", rel: "noopener" }, modelName(model))
-        : el("span", { class: "model-cell" }, modelName(model))),
+    const reign = reignNumber(model);
+    return el("tr", {},
+      el("td", { class: "bench-rank" }, reign == null ? "—" : String(reign)),
+      el("td", { class: "bench-king-col" }, kingLink(model)),
       BENCHMARK_ORDER.map(suite => {
         const entry = scores[suite];
         if (entry?.score == null) return el("td", { class: "r" }, el("span", { class: "muted-dash" }, "—"));
-        return el("td", { class: "r", title: entry.score_meta || `${entry.pass_count || 1} pass average` }, panelScore(entry.score));
+        return scoreCell(model, suite, entry, best);
       }));
   });
 
@@ -666,7 +724,8 @@ function renderKingHistory(sorted, selectedModel, rerender) {
       ? el("div", { class: "data-table-wrap" },
           el("table", { class: "data-table bench-leaderboard" },
             el("thead", {}, el("tr", {},
-              el("th", {}, "king"), el("th", {}, "model"),
+              el("th", { class: "bench-rank", title: "reign number (genesis is 0)" }, "#"),
+              el("th", {}, "king"),
               BENCHMARK_ORDER.map(suite => el("th", { class: "r" }, benchmarkLabel(suite))))),
             el("tbody", {}, rows)))
       : el("div", { class: "bench-history-empty" }, "no benchmark history yet"));

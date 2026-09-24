@@ -47,8 +47,6 @@ export const RESULTS_MANIFEST_ENDPOINTS = [
 ];
 export const RESULTS_BASE = "./results/v1";
 
-export const DISPLAYED_BENCHMARKS = ["rebench", "verified", "terminalbench2_1", "multilingual"];
-
 export const LLMS_URLS = [
   "./llms.txt",
 ];
