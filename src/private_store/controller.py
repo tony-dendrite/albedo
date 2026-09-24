@@ -493,6 +493,7 @@ async def _reset_for_retry(pool: asyncpg.Pool, deps: Deps, row: asyncpg.Record) 
 
 _BLOCKED_FAULT_CODES = frozenset(
     {
+        "hotkey_reregistered",
         "hotkey_sanity_blocked",
         "hotkey_preeval_blocked",
         "hotkey_already_validated",

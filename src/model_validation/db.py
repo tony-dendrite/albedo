@@ -388,6 +388,25 @@ async def coldkey_for(pool: asyncpg.Pool, hotkey: str) -> str:
         return await conn.fetchval("SELECT coldkey FROM miners WHERE hotkey = $1", hotkey) or ""
 
 
+async def hotkey_reregistered(pool: asyncpg.Pool, hotkey: str) -> bool:
+    async with pool.acquire() as conn:
+        return bool(
+            await conn.fetchval(
+                """
+                SELECT EXISTS(
+                    SELECT 1
+                    FROM model_submissions ms
+                    JOIN chain_commits cc ON cc.id = ms.chain_commit_id
+                    JOIN miners m ON m.hotkey = ms.hotkey
+                    WHERE ms.hotkey = $1
+                      AND cc.block_number < m.registration_block
+                )
+                """,
+                hotkey,
+            )
+        )
+
+
 async def hotkey_validated(pool: asyncpg.Pool, hotkey: str) -> bool:
     async with pool.acquire() as conn:
         return bool(
@@ -444,6 +463,7 @@ async def model_hash_holder(
 
 
 _STRIKE_EXCLUDED_CODES = (
+    "hotkey_reregistered",
     "hotkey_sanity_blocked",
     "hotkey_duplicate_blocked",
     "hotkey_already_validated",

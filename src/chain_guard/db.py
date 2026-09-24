@@ -103,7 +103,6 @@ async def refresh_registration_blocks(
             SET registration_block = s.reg_block
             FROM unnest($1::int[], $2::text[], $3::bigint[]) AS s(uid, hotkey, reg_block)
             WHERE m.hotkey = s.hotkey
-              AND m.uid = s.uid
               AND m.registration_block IS DISTINCT FROM s.reg_block
             """,
             uids,

@@ -273,7 +273,7 @@ class PreEvalRepository:
                           AND state = 'TERMINAL_INVALID'
                           AND fault_class = 'MINER_FAULT'
                           AND fault_code NOT IN (
-                            'hotkey_sanity_blocked', 'hotkey_duplicate_blocked',
+                            'hotkey_reregistered', 'hotkey_sanity_blocked', 'hotkey_duplicate_blocked',
                             'hotkey_already_validated', 'hotkey_preeval_blocked'
                           )
                         """,

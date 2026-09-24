@@ -300,6 +300,20 @@ async def run() -> None:
                 attempt["model_uri"],
             )
 
+            if await db.hotkey_reregistered(pool, attempt["hotkey"]):
+                await db.mark_failed(
+                    pool,
+                    attempt["id"],
+                    fault_class="MINER_FAULT",
+                    fault_code="hotkey_reregistered",
+                    fault_message=(
+                        "hotkey was used before it was deregistered — register a new hotkey"
+                    ),
+                    result_summary={"hotkey": attempt["hotkey"]},
+                )
+                log.info("skip — hotkey re-registered: {}", attempt["hotkey"][:10])
+                continue
+
             sanity_reason = await db.hotkey_sanity_block_reason(pool, attempt["hotkey"])
             if sanity_reason is not None:
                 await db.mark_failed(
