@@ -241,6 +241,30 @@ export function mergePulledScores(data, scoresBySuite) {
   return { ...data, models };
 }
 
+function backfillRuns(data, latest) {
+  const backfills = new Map();
+  for (const model of data?.models || []) {
+    if (!latest || model.id === latest.id || isGenesis(model)) continue;
+    for (const run of model.runs || []) {
+      const progress = run?.distributed_progress || {};
+      const working = (progress.pending || 0) + (progress.running || 0) > 0;
+      if (run?.source === "distributed" && run.partial_score && working && !backfills.has(run.suite)) {
+        backfills.set(run.suite, { model, run });
+      }
+    }
+  }
+  return backfills;
+}
+
+function withoutBackfills(data, backfills) {
+  if (!backfills.size) return data;
+  const partial = new Set([...backfills.values()].map(b => b.run));
+  const models = (data?.models || []).map(model => model.runs?.some(run => partial.has(run))
+    ? { ...model, runs: model.runs.filter(run => !partial.has(run)) }
+    : model);
+  return { ...data, models };
+}
+
 function panelModels(data, liveRunIds = new Set()) {
   const activeProgress = activeProgressByModelSuite(data);
   // A pulled suite queues no job here, so a reign whose only sign of life is its
@@ -482,7 +506,7 @@ function progressLabel(preds) {
   return preds.scoring ? "scoring" : "stalled";
 }
 
-function renderProgress(preds, label) {
+function renderProgress(preds, label, neutral = false) {
   const percent = (preds.ratio * 100).toFixed(1);
   const state = preds.distributed
     ? [`${percent}%`, preds.status, `${preds.completed} completed`, preds.errored ? `${preds.errored} errored` : null]
@@ -492,12 +516,12 @@ function renderProgress(preds, label) {
       ? [`${percent}%`, "awaiting score"]
       : [`${percent}%`, `idle ${fmtRelative(preds.updatedAt)}`];
   return el("div", { class: "bench-tile-progress" },
-    el("div", { class: preds.fresh ? "bench-tile-progress-bar live" : "bench-tile-progress-bar" },
+    el("div", { class: preds.fresh && !neutral ? "bench-tile-progress-bar live" : "bench-tile-progress-bar" },
       el("i", { style: `width:${percent}%` })),
     el("div", { class: "bench-tile-progress-note" }, [label, ...state].filter(Boolean).join(" · ")));
 }
 
-function renderTile(model, suite, sorted, baseline, activity, preds) {
+function renderTile(model, suite, sorted, baseline, activity, preds, backfill = null) {
   const entry = suiteScores(model)[suite];
   const distributed = distributedRunFor(model, suite);
   const scored = entry?.score != null;
@@ -515,6 +539,9 @@ function renderTile(model, suite, sorted, baseline, activity, preds) {
     ? [runningLabel(running, activity.labelByRepo), progressNote(running)].filter(Boolean).join(" · ")
     : queued.length ? `${queued.length} pending` : "";
   const live = Boolean(running) || Boolean(progress?.fresh);
+  // the benchmark is busy with an older king: say so, with a neutral bar, instead of "idle"
+  const backfilling = !live && !progress && backfill ? backfill : null;
+  const backfillProgress = backfilling ? distributedProgress(backfilling.run) : null;
 
   const chartSvgElement = el("div", { class: "bench-tile-chart" }, renderSpark(sorted, suite, baseline?.score));
   let chartWidth = 0;
@@ -533,7 +560,8 @@ function renderTile(model, suite, sorted, baseline, activity, preds) {
   },
     el("div", { class: "bench-tile-head" },
       el("div", { class: "bench-tile-name" }, benchmarkLabel(suite)),
-      el("span", { class: live ? "bench-tile-activity live" : "bench-tile-activity" }, live ? "running" : "idle")),
+      el("span", { class: live ? "bench-tile-activity live" : "bench-tile-activity" },
+        live ? "running" : backfilling ? "backfilling" : "idle")),
     el("div", { class: "bench-tile-main" },
       el("div", { class: "bench-tile-score-wrap" },
         el(href ? "a" : "span", { class: "bench-tile-score", href },
@@ -551,7 +579,9 @@ function renderTile(model, suite, sorted, baseline, activity, preds) {
     el("div", { class: "bench-tile-status" },
       el("span", {}, genesis.label),
       el("span", { class: `bench-delta ${genesis.cls}`, title: "delta vs genesis" }, genesis.delta)),
-    progress ? renderProgress(progress, progress.kingLabel || modelLabel(model)) : runNote ? el("div", { class: "bench-tile-run-note" }, runNote) : null);
+    progress ? renderProgress(progress, progress.kingLabel || modelLabel(model))
+      : backfillProgress ? renderProgress(backfillProgress, modelLabel(backfilling.model), true)
+      : runNote ? el("div", { class: "bench-tile-run-note" }, runNote) : null);
 }
 
 function runningLabel(item, labelByRepo) {
@@ -735,6 +765,8 @@ export function renderBenchmarks(container, metaNode, data, scoresBySuite = null
   applyBenchmarkRegistry(resultsManifest);
   data = mergeDistributedResults(mergePulledScores(data, scoresBySuite), resultsManifest);
   const liveRunIds = new Set([...(liveBySuite?.values() || [])].map(live => live?.runId).filter(Boolean));
+  const backfills = backfillRuns(data, panelModels(data, liveRunIds).selected);
+  data = withoutBackfills(data, backfills);
   const { models, sorted, selected } = panelModels(data, liveRunIds);
   if (!models.length) {
     mount(container, el("div", { class: "empty" }, "no benchmark data yet."));
@@ -776,7 +808,7 @@ export function renderBenchmarks(container, metaNode, data, scoresBySuite = null
             `${done}/${BENCHMARK_ORDER.length} scores · ${modelLabel(selected)}`))),
       el("div", { class: "bench-tile-grid" }, BENCHMARK_ORDER.map(suite =>
         renderTile(selected, suite, sorted, baselineScores[suite], activity.get(suite),
-          predsBySuite.get(suite) || null))),
+          predsBySuite.get(suite) || null, backfills.get(suite)))),
       benchMode === "all"
         ? renderKingHistory(sorted, selected, rerender)
         : renderLeaderboard(sorted, selected, baselineScores, rerender)));
