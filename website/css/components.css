@@ -872,7 +872,7 @@ a.bench-tile-score:hover { color: var(--color-accent); }
   justify-content: space-between;
   gap: 6px;
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--color-fg-3);

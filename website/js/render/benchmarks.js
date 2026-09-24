@@ -357,11 +357,11 @@ function panelScore(value) {
 }
 
 function baselineComparison(entry, baseline) {
-  if (baseline?.score == null) return { label: "genesis —", delta: "—", cls: "" };
-  if (entry?.score == null) return { label: `genesis ${panelScore(baseline.score)}`, delta: "—", cls: "" };
+  if (baseline?.score == null) return { value: "—", delta: "—", cls: "" };
+  if (entry?.score == null) return { value: panelScore(baseline.score), delta: "—", cls: "" };
   const delta = (Number(entry.score) - Number(baseline.score)) * 100;
   return {
-    label: `genesis ${panelScore(baseline.score)}`,
+    value: panelScore(baseline.score),
     delta: `${delta > 0 ? "+" : ""}${delta.toFixed(1)} pp`,
     cls: delta > 0 ? "up" : delta < 0 ? "down" : "flat",
   };
@@ -509,12 +509,12 @@ function progressLabel(preds) {
 function renderProgress(preds, label, neutral = false) {
   const percent = (preds.ratio * 100).toFixed(1);
   const state = preds.distributed
-    ? [`${percent}%`, preds.status, `${preds.completed} completed`, preds.errored ? `${preds.errored} errored` : null]
+    ? [preds.status, `${preds.completed} completed`, preds.errored ? `${preds.errored} errored` : null]
     : preds.fresh
-      ? [`${percent}%`, "generating"]
+      ? ["generating"]
     : preds.scoring
-      ? [`${percent}%`, "awaiting score"]
-      : [`${percent}%`, `idle ${fmtRelative(preds.updatedAt)}`];
+      ? ["awaiting score"]
+      : [`idle ${fmtRelative(preds.updatedAt)}`];
   return el("div", { class: "bench-tile-progress" },
     el("div", { class: preds.fresh && !neutral ? "bench-tile-progress-bar live" : "bench-tile-progress-bar" },
       el("i", { style: `width:${percent}%` })),
@@ -577,7 +577,7 @@ function renderTile(model, suite, sorted, baseline, activity, preds, backfill = 
         el("span", {}, "since last"))),
     chartSvgElement,
     el("div", { class: "bench-tile-status" },
-      el("span", {}, genesis.label),
+      el("span", { class: "bench-genesis-value" }, `genesis ${genesis.value}`),
       el("span", { class: `bench-delta ${genesis.cls}`, title: "delta vs genesis" }, genesis.delta)),
     progress ? renderProgress(progress, progress.kingLabel || modelLabel(model))
       : backfillProgress ? renderProgress(backfillProgress, modelLabel(backfilling.model), true)
