@@ -58,6 +58,12 @@ def _infra(code: str, msg: str) -> Outcome:
     return Outcome("failed", "INFRA_FAULT", code, msg, True, {})
 
 
+def _blocked_by_duplicate(prior: str) -> str:
+    if prior.startswith(("duplicate (", "exact duplicate")):
+        return f"hotkey blocked from further submissions — prior {prior}"
+    return f"hotkey blocked from further submissions — prior duplicate: {prior}"
+
+
 def _ban_suffix(fails: int, max_fails: int) -> str:
     left = max(0, max_fails - fails)
     if left > 0:
@@ -213,13 +219,15 @@ async def _finalize(pool, attempt, outcome: Outcome) -> None:
     if outcome.state == "done":
         try:
             await db.mark_done(pool, attempt["id"], outcome.result_summary)
-        except asyncpg.UniqueViolationError as exc:
+        except asyncpg.UniqueViolationError:
             await db.mark_failed(
                 pool,
                 attempt["id"],
                 fault_class="MINER_FAULT",
                 fault_code="duplicate",
-                fault_message=f"model_hash already belongs to another submission: {exc}",
+                fault_message=(
+                    "exact duplicate: this model's digest already belongs to another submission"
+                ),
                 result_summary=outcome.result_summary,
             )
             log.warning("duplicate model_hash on mark_done — {}", attempt["model_uri"])
@@ -336,7 +344,7 @@ async def run() -> None:
                     attempt["id"],
                     fault_class="MINER_FAULT",
                     fault_code="hotkey_duplicate_blocked",
-                    fault_message=f"hotkey blocked from further submissions — prior duplicate: {dup_reason}",  # noqa: E501
+                    fault_message=_blocked_by_duplicate(dup_reason),
                     result_summary={"hotkey": attempt["hotkey"], "duplicate_reason": dup_reason},
                 )
                 log.info("skip — hotkey duplicate-blocked: {}", attempt["hotkey"][:10])
@@ -378,10 +386,7 @@ async def run() -> None:
                     pool, attempt["commit_hash"], attempt["submission_id"]
                 )
             if holder is not None:
-                reason = (
-                    f"exact duplicate: digest {attempt['commit_hash']} already submitted "
-                    f"by hotkey {holder['hotkey']} ({holder['model_uri']})"
-                )
+                reason = f"exact duplicate of hotkey {holder['hotkey']}: identical model digest"
                 await db.mark_failed(
                     pool,
                     attempt["id"],

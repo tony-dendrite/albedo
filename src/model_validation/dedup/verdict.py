@@ -99,7 +99,14 @@ def decide(
         metrics["identity_frac"] = identity_frac
 
     if dist[a] < th.copy_rel:
-        return Verdict("REJECT", "COPY", a, f"sketch identical to {a}", notes, metrics)
+        return Verdict(
+            "REJECT",
+            "COPY",
+            a,
+            f"sketch identical (rel_dist {dist[a]:.1e} < {th.copy_rel:.1e})",
+            notes,
+            metrics,
+        )
 
     sp = spectral(cand, bank[a])
     ss = sample_stats(cand, bank[a])
@@ -133,7 +140,7 @@ def decide(
             "REJECT",
             "NOISE-COPY",
             a,
-            f"delta to {a} is spectral bulk (F_struct {sp['F']:.3f} < {th.f_noise})",
+            f"delta is spectral bulk (F_struct {sp['F']:.3f} < {th.f_noise})",
             notes,
             metrics,
         )
@@ -143,21 +150,21 @@ def decide(
             "REJECT",
             "NOISED-COPY",
             a,
-            f"embeddings changed {sp['embed_ratio']:.2f}x as much as attention/MLP vs {a} "
-            "(dense noise, not training)",
+            f"embeddings changed {sp['embed_ratio']:.2f}x as much as attention/MLP "
+            f"(> {th.embed_ratio_noise}; dense noise, not training)",
             notes,
             metrics,
         )
 
     if cf and cf["resid"] < th.linear_resid and max(cf["alpha"]) > th.alpha_min:
         used = [(b, al) for b, al in zip(cf["partners"], cf["alpha"]) if al > th.alpha_min]
-        terms = " ".join(f"+{al:.2f}*{b}" for b, al in used)
+        terms = " + ".join(f"{al:.2f}*{b}" for b, al in used)
         return Verdict(
             "REJECT",
             "LINEAR-COMBO",
             a,
-            f"blend of banked models: {a} {terms} "
-            f"(resid {cf['resid']:.3f} on {len(used)} of {len(cf['partners'])} partners)",
+            f"blend with {terms} (resid {cf['resid']:.3f} < {th.linear_resid} on "
+            f"{len(used)} of {len(cf['partners'])} partners)",
             notes,
             metrics,
         )
@@ -167,8 +174,7 @@ def decide(
             "REJECT",
             "TRIVIAL-EDIT",
             a,
-            f"structured change vs {a} is {sp['rel_struct']:.4f} of weight norm "
-            f"(< {th.rel_trivial})",
+            f"structured change is {sp['rel_struct']:.4f} of weight norm (< {th.rel_trivial})",
             notes,
             metrics,
         )
@@ -178,8 +184,8 @@ def decide(
             "REJECT",
             "SPARSE-EDIT",
             a,
-            f"delta to {a} touches {ss['density']:.1%} of sampled weights "
-            f"(kurtosis {ss['kurtosis']:.0f})",
+            f"delta touches {ss['density']:.1%} of sampled weights "
+            f"(min {th.dens_min:.1%}), kurtosis {ss['kurtosis']:.0f} (max {th.kurt_max:.0f})",
             notes,
             metrics,
         )

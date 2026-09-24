@@ -68,6 +68,7 @@ def verdict(cand, identity=None):
 def test_exact_copy_is_rejected():
     v = verdict({n: (s.copy(), wn, x.copy()) for n, (s, wn, x) in KING_A.items()})
     assert v.rejected and v.reason == "COPY" and v.ancestor == "king_a"
+    assert v.ancestor not in v.message
 
 
 def test_iid_noise_on_king_is_noise_copy():
@@ -82,6 +83,7 @@ def test_iid_noise_on_king_is_noise_copy():
     }
     v = verdict(cand)
     assert v.rejected and v.reason == "NOISE-COPY" and v.ancestor == "king_a"
+    assert v.ancestor not in v.message
 
 
 def test_merge_of_banked_models_is_linear_combo():
@@ -92,7 +94,7 @@ def test_merge_of_banked_models_is_linear_combo():
     i = lin["partners"].index("root")
     assert abs(lin["alpha"][i] - 0.35) < 0.02
     assert lin["resid"] < TH.linear_resid
-    assert "+0.35*root" in v.message and f"of {len(lin['partners'])} partners" in v.message
+    assert "0.35*root" in v.message and f"of {len(lin['partners'])} partners" in v.message
 
 
 def test_rescaled_delta_is_linear_combo():
@@ -126,12 +128,14 @@ def test_sparse_edit_is_rejected():
         cand[n] = (s + lowrank(rng, 4, 0.3) if n in BODY else s, wn, x + d)
     v = verdict(cand)
     assert v.rejected and v.reason == "SPARSE-EDIT"
+    assert v.ancestor not in v.message
 
 
 def test_trivial_structured_edit_is_rejected():
     cand = train(KING_A, 13, scale=0.002, rank=4)
     v = verdict(cand)
     assert v.rejected and v.reason == "TRIVIAL-EDIT"
+    assert v.ancestor not in v.message
 
 
 def test_real_training_on_king_passes_as_trained():

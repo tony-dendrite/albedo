@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass
 
 import torch
@@ -100,7 +101,7 @@ def _own_copy(doc: dict, coldkey: str) -> Verdict | None:
             "REJECT",
             "OWN-COPY",
             hit["model_uri"],
-            "identical weights to the miner's own accepted model (tensors_hash)",
+            "identical weights (tensors_hash)",
             metrics={"ancestor_hotkey": hit.get("hotkey", "")},
         )
     near = bank.nearest_own(doc, coldkey, 3)
@@ -116,7 +117,7 @@ def _own_copy(doc: dict, coldkey: str) -> Verdict | None:
                 "REJECT",
                 "OWN-COPY",
                 uri,
-                f"sketch identical to the miner's own accepted model (rel_dist {d:.1e})",
+                f"sketch identical (rel_dist {d:.1e} < {th.copy_rel:.1e})",
                 metrics={"ancestor_hotkey": odoc.get("hotkey", ""), "rel_dist": d},
             )
     return None
@@ -182,6 +183,7 @@ def run(
     )
     verdict.metrics["opensearch_nearest"] = near
     verdict.metrics["ancestor_hotkey"] = docs.get(verdict.ancestor, {}).get("hotkey", "")
+    verdict.metrics["hotkeys_by_model"] = {m: d.get("hotkey", "") for m, d in docs.items()}
     try:
         bank.put_doc(
             doc,
@@ -194,10 +196,11 @@ def run(
             verdict=verdict, doc=doc, infra_error=f"dedup opensearch index failed: {exc}"
         )
     log.info(
-        "dedup verdict {} — {} {}: {}",
+        "dedup verdict {} — {} {} vs {}: {}",
         model_uri,
         verdict.status,
         verdict.reason or "",
+        verdict.ancestor,
         verdict.message,
     )
     return GateResult(verdict=verdict, doc=doc)
@@ -244,8 +247,39 @@ def public_summary(res: GateResult) -> dict:
     return out
 
 
+_KING_REPO = re.compile(r"albedo-qwen3\.6-35b-king-([a-z]+)$", re.IGNORECASE)
+
+
+def model_label(model_uri: str, hotkey: str = "") -> str:
+    """How a fault message names a banked model: genesis, a king, or the uploader's full hotkey."""
+    from albedo_config.chain_spec import SEED_REPO
+
+    repo = (model_uri or "").removeprefix("hf://").partition("@")[0]
+    king = _KING_REPO.search(repo)
+    if (SEED_REPO and repo == SEED_REPO) or (king and king.group(1).lower() == "genesis"):
+        return "genesis"
+    if king:
+        return f"ALBEDO-{king.group(1).upper()}"
+    return f"hotkey {hotkey}" if hotkey else "another miner's model"
+
+
 def public_message(res: GateResult) -> str:
+    """The miner-facing reason: what the model duplicates, named instead of its storage path,
+    with the measured value and threshold that decided it."""
     v = res.verdict
     if v is None:
         return ""
-    return f"duplicate of {v.ancestor}: {v.reason} — {v.message}"
+    hotkeys = dict(v.metrics.get("hotkeys_by_model") or {})
+    if v.ancestor:
+        hotkeys[v.ancestor] = (
+            v.metrics.get("ancestor_hotkey")
+            or (res.exact_of or {}).get("hotkey", "")
+            or hotkeys.get(v.ancestor, "")
+        )
+    detail = v.message
+    for uri in sorted(filter(None, hotkeys), key=len, reverse=True):
+        detail = detail.replace(uri, model_label(uri, hotkeys[uri]))
+    who = model_label(v.ancestor or "", hotkeys.get(v.ancestor, ""))
+    if v.reason == "OWN-COPY":
+        who = f"your own model from {who}"
+    return f"duplicate ({v.reason}) of {who}: {detail}"

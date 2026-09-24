@@ -247,3 +247,57 @@ def test_fault_code_bans_the_hotkey_for_every_reason_but_own_copy():
     for reason in sorted(ALL_REASONS - {"OWN-COPY"}):
         assert gate.fault_code(reason) == "duplicate"  # the code that blocks a hotkey forever
     assert gate.fault_code("OWN-COPY") == "duplicate_own"
+
+
+def test_model_label_names_genesis_kings_and_miners():
+    from albedo_config.chain_spec import SEED_REPO
+
+    assert gate.model_label(f"{SEED_REPO}@sha256:abc") == "genesis"
+    assert gate.model_label("dendriteholdings/albedo-qwen3.6-35b-king-genesis@abc") == "genesis"
+    assert gate.model_label("dendriteholdings/albedo-qwen3.6-35b-king-cvi@abc") == "ALBEDO-CVI"
+    assert gate.model_label("s3://bucket/models/registrations/x@sha256:y", "5Hk") == "hotkey 5Hk"
+    assert (
+        gate.model_label("s3://bucket/models/registrations/x@sha256:y") == "another miner's model"
+    )
+
+
+def test_public_message_names_every_model_and_keeps_the_measurement():
+    miner = "s3://bucket/models/attempts/rid/a3@sha256:abc"
+    king = "dendriteholdings/albedo-qwen3.6-35b-king-cxxv@0123"
+    v = Verdict(
+        "REJECT",
+        "LINEAR-COMBO",
+        miner,
+        f"blend with 0.62*{king} (resid 0.018 < 0.2 on 2 of 3 partners)",
+        [],
+        {"ancestor_hotkey": "5Full", "hotkeys_by_model": {miner: "5Full", king: ""}},
+    )
+    message = gate.public_message(gate.GateResult(verdict=v))
+    assert message == (
+        "duplicate (LINEAR-COMBO) of hotkey 5Full: blend with 0.62*ALBEDO-CXXV "
+        "(resid 0.018 < 0.2 on 2 of 3 partners)"
+    )
+    assert "s3://" not in message and "@" not in message and message.count("5Full") == 1
+
+
+def test_own_copy_message_says_it_is_the_miners_own_model():
+    v = Verdict(
+        "REJECT",
+        "OWN-COPY",
+        "s3://b/m@sha256:c",
+        "identical weights (tensors_hash)",
+        [],
+        {"ancestor_hotkey": "5Mine"},
+    )
+    assert gate.public_message(gate.GateResult(verdict=v)) == (
+        "duplicate (OWN-COPY) of your own model from hotkey 5Mine: identical weights (tensors_hash)"
+    )
+
+
+def test_blocked_message_reuses_a_new_style_prior_without_repeating_duplicate():
+    from model_validation import validate_worker as vw
+
+    new = "duplicate (NOISE-COPY) of hotkey 5X: delta to hotkey 5X is spectral bulk (F 0.04 < 0.1)"
+    assert vw._blocked_by_duplicate(new) == f"hotkey blocked from further submissions — prior {new}"
+    old = "duplicate of s3://b/m@sha256:c: NOISE-COPY — delta to s3://b/m is spectral bulk"
+    assert vw._blocked_by_duplicate(old).endswith(f"— prior duplicate: {old}")
