@@ -250,11 +250,16 @@ _ACTION_BLOCK_RE = re.compile(
 )
 
 
-def action_blocks(text: str) -> list[str]:
+def action_scripts(text: str) -> list[str]:
+    """The commands a turn's action blocks hold, as written: what the harness would run."""
     return [
-        " ".join((m.group(1) if m.group(1) is not None else m.group(3)).split())
+        m.group(1) if m.group(1) is not None else m.group(3)
         for m in _ACTION_BLOCK_RE.finditer(text or "")
     ]
+
+
+def action_blocks(text: str) -> list[str]:
+    return [" ".join(script.split()) for script in action_scripts(text)]
 
 
 def unusable_turn(text: str, *, truncated: bool = False) -> str:
